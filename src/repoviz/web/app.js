@@ -1,0 +1,1494 @@
+/* repoviz web application.
+ *
+ * Runs in two modes with the same code:
+ *   - live:   data comes from the local analysis server (/api/*)
+ *   - static: data is embedded in the page (<script id="repoviz-data">)
+ *
+ * All diagrams are generated as Mermaid text from the normalized model
+ * (see views.py / mermaid.py for the Python twin of these rules) and
+ * rendered with the vendored Mermaid library -- no network access needed.
+ */
+(function () {
+  "use strict";
+
+  // ------------------------------------------------------------------ utils
+  const $ = (sel, root) => (root || document).querySelector(sel);
+  const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+
+  function h(tag, attrs, ...children) {
+    const el = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "class") el.className = v;
+        else if (k === "text") el.textContent = v;
+        else if (k === "html") el.innerHTML = v; // only used with trusted, static strings
+        else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+        else if (k === "dataset") Object.assign(el.dataset, v);
+        else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+        else if (v === true) el.setAttribute(k, "");
+        else el.setAttribute(k, String(v));
+      }
+    }
+    for (const c of children.flat(Infinity)) {
+      if (c === null || c === undefined || c === false) continue;
+      el.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
+    }
+    return el;
+  }
+  const push = (map, key, value) => { if (!map.has(key)) map.set(key, []); map.get(key).push(value); };
+  const tagsOf = (n) => (n && n.tags) || [];
+  const hasTag = (n, t) => tagsOf(n).includes(t);
+  const meta = (n) => (n && n.metadata) || {};
+  const fmtTime = (iso) => { if (!iso) return ""; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(); };
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const storage = {
+    get(key, fallback) { try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch (e) { return fallback; } },
+    set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ } },
+  };
+  function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+  function download(name, text, type) {
+    const a = h("a", { href: URL.createObjectURL(new Blob([text], { type })), download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  // ------------------------------------------------------------- data layer
+  async function readEmbedded() {
+    const el = document.getElementById("repoviz-data");
+    if (!el) return null;
+    const enc = el.getAttribute("data-encoding") || "json";
+    const raw = el.textContent;
+    if (enc === "json") return JSON.parse(raw);
+    if (enc === "gzip+base64") {
+      if (typeof DecompressionStream === "undefined") throw new Error("This browser cannot decompress the embedded report data (DecompressionStream is unavailable).");
+      const bytes = Uint8Array.from(atob(raw.trim()), (c) => c.charCodeAt(0));
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+      return JSON.parse(await new Response(stream).text());
+    }
+    throw new Error("Unknown data encoding " + enc);
+  }
+
+  class StaticApi {
+    constructor(data) { this.data = data; this.live = false; }
+    async bundle() { return this.data; }
+    async comparison(id) {
+      const c = this.data.comparisons.find((x) => x.id === id) || this.data.comparisons[0];
+      return c;
+    }
+    async activity() {
+      const a = this.data.activity;
+      if (a && !a.diff && a.diff_ref) {
+        const c = this.data.comparisons.find((x) => x.id === a.diff_ref);
+        if (c) a.diff = c.diff;
+      }
+      return a;
+    }
+  }
+
+  class LiveApi {
+    constructor() { this.live = true; }
+    async get(path) {
+      const r = await fetch(path, { headers: { Accept: "application/json" } });
+      const body = await r.json().catch(() => ({ error: r.statusText }));
+      if (!r.ok) throw new Error(body.error || r.statusText);
+      return body;
+    }
+    async post(path, payload) {
+      const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Repoviz": "1" }, body: JSON.stringify(payload || {}) });
+      const body = await r.json().catch(() => ({ error: r.statusText }));
+      if (!r.ok) throw new Error(body.error || r.statusText);
+      return body;
+    }
+    bundle() { return this.get("/api/bundle"); }
+    comparison(params) { return this.get("/api/diff?" + new URLSearchParams(params).toString()); }
+    activity() { return this.get("/api/activity"); }
+    snapshot(rev) { return this.get("/api/snapshot?" + new URLSearchParams({ rev }).toString()); }
+    sessionStart(label) { return this.post("/api/session/start", { label }); }
+    sessionEnd() { return this.post("/api/session/end", {}); }
+  }
+
+  // ---------------------------------------------------------------- indexes
+  function buildIndex(nodes, edges, kind) {
+    const idx = { kind, nodes: new Map(), edges, out: new Map(), inn: new Map(), children: new Map(), edgeById: new Map() };
+    for (const n of nodes) idx.nodes.set(n.id, n);
+    for (const n of nodes) if (n.parent_id) push(idx.children, n.parent_id, n.id);
+    for (const e of edges) { push(idx.out, e.source_id, e); push(idx.inn, e.target_id, e); idx.edgeById.set(e.id, e); }
+    return idx;
+  }
+  function indexSnapshot(s) {
+    return buildIndex([...s.components, ...s.modules, ...s.symbols], [...s.dependency_edges, ...s.call_edges], "snapshot");
+  }
+  function indexDiff(d) { return buildIndex(d.nodes, d.edges, "diff"); }
+  function rootOf(idx) {
+    for (const n of idx.nodes.values()) if (n.component_type === "repository") return n.id;
+    return null;
+  }
+
+  // ---------------------------------------------------------------- theme
+  let THEME = null;
+  const icon = (n) => {
+    if (!n) return "";
+    if (hasTag(n, "test") && n.category !== "symbol") return "🧪";
+    const i = THEME.icons[n.component_type];
+    if (i) return i;
+    return hasTag(n, "entry-point") ? "🚀" : "";
+  };
+  function kindOf(n) {
+    if (hasTag(n, "external")) return "external";
+    if (hasTag(n, "unsupported") || meta(n).dependency_details) return "structural";
+    if (n.category === "module" || n.component_type === "module" || n.component_type === "file") return "module";
+    if (hasTag(n, "component") || hasTag(n, "project") || n.component_type === "repository") return "component";
+    return "package";
+  }
+  const CONTAINERS = new Set(["directory", "package", "namespace-package", "repository", "project", "workspace-member", "workspace"]);
+
+  // ------------------------------------------------------- graph algorithms
+  function scc(nodes, adj) {
+    let index = 0; const idx = new Map(), low = new Map(), onStack = new Set(), stack = [], out = [];
+    for (const root of nodes) {
+      if (idx.has(root)) continue;
+      const work = [[root, (adj.get(root) || [])[Symbol.iterator]()]];
+      idx.set(root, index); low.set(root, index); index++; stack.push(root); onStack.add(root);
+      while (work.length) {
+        const [v, it] = work[work.length - 1];
+        let advanced = false;
+        for (let r = it.next(); !r.done; r = it.next()) {
+          const w = r.value;
+          if (!idx.has(w)) {
+            idx.set(w, index); low.set(w, index); index++; stack.push(w); onStack.add(w);
+            work.push([w, (adj.get(w) || [])[Symbol.iterator]()]); advanced = true; break;
+          } else if (onStack.has(w)) low.set(v, Math.min(low.get(v), idx.get(w)));
+        }
+        if (advanced) continue;
+        work.pop();
+        if (work.length) { const p = work[work.length - 1][0]; low.set(p, Math.min(low.get(p), low.get(v))); }
+        if (low.get(v) === idx.get(v)) {
+          const comp = []; let w;
+          do { w = stack.pop(); onStack.delete(w); comp.push(w); } while (w !== v);
+          out.push(comp);
+        }
+      }
+    }
+    return out;
+  }
+  function cyclePairs(pairsIterable) {
+    const pairs = [...pairsIterable]; // may be a one-shot Map iterator; it is traversed twice below
+    const adj = new Map(), nodes = new Set();
+    for (const key of pairs) { const [s, t] = key.split("\u0000"); push(adj, s, t); nodes.add(s); nodes.add(t); }
+    const member = new Map(); let i = 0;
+    for (const comp of scc([...nodes].sort(), adj)) { if (comp.length > 1) { for (const n of comp) member.set(n, i); } i++; }
+    const res = new Set();
+    for (const key of pairs) {
+      const [s, t] = key.split("\u0000");
+      if (s === t || (member.has(s) && member.get(s) === member.get(t))) res.add(key);
+    }
+    return { pairs: res, components: [...new Set(member.values())].map((c) => [...member].filter(([, v]) => v === c).map(([k]) => k)) };
+  }
+
+  // --------------------------------------------------------- aggregation
+  function makeGrouper(idx, level, includeExternal) {
+    const memo = new Map();
+    const moduleOf = (id) => { let n = idx.nodes.get(id); while (n && n.category === "symbol" && n.parent_id) n = idx.nodes.get(n.parent_id); return n; };
+    return function group(id) {
+      if (memo.has(id)) return memo.get(id);
+      let r = null;
+      if (level === "symbol") {
+        const n0 = idx.nodes.get(id);
+        r = n0 && !(hasTag(n0, "external") && !includeExternal) ? id : null;
+      } else {
+        const n = moduleOf(id);
+        if (!n) r = null;
+        else if (hasTag(n, "external")) r = includeExternal ? n.id : null;
+        else if (level === "module") r = n.id;
+        else if (level === "package") r = n.category === "module" && n.parent_id ? n.parent_id : n.id;
+        else if (level === "component") r = meta(n).component_id || n.id;
+        else r = meta(n).project_id || n.id;
+        if (r && !idx.nodes.has(r)) r = n ? n.id : null;
+      }
+      memo.set(id, r);
+      return r;
+    };
+  }
+
+  /* Pick the coarsest level that still shows some structure (small repositories have few components). */
+  function autoLevel(build, o, levels) {
+    let last = null;
+    for (const level of levels) {
+      last = build(Object.assign({}, o, { level }));
+      last.level = level;
+      if (last.nodes.length >= 4) return last;
+    }
+    return last;
+  }
+
+  function sublabel(n) { return [n.component_type, n.language].filter(Boolean).join(" · "); }
+  function displayName(n) { return n.qualified_name || n.name || n.id; }
+
+  /* Changes view (mirror of views.changes_view). */
+  function changesView(di, o) {
+    const rels = new Set(o.relationships);
+    const status = new Map();
+    for (const n of di.nodes.values()) {
+      let st = n.status;
+      if (o.hideCosmetic && st === "modified" && (n.change_reasons || []).join() === "formatting or comments only") st = "unchanged";
+      status.set(n.id, st);
+    }
+    const group = makeGrouper(di, o.level, o.external);
+    const base = new Map(), target = new Map(), changedPairs = new Set(), relOf = new Map(), under = new Map();
+    for (const e of di.edges) {
+      if (!e.direct || !rels.has(e.relationship)) continue;
+      if (!o.external && e.metadata && e.metadata.external) continue;
+      const s = group(e.source_id), t = group(e.target_id);
+      if (!s || !t || s === t) continue;
+      const key = s + "\u0000" + t;
+      if (!relOf.has(key)) relOf.set(key, e.relationship);
+      push(under, key, e.id);
+      if (e.status !== "added") base.set(key, (base.get(key) || 0) + e.occurrences);
+      if (e.status !== "removed") target.set(key, (target.get(key) || 0) + e.occurrences);
+      if (e.status !== "unchanged") changedPairs.add(key);
+    }
+    const bc = cyclePairs(base.keys()).pairs, tc = cyclePairs(target.keys()).pairs;
+    const edges = [];
+    for (const key of [...new Set([...base.keys(), ...target.keys()])].sort()) {
+      const inB = base.has(key), inT = target.has(key);
+      const st = inT && !inB ? "added" : inB && !inT ? "removed" : changedPairs.has(key) ? "modified" : "unchanged";
+      const cyc = st === "removed" ? bc.has(key) : tc.has(key);
+      const [s, t] = key.split("\u0000");
+      edges.push({ source: s, target: t, status: st, cycle: cyc, cycleIntroduced: cyc && !bc.has(key) && st !== "removed",
+        count: target.get(key) || base.get(key) || 1, relationship: relOf.get(key), underlying: under.get(key) });
+    }
+    const groupStatus = new Map();
+    for (const [id, n] of di.nodes) {
+      if (n.category === "symbol" || CONTAINERS.has(n.component_type)) continue;
+      const g = group(id);
+      if (g && !groupStatus.has(g)) groupStatus.set(g, status.get(g) || "unchanged");
+    }
+    for (const e of edges) for (const x of [e.source, e.target]) if (!groupStatus.has(x)) groupStatus.set(x, status.get(x) || "unchanged");
+    if (o.level !== "module" && o.level !== "symbol") {
+      for (const [id, st] of status) {
+        const n = di.nodes.get(id);
+        if (st === "unchanged" || n.category === "symbol") continue;
+        const g = group(id);
+        if (g && g !== id && groupStatus.get(g) === "unchanged") groupStatus.set(g, "modified");
+      }
+    }
+    const changed = new Set([...groupStatus].filter(([, st]) => st !== "unchanged").map(([g]) => g));
+    for (const e of edges) if (e.status !== "unchanged") { changed.add(e.source); changed.add(e.target); }
+    let visible, hiddenNeighbors = 0;
+    if (o.scope === "all") visible = new Set(groupStatus.keys());
+    else {
+      visible = new Set(changed);
+      if (o.scope === "neighbors") {
+        // Unchanged neighbours, strongest first; hubs can have hundreds, so cap and summarise the rest.
+        const weight = new Map();
+        for (const e of edges) {
+          for (const [a, b] of [[e.source, e.target], [e.target, e.source]]) {
+            if (changed.has(a) && !changed.has(b)) weight.set(b, (weight.get(b) || 0) + e.count + (e.status !== "unchanged" ? 1e6 : 0));
+          }
+        }
+        const ranked = [...weight].sort((x, y) => y[1] - x[1]);
+        const limit = o.neighborLimit || 25;
+        ranked.slice(0, limit).forEach(([id]) => visible.add(id));
+        hiddenNeighbors = Math.max(0, ranked.length - limit);
+      }
+    }
+    const withEdges = new Set(edges.flatMap((e) => [e.source, e.target]));
+    visible = [...visible].filter((v) => {
+      const n = di.nodes.get(v);
+      if (!n) return false;
+      if (!o.external && hasTag(n, "external")) return false;
+      if (o.level === "module" && n.category !== "module" && !withEdges.has(v) && CONTAINERS.has(n.component_type)) return false;
+      if (o.level === "module" && n.category === "symbol") return false;
+      return true;
+    });
+    const view = finishView(di, visible, edges, changed, o, (v) => groupStatus.get(v) || "unchanged", "diff",
+      `Changes at ${o.level} level`);
+    if (hiddenNeighbors) {
+      view.nodes.push({ id: "rv_more_neighbors", label: `+${hiddenNeighbors} more unchanged neighbours`, sublabel: "choose Show: Everything to list them",
+        status: "unchanged", kind: "structural", shape: "stadium", parent: null, icon: "…", reasons: [] });
+    }
+    return view;
+  }
+
+  function finishView(idx, visible, edges, priority, o, statusOf, mode, title) {
+    visible.sort((a, b) => (priority.has(b) - priority.has(a)) || displayName(idx.nodes.get(a)).localeCompare(displayName(idx.nodes.get(b))));
+    const keep = new Set(visible.slice(0, o.maxNodes));
+    const view = { title, direction: o.direction || "LR", mode, nodes: [], edges: [], subgraphs: new Map(), truncated: Math.max(0, visible.length - o.maxNodes) };
+    const cluster = o.cluster && (o.level === "module" || o.level === "package" || o.level === "symbol");
+    const compGroup = cluster ? makeGrouper(idx, "component", true) : null;
+    for (const v of visible.slice(0, o.maxNodes)) {
+      const n = idx.nodes.get(v);
+      let parent = null;
+      if (cluster) {
+        const c = compGroup(v);
+        if (c && c !== v && idx.nodes.has(c) && !keep.has(c)) { parent = "sg_" + c; view.subgraphs.set(parent, displayName(idx.nodes.get(c))); }
+      }
+      view.nodes.push({ id: v, label: o.level === "symbol" && n.category === "symbol" ? shortSymbol(n) : displayName(n), sublabel: sublabel(n),
+        status: statusOf(v), kind: kindOf(n), shape: hasTag(n, "external") ? "stadium" : n.category === "symbol" ? "round" : "box",
+        parent, icon: icon(n), reasons: n.change_reasons || [] });
+    }
+    view.edges = edges.filter((e) => keep.has(e.source) && keep.has(e.target));
+    return view;
+  }
+  function shortSymbol(n) { const q = n.qualified_name || n.name; const parts = q.split(/[.:]/); return n.component_type === "method" ? parts.slice(-2).join(".") : parts[parts.length - 1]; }
+
+  /* Dependencies view. */
+  function dependencyView(si, o) {
+    const rels = new Set(o.relationships);
+    const group = makeGrouper(si, o.level, o.external);
+    const pairs = new Map(), relOf = new Map(), under = new Map();
+    for (const e of si.edges) {
+      if (!e.direct || !rels.has(e.relationship)) continue;
+      const md = e.metadata || {};
+      if (!o.tests && md.test_only) continue;
+      if (!o.typeOnly && md.type_checking_only) continue;
+      const tn = si.nodes.get(e.target_id);
+      if (!o.stdlib && hasTag(tn, "stdlib")) continue;
+      if (!o.external && md.external) continue;
+      const s = group(e.source_id), t = group(e.target_id);
+      if (!s || !t || s === t) continue;
+      if (!o.tests && (hasTag(si.nodes.get(s), "test") || hasTag(si.nodes.get(t), "test"))) continue;
+      const key = s + "\u0000" + t;
+      pairs.set(key, (pairs.get(key) || 0) + e.occurrences);
+      if (!relOf.has(key)) relOf.set(key, e.relationship);
+      push(under, key, e.id);
+    }
+    const cyc = cyclePairs(pairs.keys());
+    let edges = [...pairs].map(([key, count]) => {
+      const [s, t] = key.split("\u0000");
+      return { source: s, target: t, status: "unchanged", cycle: o.cycles && cyc.pairs.has(key), count, relationship: relOf.get(key), underlying: under.get(key) };
+    });
+    if (o.cyclesOnly) edges = edges.filter((e) => cyc.pairs.has(e.source + "\u0000" + e.target));
+    let visible = new Set(edges.flatMap((e) => [e.source, e.target]));
+    const focus = o.focus ? group(o.focus) || o.focus : null;
+    if (focus && si.nodes.has(focus)) {
+      const out = new Map(), inn = new Map();
+      for (const e of edges) { push(out, e.source, e.target); push(inn, e.target, e.source); }
+      visible = new Set([focus]);
+      let frontier = [focus];
+      for (let d = 0; d < o.depth; d++) {
+        const next = [];
+        for (const v of frontier) {
+          if (o.direction2 !== "in") for (const w of out.get(v) || []) if (!visible.has(w)) { visible.add(w); next.push(w); }
+          if (o.direction2 !== "out") for (const w of inn.get(v) || []) if (!visible.has(w)) { visible.add(w); next.push(w); }
+        }
+        frontier = next;
+      }
+      edges = edges.filter((e) => visible.has(e.source) && visible.has(e.target));
+    }
+    if (o.cycleMembers) { visible = new Set(o.cycleMembers.map((m) => group(m)).filter(Boolean)); edges = edges.filter((e) => visible.has(e.source) && visible.has(e.target)); }
+    const prio = new Set(focus ? [focus] : []);
+    const view = finishView(si, [...visible].filter((v) => si.nodes.has(v)), edges, prio, o, () => "unchanged", "kind", `Dependencies at ${o.level} level`);
+    if (focus) for (const n of view.nodes) if (n.id === focus) n.kind = "component";
+    view.cycles = cyc.components;
+    return view;
+  }
+
+  /* Structure view: containment tree or nested boxes. */
+  function structureView(si, o) {
+    const view = { title: "Structure", direction: o.layout === "nested" ? "TB" : "LR", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, nested: [] };
+    const root = o.root && si.nodes.has(o.root) ? o.root : rootOf(si);
+    if (!root) return view;
+    const childrenOf = (id) => (si.children.get(id) || []).map((c) => si.nodes.get(c)).filter((c) => {
+      if (!c) return false;
+      if (c.category === "symbol") return o.symbols;
+      if (!o.files && (c.category === "module" || c.component_type === "file") && !hasTag(c, "entry-point")) return false;
+      if (!o.files && c.component_type === "entry-point") return false;
+      return true;
+    }).sort((a, b) => (CONTAINERS.has(b.component_type) - CONTAINERS.has(a.component_type)) || a.name.localeCompare(b.name));
+    let hot = 0;
+    if (o.hotspots) {
+      const counts = [...si.nodes.values()].filter((n) => n.category === "module" && meta(n).churn).map((n) => meta(n).churn.commits).sort((a, b) => a - b);
+      hot = counts.length ? counts[Math.floor(counts.length * 0.8)] : 0;
+    }
+    let count = 0;
+    const label = (n, isRoot) => {
+      let sub = n.component_type;
+      const mods = (si.children.get(n.id) || []).filter((c) => si.nodes.get(c).category === "module").length;
+      if (!o.files && mods) sub += ` · ${plural(mods, "module")}`;
+      if (o.hotspots && meta(n).churn) sub += ` · ${meta(n).churn.commits} commits`;
+      return { id: n.id, label: isRoot ? displayName(n) : (n.category === "symbol" ? shortSymbol(n) : n.name), sublabel: sub, status: "unchanged",
+        kind: o.hotspots && meta(n).churn && n.category === "module" && meta(n).churn.commits >= hot && hot > 0 ? "hot" : kindOf(n),
+        shape: n.category === "module" ? "round" : n.category === "symbol" ? "round" : "box", icon: icon(n), parent: null };
+    };
+    if (o.layout === "nested") {
+      const walk = (n, depth, parent) => {
+        if (count >= o.maxNodes) { view.truncated++; return; }
+        const kids = childrenOf(n.id);
+        if (depth < o.depth && kids.length && CONTAINERS.has(n.component_type)) {
+          const sg = "sg_" + n.id;
+          view.subgraphs.set(sg, (icon(n) ? icon(n) + " " : "") + (depth === 0 ? displayName(n) : n.name));
+          view.nested.push({ id: sg, parent });
+          for (const k of kids) walk(k, depth + 1, sg);
+        } else {
+          count++;
+          const v = label(n, depth === 0);
+          v.parent = parent;
+          if (kids.length) v.sublabel += ` · +${kids.length}`;
+          view.nodes.push(v);
+        }
+      };
+      walk(si.nodes.get(root), 0, null);
+      return view;
+    }
+    const queue = [[root, 0]];
+    while (queue.length) {
+      const [id, depth] = queue.shift();
+      if (count >= o.maxNodes) { view.truncated++; continue; }
+      count++;
+      const n = si.nodes.get(id);
+      const v = label(n, id === root);
+      const kids = childrenOf(id);
+      if (depth < o.depth) for (const k of kids) { queue.push([k.id, depth + 1]); view.edges.push({ source: id, target: k.id, status: "unchanged", relationship: "contains", count: 1 }); }
+      else if (kids.length) v.sublabel += ` · +${kids.length} more`;
+      view.nodes.push(v);
+    }
+    const keep = new Set(view.nodes.map((n) => n.id));
+    view.edges = view.edges.filter((e) => keep.has(e.source) && keep.has(e.target));
+    return view;
+  }
+
+  /* Affected flow view. */
+  function flowView(flow) {
+    const view = { title: "Affected flow", direction: "LR", mode: "role", nodes: [], edges: [], subgraphs: new Map(), truncated: 0 };
+    const shapes = { entry: "stadium", test: "hexagon", changed: "box", caller: "round", callee: "round", path: "round" };
+    for (const n of flow.nodes || []) {
+      const mod = n.module_id && n.module_id !== n.id ? "sg_" + n.module_id : null;
+      if (mod) view.subgraphs.set(mod, n.module || n.module_id);
+      const q = n.qualified_name || n.name;
+      const parts = q.split(/[.:]/);
+      const lbl = n.category === "symbol" ? (n.kind === "method" ? parts.slice(-2).join(".") : parts[parts.length - 1]) : q;
+      view.nodes.push({ id: n.id, label: lbl, sublabel: `${n.kind || ""} · ${n.role}`, status: n.status || "unchanged", kind: n.role,
+        shape: shapes[n.role] || "box", parent: mod, icon: n.role === "test" ? "🧪" : n.role === "entry" ? "🚀" : "" });
+    }
+    for (const e of flow.edges || []) view.edges.push({ source: e.source, target: e.target, status: e.status || "unchanged", relationship: e.relationship || "calls", count: 1 });
+    return view;
+  }
+
+  /* Activity map: changed files grouped by owning component. */
+  function activityView(activity, di) {
+    const view = { title: "Activity map", direction: "LR", mode: "diff", nodes: [], edges: [], subgraphs: new Map(), truncated: 0 };
+    const fileIds = new Map();
+    const statusOf = (ev) => ["added", "untracked"].includes(ev.git_status) ? "added" : ev.git_status === "deleted" ? "removed" : "modified";
+    for (const ev of activity.events || []) {
+      const id = ev.module_id || "path_" + ev.path.replace(/[^A-Za-z0-9]/g, "_");
+      fileIds.set(ev.path, id);
+      const comp = ev.owning_component || "root";
+      const sg = "sg_" + comp;
+      view.subgraphs.set(sg, ev.owning_component_name || "(repository root)");
+      const bits = [];
+      if (ev.lines_added !== null && ev.lines_added !== undefined) bits.push(`+${ev.lines_added} −${ev.lines_removed}`);
+      if (ev.impact_level && ev.impact_level !== "none") bits.push(`impact ${ev.impact_level}`);
+      if (ev.is_test) bits.push("test");
+      if (ev.configuration_affected) bits.push("config");
+      view.nodes.push({ id, label: (ev.impact_level === "high" ? "⚠ " : "") + ev.path.split("/").pop(), sublabel: bits.join(" · "),
+        status: statusOf(ev), kind: "module", shape: "box", parent: sg, icon: ev.is_test ? "🧪" : ev.configuration_affected ? "⚙" : "📄" });
+    }
+    if (di) {
+      const known = new Set(view.nodes.map((n) => n.id));
+      const extra = new Map();
+      for (const e of di.edges) {
+        const newCycle = e.in_target_cycle && !e.in_base_cycle;
+        if (!e.direct || (e.status === "unchanged" && !newCycle) || !["imports", "depends-on"].includes(e.relationship)) continue;
+        const src = di.nodes.get(e.source_id);
+        if (!src || (!known.has(src.id) && !newCycle)) continue;
+        if (!known.has(src.id) && !extra.has(src.id)) extra.set(src.id, src);
+        const tgt = di.nodes.get(e.target_id);
+        if (!tgt) continue;
+        if (!known.has(tgt.id) && !extra.has(tgt.id)) extra.set(tgt.id, tgt);
+        view.edges.push({ source: src.id, target: tgt.id, status: e.status, cycle: (e.cycle_ids || []).length > 0 && e.status !== "removed",
+          cycleIntroduced: e.in_target_cycle && !e.in_base_cycle, relationship: e.relationship, count: 1 });
+      }
+      for (const [id, n] of extra) view.nodes.push({ id, label: displayName(n), sublabel: sublabel(n), status: "unchanged", kind: kindOf(n),
+        shape: hasTag(n, "external") ? "stadium" : "round", parent: null, icon: icon(n) });
+    }
+    return view;
+  }
+
+  // ------------------------------------------------------ Mermaid serializer
+  const ESC = { '"': "#quot;", "<": "#lt;", ">": "#gt;", "#": "#35;", "&": "#amp;", "`": "#96;", "|": "#124;", "[": "#91;", "]": "#93;", "{": "#123;", "}": "#125;", "\n": " ", "\r": " ", "\t": " " };
+  function mEsc(text, limit) {
+    let s = String(text === undefined || text === null ? "" : text);
+    limit = limit || 120;
+    if (s.length > limit) s = s.slice(0, limit - 1) + "…";
+    let out = "";
+    for (const ch of s) out += ESC[ch] || ch;
+    return out;
+  }
+  const SHAPES = { box: ['["', '"]'], round: ['("', '")'], stadium: ['(["', '"])'], hexagon: ['{{"', '"}}'], cylinder: ['[("', '")]'], subroutine: ['[["', '"]]'] };
+  function classDefs(prefix, table) {
+    return Object.entries(table).map(([name, st]) => {
+      const parts = [`fill:${st.fill}`, `stroke:${st.stroke}`, `color:${st.color}`, `stroke-width:${st.width}px`];
+      if (st.dash) parts.push(`stroke-dasharray:${st.dash}`);
+      return `  classDef ${prefix}${name} ${parts.join(",")}`;
+    });
+  }
+  function nodeLabel(n, mode) {
+    const st = THEME.status[n.status] || {};
+    const marker = (mode === "diff" || mode === "role") && n.status !== "unchanged" && st.icon ? st.icon + " " : "";
+    const first = marker + (n.icon ? n.icon + " " : "") + mEsc(n.label);
+    let second = n.sublabel || "";
+    if (mode === "diff" && n.status !== "unchanged") second = (st.word || n.status) + (second ? " · " + second : "");
+    else if (mode === "role" && n.status !== "unchanged") second = second + " · " + (st.word || n.status);
+    return first + (second ? `<br/><small>${mEsc(second, 80)}</small>` : "");
+  }
+  function edgeStyle(e) {
+    const t = THEME.edge;
+    const st = t[e.status] || t.unchanged;
+    let arrow = st.arrow, style = st;
+    const markers = st.marker ? [st.marker] : [];
+    if (e.cycle) {
+      style = t.cycle;
+      arrow = e.status === "added" ? "==>" : "-.->";
+      markers.push(e.cycleIntroduced ? "⟲ new cycle" : t.cycle.marker);
+    }
+    if (e.count > 1) markers.push("×" + e.count);
+    if (e.relationship && !["imports", "contains", "calls"].includes(e.relationship)) markers.unshift(e.relationship);
+    const parts = [`stroke:${style.stroke}`, `stroke-width:${style.width}px`, "fill:none"];
+    if (style.dash) parts.push(`stroke-dasharray:${style.dash}`);
+    if (e.relationship === "contains") { arrow = "---"; }
+    return { arrow, label: markers.join(" "), style: parts.join(",") };
+  }
+  function toMermaid(view) {
+    const lines = [`flowchart ${view.direction || "LR"}`];
+    lines.push(`  accTitle: ${mEsc(view.title, 200).replace(/:/g, " -")}`);
+    const counts = {};
+    for (const n of view.nodes) counts[n.status] = (counts[n.status] || 0) + 1;
+    lines.push(`  accDescr: ${view.nodes.length} nodes and ${view.edges.length} edges (${mEsc(Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", "), 200)})`);
+    const nodeLine = (n, indent) => {
+      const [o, c] = SHAPES[n.shape] || SHAPES.box;
+      let cls = view.mode === "diff" ? `st_${n.status}` : view.mode === "role" ? `role_${n.kind}` : `kind_${n.kind}`;
+      if (view.mode === "role" && (n.status === "added" || n.status === "removed")) cls = `st_${n.status}`;
+      return `${indent}${n.id}${o}${nodeLabel(n, view.mode)}${c}:::${cls}`;
+    };
+    const byParent = new Map();
+    for (const n of view.nodes) push(byParent, n.parent && view.subgraphs.has(n.parent) ? n.parent : null, n);
+    if (view.nested) {
+      const kids = new Map();
+      for (const sg of view.nested) push(kids, sg.parent, sg.id);
+      const emit = (sg, indent) => {
+        lines.push(`${indent}subgraph ${sg}["${mEsc(view.subgraphs.get(sg))}"]`);
+        for (const child of kids.get(sg) || []) emit(child, indent + "  ");
+        for (const n of byParent.get(sg) || []) lines.push(nodeLine(n, indent + "  "));
+        lines.push(`${indent}end`);
+      };
+      for (const top of kids.get(null) || []) emit(top, "  ");
+    } else {
+      for (const [sg, label] of view.subgraphs) {
+        const members = byParent.get(sg) || [];
+        if (!members.length) continue;
+        lines.push(`  subgraph ${sg}["${mEsc(label)}"]`);
+        lines.push(view.direction === "LR" || view.direction === "RL" ? "    direction TB" : "    direction LR");
+        for (const n of members) lines.push(nodeLine(n, "    "));
+        lines.push("  end");
+      }
+    }
+    for (const n of byParent.get(null) || []) lines.push(nodeLine(n, "  "));
+    const ls = [];
+    view.edges.forEach((e, i) => {
+      const s = edgeStyle(e);
+      lines.push(s.label && s.arrow !== "---" ? `  ${e.source} ${s.arrow}|"${mEsc(s.label, 60)}"| ${e.target}` : `  ${e.source} ${s.arrow} ${e.target}`);
+      ls.push(`  linkStyle ${i} ${s.style}`);
+    });
+    return lines.concat(ls, classDefs("st_", THEME.status), classDefs("kind_", THEME.kind), classDefs("role_", THEME.role)).join("\n") + "\n";
+  }
+
+  // -------------------------------------------------------- diagram widget
+  let renderSeq = 0;
+  let renderChain = Promise.resolve();
+  function mermaidRender(text) {
+    const id = "rv" + (++renderSeq);
+    const p = renderChain.then(() => window.mermaid.render(id, text));
+    renderChain = p.catch(() => undefined);
+    return p;
+  }
+
+  class Diagram {
+    constructor(opts) {
+      this.opts = opts || {};
+      this.t = { x: 0, y: 0, k: 1 };
+      this.stage = h("div", { class: "stage" });
+      this.overlay = h("div", { class: "overlay", hidden: true });
+      this.viewport = h("div", { class: "viewport", tabindex: "0", role: "img", "aria-label": this.opts.title || "diagram" }, this.stage, this.overlay);
+      this.titleEl = h("span", { class: "title", text: this.opts.title || "" });
+      this.find = h("input", { type: "search", placeholder: "Find in diagram…", "aria-label": "Find in diagram", style: { width: "160px" } });
+      this.find.addEventListener("input", debounce(() => this.highlight(this.find.value), 150));
+      const btn = (label, title, fn) => h("button", { class: "btn small", type: "button", title, "aria-label": title, onclick: fn }, label);
+      this.sourcePre = h("pre", { class: "mono" });
+      this.info = h("span", { class: "muted", style: { fontSize: "12px" } });
+      this.el = h("div", { class: "card diagram-card" },
+        h("div", { class: "diagram-head" }, this.titleEl, this.info, this.find,
+          btn("＋", "Zoom in", () => this.zoom(1.25)), btn("－", "Zoom out", () => this.zoom(0.8)), btn("Fit", "Fit to view", () => this.fit()),
+          btn("1:1", "Actual size", () => { this.t = { x: 10, y: 10, k: 1 }; this.apply(); }),
+          btn("Copy", "Copy Mermaid source", () => this.copy()), btn("SVG", "Download SVG", () => this.downloadSvg()),
+          btn(".mmd", "Download Mermaid source", () => download("diagram.mmd", this.text || "", "text/plain"))),
+        this.viewport,
+        this.opts.legend ? h("div", { class: "legend" }, this.opts.legend()) : null,
+        h("details", { class: "source" }, h("summary", { class: "muted" }, "Mermaid source"), this.sourcePre));
+      this.bindPanZoom();
+    }
+    setTitle(t) { this.titleEl.textContent = t; this.viewport.setAttribute("aria-label", t); }
+    apply() { this.stage.style.transform = `translate(${this.t.x}px, ${this.t.y}px) scale(${this.t.k})`; }
+    zoom(f, cx, cy) {
+      const r = this.viewport.getBoundingClientRect();
+      cx = cx === undefined ? r.width / 2 : cx; cy = cy === undefined ? r.height / 2 : cy;
+      const k = Math.min(8, Math.max(0.05, this.t.k * f));
+      this.t.x = cx - (cx - this.t.x) * (k / this.t.k); this.t.y = cy - (cy - this.t.y) * (k / this.t.k); this.t.k = k; this.apply();
+    }
+    fit() {
+      const svg = $("svg", this.stage);
+      if (!svg) return;
+      const w = parseFloat(svg.getAttribute("width")) || svg.getBBox().width, hgt = parseFloat(svg.getAttribute("height")) || svg.getBBox().height;
+      const r = this.viewport.getBoundingClientRect();
+      if (!w || !hgt || !r.width) return;
+      const k = Math.min(1.2, Math.max(0.05, Math.min((r.width - 24) / w, (r.height - 24) / hgt)));
+      this.t = { k, x: (r.width - w * k) / 2, y: Math.max(8, (r.height - hgt * k) / 2) }; this.apply();
+    }
+    bindPanZoom() {
+      const vp = this.viewport;
+      vp.addEventListener("wheel", (ev) => {
+        ev.preventDefault();
+        const r = vp.getBoundingClientRect();
+        this.zoom(Math.exp(-ev.deltaY * 0.0015), ev.clientX - r.left, ev.clientY - r.top);
+      }, { passive: false });
+      let drag = null;
+      vp.addEventListener("pointerdown", (ev) => { if (ev.button !== 0) return; drag = { x: ev.clientX, y: ev.clientY, tx: this.t.x, ty: this.t.y, moved: false }; });
+      window.addEventListener("pointermove", (ev) => {
+        if (!drag) return;
+        const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+        if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+        drag.moved = true; vp.classList.add("dragging");
+        this.t.x = drag.tx + dx; this.t.y = drag.ty + dy; this.apply();
+      });
+      window.addEventListener("pointerup", () => { if (drag && drag.moved) { this.suppressClick = true; setTimeout(() => (this.suppressClick = false), 0); } drag = null; vp.classList.remove("dragging"); });
+      vp.addEventListener("keydown", (ev) => {
+        const step = 40;
+        if (ev.key === "+" || ev.key === "=") this.zoom(1.2); else if (ev.key === "-") this.zoom(0.83);
+        else if (ev.key === "ArrowLeft") { this.t.x += step; this.apply(); } else if (ev.key === "ArrowRight") { this.t.x -= step; this.apply(); }
+        else if (ev.key === "ArrowUp") { this.t.y += step; this.apply(); } else if (ev.key === "ArrowDown") { this.t.y -= step; this.apply(); }
+        else if (ev.key === "0") this.fit(); else return;
+        ev.preventDefault();
+      });
+    }
+    async render(view, handlers) {
+      this.view = view;
+      handlers = handlers || {};
+      this.text = toMermaid(view);
+      this.sourcePre.textContent = this.text;
+      const parts = [plural(view.nodes.length, "node"), plural(view.edges.length, "edge")];
+      if (view.truncated) parts.push(`${view.truncated} hidden (limit)`);
+      this.info.textContent = parts.join(" · ");
+      if (!view.nodes.length) {
+        this.stage.innerHTML = "";
+        this.overlay.hidden = false;
+        this.overlay.textContent = this.opts.emptyText || "Nothing to show with the current filters.";
+        return;
+      }
+      this.overlay.hidden = false; this.overlay.textContent = "Rendering…";
+      try {
+        const { svg } = await mermaidRender(this.text);
+        this.stage.innerHTML = svg;
+        this.overlay.hidden = true;
+      } catch (err) {
+        this.stage.innerHTML = "";
+        this.overlay.hidden = false;
+        this.overlay.textContent = "Mermaid could not render this diagram: " + (err && err.message ? err.message : err) + " — try fewer nodes.";
+        return;
+      }
+      const svg = $("svg", this.stage);
+      if (svg) {
+        svg.removeAttribute("style");
+        const vb = svg.viewBox && svg.viewBox.baseVal;
+        if (vb && vb.width) { svg.setAttribute("width", vb.width); svg.setAttribute("height", vb.height); }
+      }
+      const nodeIds = new Set(view.nodes.map((n) => n.id));
+      for (const g of $$("g.node", this.stage)) {
+        const m = /-flowchart-(.+)-\d+$/.exec(g.id);
+        if (!m || !nodeIds.has(m[1])) continue;
+        const nid = m[1];
+        g.dataset.nodeId = nid;
+        g.setAttribute("tabindex", "0");
+        g.setAttribute("role", "button");
+        const vn = view.nodes.find((n) => n.id === nid);
+        g.setAttribute("aria-label", `${vn.label} (${vn.status !== "unchanged" ? vn.status + ", " : ""}${vn.sublabel || ""})`);
+        const fire = (ev) => { if (this.suppressClick) return; ev.stopPropagation(); this.select(nid); handlers.onNode && handlers.onNode(nid, ev); };
+        g.addEventListener("click", fire);
+        g.addEventListener("dblclick", (ev) => { ev.stopPropagation(); handlers.onNodeDouble && handlers.onNodeDouble(nid); });
+        g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); fire(ev); } });
+      }
+      for (const g of $$("g.cluster", this.stage)) {
+        const id = (g.id || "").replace(/^.*?(sg_)/, "sg_");
+        const target = id.startsWith("sg_") ? id.slice(3) : null;
+        if (target && handlers.onCluster) g.addEventListener("click", (ev) => { if (this.suppressClick) return; ev.stopPropagation(); handlers.onCluster(target); });
+      }
+      const edgeByKey = new Map();
+      view.edges.forEach((e) => edgeByKey.set(`L_${e.source}_${e.target}_`, e));
+      for (const el of $$(".edgeLabel [data-id], g.edgeLabel [data-id]", this.stage)) {
+        const did = el.getAttribute("data-id") || "";
+        const key = did.replace(/\d+$/, "");
+        const e = edgeByKey.get(key);
+        if (!e || !handlers.onEdge) continue;
+        const target = el.closest(".edgeLabel") || el;
+        target.style.cursor = "pointer";
+        target.addEventListener("click", (ev) => { if (this.suppressClick) return; ev.stopPropagation(); handlers.onEdge(e); });
+      }
+      this.fit();
+      if (this.find.value) this.highlight(this.find.value);
+      if (this.selected) this.select(this.selected);
+    }
+    select(nid) {
+      this.selected = nid;
+      for (const g of $$("g.node.rv-selected", this.stage)) g.classList.remove("rv-selected");
+      for (const g of $$("g.node", this.stage)) if (g.dataset.nodeId === nid) g.classList.add("rv-selected");
+    }
+    highlight(q) {
+      q = (q || "").trim().toLowerCase();
+      for (const g of $$("g.node", this.stage)) g.classList.toggle("rv-dim", !!q && !g.textContent.toLowerCase().includes(q));
+    }
+    copy() {
+      const done = () => { this.info.textContent = "Mermaid source copied"; };
+      if (navigator.clipboard) navigator.clipboard.writeText(this.text || "").then(done, () => download("diagram.mmd", this.text || "", "text/plain"));
+      else download("diagram.mmd", this.text || "", "text/plain");
+    }
+    downloadSvg() {
+      const svg = $("svg", this.stage);
+      if (svg) download("diagram.svg", new XMLSerializer().serializeToString(svg), "image/svg+xml");
+    }
+  }
+
+  // ------------------------------------------------------------- legends
+  function diffLegend() {
+    const item = (cls, text, kind) => h("span", { class: "item" }, h("span", { class: (kind || "swatch") + " " + cls }), text);
+    return [
+      item("added", "✚ added"), item("removed", "✖ removed (dashed)"), item("modified", "✎ modified"), item("unchanged", "unchanged"),
+      item("added", "+ new edge (thick)", "line"), item("removed", "− removed edge (dashed)", "line"), item("modified", "~ evidence changed", "line"),
+      item("unchanged", "unchanged edge", "line"), item("cycle", "⟲ in a cycle (purple, dashed)", "line"),
+    ];
+  }
+  function kindLegend() {
+    return [
+      h("span", { class: "item" }, "🏠 repository"), h("span", { class: "item" }, "📦 project"), h("span", { class: "item" }, "📁 package / directory"),
+      h("span", { class: "item" }, "📄 module / file"), h("span", { class: "item" }, "🔗 external"), h("span", { class: "item" }, "🧪 tests"),
+      h("span", { class: "item" }, "🚀 entry point"), h("span", { class: "item" }, "🐳 container"),
+      h("span", { class: "item" }, h("span", { class: "line cycle" }), "⟲ dependency cycle"),
+      h("span", { class: "item muted" }, "dashed border: external or structural-only (no dependency data)"),
+    ];
+  }
+  function roleLegend() {
+    const sw = (fill, stroke, dash, text) => h("span", { class: "item" }, h("span", { class: "swatch", style: { background: fill, borderColor: stroke, borderStyle: dash ? "dashed" : "solid" } }), text);
+    return [sw("#fef3c7", "#b45309", false, "✎ changed code"), sw("#dcfce7", "#15803d", false, "✚ added"), sw("#fee2e2", "#b91c1c", true, "✖ removed"),
+      sw("#e0f2fe", "#0369a1", false, "caller (may be affected)"), sw("#f1f5f9", "#64748b", true, "callee"),
+      sw("#ede9fe", "#6d28d9", false, "🚀 entry point (stadium)"), sw("#ccfbf1", "#0f766e", false, "🧪 test (hexagon)")];
+  }
+
+  // ------------------------------------------------------------- widgets
+  function field(label, control) { return h("label", { class: "field" }, h("span", { text: label }), control); }
+  function select(options, value, onchange) {
+    const s = h("select", { onchange: () => onchange(s.value) });
+    for (const [v, text] of options) s.appendChild(h("option", { value: v, selected: v === value }, text));
+    return s;
+  }
+  function checkbox(label, checked, onchange) {
+    const c = h("input", { type: "checkbox", checked, onchange: () => onchange(c.checked) });
+    return h("label", { class: "check" }, c, label);
+  }
+  function numberInput(value, min, max, onchange) {
+    const i = h("input", { type: "number", value, min, max, onchange: () => onchange(Math.max(min, Math.min(max, parseInt(i.value, 10) || min))) });
+    return i;
+  }
+  function stat(value, label, cls) { return h("div", { class: "stat " + (cls || "") }, h("div", { class: "value", text: value }), h("div", { class: "label", text: label })); }
+  function pill(text, cls) { return h("span", { class: "pill " + (cls || "") }, text); }
+  function statusPill(st) {
+    const w = THEME.status[st] || {};
+    return st && st !== "unchanged" ? pill(`${w.icon || ""} ${st}`.trim(), st) : null;
+  }
+
+  function table(columns, rows, opts) {
+    opts = opts || {};
+    let sortKey = opts.sort || null, dir = opts.dir || 1;
+    const tbody = h("tbody");
+    const heads = columns.map((c) => {
+      const th = h("th", { scope: "col", tabindex: "0", text: c.label, onclick: () => { dir = sortKey === c.key ? -dir : 1; sortKey = c.key; draw(); } });
+      th.addEventListener("keydown", (ev) => { if (ev.key === "Enter") th.click(); });
+      return th;
+    });
+    const draw = () => {
+      tbody.innerHTML = "";
+      let data = rows.slice();
+      if (sortKey) {
+        const col = columns.find((c) => c.key === sortKey);
+        const val = col.sort || ((r) => r[sortKey]);
+        data.sort((a, b) => { const x = val(a), y = val(b); return (x > y ? 1 : x < y ? -1 : 0) * dir; });
+      }
+      heads.forEach((th, i) => th.setAttribute("aria-sort", columns[i].key === sortKey ? (dir > 0 ? "ascending" : "descending") : "none"));
+      if (!data.length) tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "empty", text: opts.empty || "Nothing here." })));
+      for (const r of data.slice(0, opts.limit || 2000)) {
+        const tr = h("tr", { tabindex: opts.onRow ? "0" : null }, columns.map((c) => {
+          const v = c.render ? c.render(r) : r[c.key];
+          return h("td", { class: c.num ? "num" : null }, v === undefined || v === null ? "" : v);
+        }));
+        if (opts.onRow) {
+          tr.addEventListener("click", () => { $$("tr.selected", tbody).forEach((x) => x.classList.remove("selected")); tr.classList.add("selected"); opts.onRow(r); });
+          tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter") tr.click(); });
+        }
+        tbody.appendChild(tr);
+      }
+      if (data.length > (opts.limit || 2000)) tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "muted", text: `${data.length - opts.limit} more rows not shown` })));
+    };
+    draw();
+    return h("div", { class: "table-wrap " + (opts.scroll === false ? "" : "scroll") }, h("table", null, h("thead", null, h("tr", null, heads)), tbody));
+  }
+
+  // --------------------------------------------------------- details panel
+  const HIDDEN_META = new Set(["component_id", "project_id", "underlying_edges", "semantic_fingerprint", "qualified_name_authoritative", "roles"]);
+  let APP = null;
+  /* Compact (embedded) diffs omit evidence of unchanged edges; the working-tree snapshot has the same edge IDs. */
+  function evidenceOf(e) {
+    if (e.evidence && e.evidence.length) return e.evidence;
+    const s = APP && APP.snapshotIndex.edgeById.get(e.id);
+    return s ? s.evidence || [] : [];
+  }
+  function evidenceList(evs, max) {
+    if (!evs || !evs.length) return h("div", { class: "muted", text: "No source evidence recorded." });
+    return h("div", null, evs.slice(0, max || 20).map((ev) => h("div", { class: "evidence" },
+      h("div", { class: "loc", text: `${ev.path}${ev.start_line ? ":" + ev.start_line + (ev.end_line && ev.end_line !== ev.start_line ? "-" + ev.end_line : "") : ""}  ·  ${ev.construct || ""}${ev.analyzer ? " · " + ev.analyzer : ""}` }),
+      ev.excerpt ? h("pre", { text: ev.excerpt }) : null)), evs.length > (max || 20) ? h("div", { class: "muted", text: `${evs.length - (max || 20)} more…` }) : null);
+  }
+  function metaTable(m) {
+    const rows = Object.entries(m || {}).filter(([k, v]) => !HIDDEN_META.has(k) && v !== null && v !== undefined && v !== "" && !(Array.isArray(v) && !v.length));
+    if (!rows.length) return null;
+    return h("dl", { class: "kv" }, rows.flatMap(([k, v]) => [h("dt", { text: k.replace(/_/g, " ") }),
+      h("dd", { class: typeof v === "object" ? "mono" : null, text: typeof v === "object" ? JSON.stringify(v, null, Array.isArray(v) && v.length < 6 ? 0 : 1) : String(v) })]));
+  }
+
+  class DetailsPanel {
+    constructor(app) { this.app = app; this.el = h("div", { class: "card" }, h("div", { class: "details-empty", text: "Select a node or an edge label in the diagram (or a table row) to see details and source evidence." })); }
+    clear(text) { this.el.innerHTML = ""; this.el.appendChild(h("div", { class: "details-empty", text: text || "Nothing selected." })); }
+    showNode(idx, id, extra) {
+      const n = idx.nodes.get(id);
+      this.el.innerHTML = "";
+      if (!n) { this.clear("Unknown node."); return; }
+      const comp = meta(n).component_id ? idx.nodes.get(meta(n).component_id) : null;
+      const proj = meta(n).project_id ? idx.nodes.get(meta(n).project_id) : null;
+      this.el.appendChild(h("h3", null, `${icon(n)} ${displayName(n)} `, statusPill(n.status)));
+      if (n.change_reasons && n.change_reasons.length) this.el.appendChild(h("div", { class: "muted" }, "Change: " + n.change_reasons.join("; ")));
+      this.el.appendChild(h("dl", { class: "kv" },
+        h("dt", { text: "type" }), h("dd", { text: `${n.component_type} (${n.category})` }),
+        n.language ? [h("dt", { text: "language" }), h("dd", { text: n.language })] : null,
+        n.path !== undefined && n.path !== null ? [h("dt", { text: "path" }), h("dd", { class: "mono", text: (n.path || "(root)") + (n.start_line ? `:${n.start_line}-${n.end_line || n.start_line}` : "") })] : null,
+        comp ? [h("dt", { text: "component" }), h("dd", null, this.link(idx, comp))] : null,
+        proj && proj !== comp ? [h("dt", { text: "project" }), h("dd", null, this.link(idx, proj))] : null,
+        tagsOf(n).length ? [h("dt", { text: "tags" }), h("dd", null, tagsOf(n).map((t) => pill(t)))] : null,
+        [h("dt", { text: "analyzers" }), h("dd", { text: (n.analyzers || [n.analyzer]).join(", ") })],
+        [h("dt", { text: "id" }), h("dd", { class: "mono faint", text: n.id })]));
+      const m = metaTable(n.metadata);
+      if (m) this.el.append(h("h4", { text: "Metadata" }), m);
+      if (n.before && Object.keys(n.before).length) this.el.append(h("h4", { text: "Before" }), metaTable(n.before));
+      const actions = h("div", { class: "group", style: { marginTop: "8px" } });
+      if (this.app.tabs.dependencies) actions.appendChild(h("button", { class: "btn small", onclick: () => this.app.focusDependencies(id) }, "Focus in Dependencies"));
+      if (this.app.tabs.structure && idx.kind === "snapshot") actions.appendChild(h("button", { class: "btn small", onclick: () => this.app.showInStructure(id) }, "Show in Structure"));
+      this.el.appendChild(actions);
+      for (const [title, list, other] of [["Outgoing", idx.out.get(id) || [], "target_id"], ["Incoming", idx.inn.get(id) || [], "source_id"]]) {
+        if (!list.length) continue;
+        const direct = list.filter((e) => e.direct);
+        this.el.appendChild(h("h4", { text: `${title} (${direct.length})` }));
+        const ul = h("ul", { class: "plain scroll", style: { maxHeight: "260px" } });
+        for (const e of direct.slice(0, 200)) {
+          const o = idx.nodes.get(e[other]);
+          const det = h("details", null, h("summary", null, pill(e.relationship), " ", o ? displayName(o) : e[other], " ", statusPill(e.status),
+            (e.cycle_ids || []).length ? pill("⟲ cycle", "cycle") : null, (e.metadata || {}).type_checking_only ? pill("type-only") : null,
+            (e.metadata || {}).lazy_only ? pill("lazy") : null, (e.metadata || {}).conditional_only ? pill("conditional") : null,
+            e.confidence < 1 ? h("span", { class: "faint" }, ` ${Math.round(e.confidence * 100)}%`) : null),
+          h("div", null, o ? h("button", { class: "btn small", onclick: () => this.app.selectNode(idx, o.id) }, "Go to " + (o.name || o.id)) : null),
+          evidenceList(evidenceOf(e), 5), e.base_evidence && e.base_evidence.length ? [h("div", { class: "muted", text: "Evidence before:" }), evidenceList(e.base_evidence, 5)] : null);
+          ul.appendChild(h("li", null, det));
+        }
+        this.el.appendChild(ul);
+      }
+      if (extra) this.el.appendChild(extra);
+    }
+    link(idx, n) { return h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); this.app.selectNode(idx, n.id); } }, displayName(n)); }
+    showEdge(idx, e) {
+      this.el.innerHTML = "";
+      const s = idx.nodes.get(e.source), t = idx.nodes.get(e.target);
+      this.el.appendChild(h("h3", null, `${s ? displayName(s) : e.source} → ${t ? displayName(t) : e.target} `, statusPill(e.status), e.cycle ? pill("⟲ cycle", "cycle") : null));
+      this.el.appendChild(h("div", { class: "muted", text: `${e.relationship} · ${plural(e.count || 1, "occurrence")}${e.underlying && e.underlying.length > 1 ? ` · aggregated from ${e.underlying.length} direct relationships` : ""}` }));
+      for (const uid of (e.underlying || []).slice(0, 50)) {
+        const u = idx.edgeById.get(uid);
+        if (!u) continue;
+        const us = idx.nodes.get(u.source_id), ut = idx.nodes.get(u.target_id);
+        this.el.appendChild(h("h4", null, `${us ? displayName(us) : u.source_id} → ${ut ? displayName(ut) : u.target_id} `, statusPill(u.status),
+          (u.change_reasons || []).length ? h("span", { class: "faint" }, " " + u.change_reasons.join("; ")) : null));
+        this.el.appendChild(evidenceList(evidenceOf(u), 5));
+        if (u.base_evidence && u.base_evidence.length) this.el.append(h("div", { class: "muted", text: "Before:" }), evidenceList(u.base_evidence, 3));
+      }
+    }
+    showActivity(ev, activity) {
+      this.el.innerHTML = "";
+      this.el.appendChild(h("h3", null, ev.path, " ", pill(ev.git_status, ev.git_status === "deleted" ? "removed" : ev.git_status === "added" || ev.git_status === "untracked" ? "added" : "modified")));
+      this.el.appendChild(h("dl", { class: "kv" },
+        h("dt", { text: "component" }), h("dd", { text: ev.owning_component_name || "(root)" }),
+        h("dt", { text: "lines" }), h("dd", { text: ev.lines_added === null || ev.lines_added === undefined ? "binary / too large" : `+${ev.lines_added} −${ev.lines_removed}` }),
+        h("dt", { text: "impact" }), h("dd", null, pill(ev.impact_level, ev.impact_level)),
+        h("dt", { text: "first observed" }), h("dd", { text: fmtTime(ev.first_observed) }),
+        h("dt", { text: "last observed" }), h("dd", { text: fmtTime(ev.last_observed) }),
+        ev.last_modified ? [h("dt", { text: "file modified" }), h("dd", { text: fmtTime(ev.last_modified) })] : null,
+        h("dt", { text: "staged / unstaged" }), h("dd", { text: `${ev.staged ? "staged" : "—"} / ${ev.unstaged ? "unstaged" : "—"}` }),
+        ev.previous_path ? [h("dt", { text: "renamed from" }), h("dd", { text: ev.previous_path })] : null,
+        h("dt", { text: "configuration" }), h("dd", { text: ev.configuration_affected ? ev.configuration_kind || "yes" : "no" })));
+      this.el.appendChild(h("h4", { text: "Architecture impact" }));
+      this.el.appendChild(ev.architecture_impact && ev.architecture_impact.length ? h("ul", { class: "plain" }, ev.architecture_impact.map((i) =>
+        h("li", null, pill(i.kind, i.severity === "high" ? "high" : i.severity === "medium" ? "medium" : "low"), " ", i.detail))) : h("div", { class: "muted", text: "No architectural impact detected." }));
+      this.el.appendChild(h("h4", { text: `Tests affected (${(ev.tests_affected || []).length})` }));
+      this.el.appendChild(h("ul", { class: "plain" }, (ev.tests_affected || []).map((t) => h("li", { class: "mono", text: t }))));
+      if (ev.changed_symbols && ev.changed_symbols.length && activity && activity.diff) {
+        const di = this.app.activityIndex;
+        this.el.appendChild(h("h4", { text: `Changed symbols (${ev.changed_symbols.length})` }));
+        this.el.appendChild(h("ul", { class: "plain" }, ev.changed_symbols.map((sid) => {
+          const n = di && di.nodes.get(sid);
+          return h("li", null, n ? [statusPill(n.status), " ", displayName(n)] : sid);
+        })));
+      }
+    }
+  }
+
+  // ================================================================= TABS
+  class ChangesTab {
+    constructor(app, root) {
+      this.app = app; this.root = root;
+      this.opts = Object.assign({ level: "auto", scope: "neighbors", relationships: ["imports", "depends-on"], external: false, hideCosmetic: true,
+        maxNodes: 150, cluster: true, comparison: null, mode: "all", base: "HEAD", target: "WORKTREE", mbRef: "" }, storage.get("rv.changes", {}));
+    }
+    save() { storage.set("rv.changes", this.opts); }
+    async init() {
+      const app = this.app, o = this.opts;
+      this.diagram = new Diagram({ title: "Changes", legend: diffLegend, emptyText: "No architectural changes with the current filters." });
+      this.details = new DetailsPanel(app);
+      this.statsEl = h("div", { class: "stats" });
+      this.listsEl = h("div");
+      this.statusEl = h("span", { class: "muted" });
+      const bar = h("div", { class: "toolbar" });
+      if (app.api.live) {
+        const rev = app.bundle.revisions || {};
+        const dl = h("datalist", { id: "rv-revs" }, ["WORKTREE", "INDEX", "HEAD", "SESSION", ...(rev.branches || []), ...(rev.tags || []), ...(rev.remote_branches || []), ...(rev.commits || []).map((c) => c.short)].map((v) => h("option", { value: v })));
+        const baseIn = h("input", { value: o.base, list: "rv-revs", size: 14, "aria-label": "Base revision" });
+        const targetIn = h("input", { value: o.target, list: "rv-revs", size: 14, "aria-label": "Target revision" });
+        const mbIn = h("input", { value: o.mbRef || rev.default_branch || "", list: "rv-revs", size: 14, "aria-label": "Merge-base reference" });
+        const custom = h("span", { class: "group" }, field("Base", baseIn), field("Target", targetIn));
+        const mb = h("span", { class: "group" }, field("Merge base with", mbIn));
+        const presets = [["all", "HEAD vs working tree (staged + unstaged + untracked)"], ["staged", "Staged changes only"], ["unstaged", "Unstaged changes only"],
+          ["session", "Current work session"], ["merge-base", "Merge base vs working tree"], ["custom", "Custom: revision vs revision…"]];
+        const sync = () => { custom.hidden = o.mode !== "custom"; mb.hidden = o.mode !== "merge-base"; };
+        bar.append(field("Comparison", select(presets, o.mode, (v) => { o.mode = v; sync(); if (v !== "custom" && v !== "merge-base") this.load(); })), custom, mb,
+          h("button", { class: "btn primary", onclick: () => { o.base = baseIn.value.trim() || "HEAD"; o.target = targetIn.value.trim() || "WORKTREE"; o.mbRef = mbIn.value.trim(); this.load(); } }, "Compare"), dl);
+        sync();
+      } else {
+        const comps = app.bundle.comparisons || [];
+        if (!comps.some((c) => c.id === o.comparison)) o.comparison = comps.length ? comps[0].id : null;
+        bar.append(field("Comparison (precomputed)", select(comps.map((c) => [c.id, c.label]), o.comparison, (v) => { o.comparison = v; this.load(); })));
+      }
+      const redraw = () => { this.save(); this.draw(); };
+      bar.append(
+        field("Level", select([["auto", "Auto"], ["component", "Components"], ["project", "Projects"], ["package", "Packages / directories"], ["module", "Modules / files"]], o.level, (v) => { o.level = v; redraw(); })),
+        field("Show", select([["changed", "Changed only"], ["neighbors", "Changed + neighbours"], ["all", "Everything"]], o.scope, (v) => { o.scope = v; redraw(); })),
+        field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
+        h("div", { class: "field" }, h("span", { text: "Relationships" }), h("div", { class: "group" },
+          ["imports", "depends-on", "calls", "invokes", "builds"].map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
+        h("div", { class: "field" }, h("span", { text: "Options" }), h("div", { class: "group" },
+          checkbox("external packages", o.external, (c) => { o.external = c; redraw(); }),
+          checkbox("hide formatting-only", o.hideCosmetic, (c) => { o.hideCosmetic = c; redraw(); }),
+          checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
+        this.statusEl);
+      this.root.append(bar, this.statsEl, h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el), this.listsEl);
+      await this.load();
+    }
+    async load() {
+      this.save();
+      const app = this.app, o = this.opts;
+      this.statusEl.innerHTML = ""; this.statusEl.append(h("span", { class: "spinner" }), " analyzing…");
+      try {
+        let comp;
+        if (app.api.live) {
+          const params = o.mode === "custom" ? { base: o.base, target: o.target } : o.mode === "merge-base" ? { mode: "merge-base", base: o.mbRef } : { mode: o.mode };
+          comp = await app.api.comparison(params);
+        } else comp = await app.api.comparison(o.comparison);
+        this.comp = comp;
+        this.di = indexDiff(comp.diff);
+        this.statusEl.textContent = `${comp.diff.base.label} → ${comp.diff.target.label}`;
+      } catch (err) {
+        this.statusEl.textContent = "";
+        this.statsEl.innerHTML = "";
+        this.listsEl.innerHTML = "";
+        this.listsEl.appendChild(h("div", { class: "notice error", text: "Comparison failed: " + err.message }));
+        return;
+      }
+      this.details.clear("Select a node or edge label to see why it changed.");
+      this.draw();
+    }
+    async draw() {
+      if (!this.di) return;
+      const d = this.comp.diff, o = this.opts;
+      const sum = d.summary;
+      this.statsEl.innerHTML = "";
+      this.statsEl.append(
+        stat(sum.nodes.added, "nodes added", "added"), stat(sum.nodes.removed, "nodes removed", "removed"), stat(sum.nodes.modified, "nodes modified", "modified"),
+        stat(sum.edges.added, "relationships added", "added"), stat(sum.edges.removed, "relationships removed", "removed"), stat(sum.edges.modified, "relationships changed", "modified"),
+        stat(d.new_dependencies.length, "new dependencies", d.new_dependencies.length ? "added" : ""),
+        stat(sum.cycles.introduced, "cycles introduced", sum.cycles.introduced ? "cycle" : ""), stat(sum.cycles.resolved, "cycles resolved", ""));
+      const view = o.level === "auto" ? autoLevel((x) => changesView(this.di, x), o, ["component", "package", "module"]) : changesView(this.di, o);
+      view.level = view.level || o.level;
+      this.diagram.setTitle(`${d.base.label} → ${d.target.label} · ${view.level} level${o.level === "auto" ? " (auto)" : ""}`);
+      await this.diagram.render(view, {
+        onNode: (id) => this.details.showNode(this.di, id),
+        onCluster: (id) => this.details.showNode(this.di, id),
+        onEdge: (e) => this.details.showEdge(this.di, e),
+      });
+      this.drawLists();
+    }
+    drawLists() {
+      const d = this.comp.diff, di = this.di;
+      const name = (id) => { const n = di.nodes.get(id); return n ? displayName(n) : id; };
+      const depCols = [
+        { key: "level", label: "Level" },
+        { key: "source", label: "From" },
+        { key: "target", label: "To", render: (r) => [r.target, " ", r.external ? pill(r.stdlib ? "stdlib" : "external") : null, r.in_cycle ? pill("⟲ cycle", "cycle") : null, r.type_checking_only ? pill("type-only") : null] },
+        { key: "relationship", label: "Kind", render: (r) => [r.relationship, r.scope ? ` (${r.scope})` : "", r.note ? h("div", { class: "faint", text: r.note }) : null] },
+        { key: "evidence", label: "Evidence", render: (r) => h("span", { class: "mono", text: (r.evidence || []).join(", ") }) },
+      ];
+      const onDep = (r) => { const e = di.edgeById.get(r.edge_id); if (e) this.details.showEdge(di, { source: e.source_id, target: e.target_id, status: e.status, relationship: e.relationship, count: e.occurrences, underlying: e.direct ? [e.id] : (e.metadata.underlying_edges || []), cycle: (e.cycle_ids || []).length > 0 }); };
+      const cycleList = (cycles, status) => h("ul", { class: "plain" }, cycles.map((c) => h("li", null, pill(c.level), " ", pill(status, status === "introduced" ? "cycle" : ""), " ",
+        (c.example_path && c.example_path.length ? c.example_path : c.members).map(name).join(" → "))));
+      const changedNodes = d.nodes.filter((n) => n.status !== "unchanged" && !(this.opts.hideCosmetic && (n.change_reasons || []).join() === "formatting or comments only"));
+      this.listsEl.innerHTML = "";
+      this.listsEl.append(
+        h("div", { class: "two-col" },
+          h("div", { class: "card" }, h("h3", { text: `New dependencies (${d.new_dependencies.length})` }),
+            table(depCols, d.new_dependencies, { onRow: onDep, empty: "No new dependencies." })),
+          h("div", { class: "card" }, h("h3", { text: `Removed dependencies (${d.removed_dependencies.length})` }),
+            table(depCols, d.removed_dependencies, { onRow: onDep, empty: "No removed dependencies." }))),
+        h("div", { class: "card" }, h("h3", { text: "Dependency cycles" }),
+          d.introduced_cycles.length ? [h("h4", { text: `Introduced (${d.introduced_cycles.length})` }), cycleList(d.introduced_cycles, "introduced")] : null,
+          d.resolved_cycles.length ? [h("h4", { text: `Resolved (${d.resolved_cycles.length})` }), cycleList(d.resolved_cycles, "resolved")] : null,
+          d.changed_cycles.length ? [h("h4", { text: `Changed (${d.changed_cycles.length})` }), h("ul", { class: "plain" }, d.changed_cycles.map((c) => h("li", null, pill(c.level), " members: ",
+            c.members.map(name).join(", "), c.added_members.length ? [" · added: ", c.added_members.map(name).join(", ")] : null, c.removed_members.length ? [" · removed: ", c.removed_members.map(name).join(", ")] : null)))] : null,
+          !d.introduced_cycles.length && !d.resolved_cycles.length && !d.changed_cycles.length ? h("div", { class: "empty", text: "No cycle was introduced or resolved." }) : null),
+        h("div", { class: "card" }, h("h3", { text: `Changed nodes (${changedNodes.length})` }),
+          table([
+            { key: "status", label: "Status", render: (r) => statusPill(r.status) },
+            { key: "category", label: "Category" },
+            { key: "component_type", label: "Type" },
+            { key: "qualified_name", label: "Name" },
+            { key: "path", label: "Path", render: (r) => h("span", { class: "mono", text: r.path || "" }) },
+            { key: "change_reasons", label: "Why", render: (r) => (r.change_reasons || []).join("; ") },
+          ], changedNodes, { onRow: (r) => { this.details.showNode(di, r.id); this.diagram.select(r.id); }, sort: "status" })),
+        diagnosticsCard(d.diagnostics, "Comparison diagnostics"));
+    }
+  }
+
+  function diagnosticsCard(diags, title) {
+    diags = diags || [];
+    return h("div", { class: "card" }, h("h3", { text: `${title} (${diags.length})` }),
+      table([{ key: "severity", label: "Severity", render: (r) => pill(r.severity, r.severity === "error" ? "high" : r.severity === "warning" ? "medium" : "low") },
+        { key: "code", label: "Code" }, { key: "message", label: "Message" }, { key: "analyzer", label: "Analyzer" },
+        { key: "path", label: "Location", render: (r) => h("span", { class: "mono", text: r.path ? r.path + (r.line ? ":" + r.line : "") : "" }) }],
+      diags, { empty: "No diagnostics.", sort: "severity" }));
+  }
+
+  class StructureTab {
+    constructor(app, root) {
+      this.app = app; this.root = root;
+      this.opts = Object.assign({ depth: 3, files: false, symbols: false, layout: "tree", hotspots: false, maxNodes: 200, root: null }, storage.get("rv.structure", {}));
+    }
+    save() { storage.set("rv.structure", this.opts); }
+    async init() {
+      const o = this.opts, app = this.app;
+      this.si = app.snapshotIndex;
+      if (o.root && !this.si.nodes.has(o.root)) o.root = null;
+      this.diagram = new Diagram({ title: "Structure", legend: kindLegend });
+      this.details = new DetailsPanel(app);
+      this.crumbs = h("div", { class: "crumbs" });
+      const redraw = () => { this.save(); this.draw(); };
+      this.root.append(h("div", { class: "toolbar" },
+        h("div", { class: "field" }, h("span", { text: "Root" }), this.crumbs),
+        field("Depth", numberInput(o.depth, 1, 12, (v) => { o.depth = v; redraw(); })),
+        field("Layout", select([["tree", "Tree"], ["nested", "Nested boxes"]], o.layout, (v) => { o.layout = v; redraw(); })),
+        field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
+        h("div", { class: "field" }, h("span", { text: "Show" }), h("div", { class: "group" },
+          checkbox("modules / files", o.files, (c) => { o.files = c; redraw(); }),
+          checkbox("symbols", o.symbols, (c) => { o.symbols = c; redraw(); }),
+          checkbox("churn hotspots", o.hotspots, (c) => { o.hotspots = c; redraw(); }))),
+        h("span", { class: "muted", text: "Double-click a node to drill down." })),
+        h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el),
+        profileCards(app.bundle.profile || app.bundle.snapshot.profile || {}, app.bundle.snapshot));
+      this.draw();
+    }
+    setRoot(id) { this.opts.root = id; this.save(); this.draw(); }
+    drawCrumbs() {
+      const si = this.si;
+      this.crumbs.innerHTML = "";
+      const chain = [];
+      let cur = si.nodes.get(this.opts.root || rootOf(si));
+      while (cur) { chain.unshift(cur); cur = cur.parent_id ? si.nodes.get(cur.parent_id) : null; }
+      chain.forEach((n, i) => {
+        if (i) this.crumbs.appendChild(h("span", { class: "faint", text: "/" }));
+        this.crumbs.appendChild(h("button", { type: "button", onclick: () => this.setRoot(n.id) }, i === 0 ? "🏠 " + n.name : n.name));
+      });
+    }
+    async draw() {
+      this.drawCrumbs();
+      const view = structureView(this.si, this.opts);
+      const r = this.si.nodes.get(this.opts.root || rootOf(this.si));
+      this.diagram.setTitle(`Structure of ${r ? displayName(r) : "repository"}`);
+      await this.diagram.render(view, {
+        onNode: (id) => this.details.showNode(this.si, id),
+        onCluster: (id) => this.details.showNode(this.si, id),
+        onNodeDouble: (id) => { if ((this.si.children.get(id) || []).length) this.setRoot(id); },
+      });
+    }
+  }
+
+  function profileCards(p, snap) {
+    const list = (items, render, empty) => items && items.length ? h("ul", { class: "plain" }, items.map((x) => h("li", null, render(x)))) : h("div", { class: "empty", text: empty || "None found." });
+    const langs = p.languages || [];
+    const maxFiles = Math.max(1, ...langs.map((l) => l.files));
+    const analyzers = (snap && snap.analyzers) || [];
+    return h("div", null,
+      h("h2", { text: "Repository discovery", style: { fontSize: "16px", margin: "16px 0 8px" } }),
+      h("div", { class: "two-col" },
+        h("div", { class: "card" }, h("h3", { text: "Overview" }), h("dl", { class: "kv" },
+          h("dt", { text: "root" }), h("dd", { class: "mono", text: p.root || "" }),
+          h("dt", { text: "branch" }), h("dd", { text: p.branch || (p.is_git ? "(detached)" : "not a Git repository") }),
+          h("dt", { text: "HEAD" }), h("dd", { class: "mono", text: p.head ? p.head.slice(0, 12) : "—" }),
+          h("dt", { text: "default branch" }), h("dd", { text: p.default_branch || "unknown" }),
+          h("dt", { text: "remotes" }), h("dd", { text: (p.remotes || []).join(", ") || "none" }),
+          h("dt", { text: "files" }), h("dd", { text: `${p.file_count} total · ${p.analyzed_file_count} analyzed · ${p.excluded_count} excluded` }),
+          h("dt", { text: "configuration" }), h("dd", { text: (p.config_sources || []).join("; ") || "defaults (no configuration file)" }))),
+        h("div", { class: "card" }, h("h3", { text: "Languages" }), langs.length ? langs.slice(0, 16).map((l) => h("div", { class: "bar-row" },
+          h("span", null, l.display, " ", l.kind === "programming" ? (l.supported ? pill("analyzed", "added") : pill("structure only")) : null),
+          h("div", null, h("div", { class: "bar", style: { width: `${(100 * l.files) / maxFiles}%` } })), h("span", { class: "muted", text: `${l.files} files` }))) : h("div", { class: "empty", text: "No recognised languages." })),
+        h("div", { class: "card" }, h("h3", { text: `Projects (${(p.projects || []).length})` }), list(p.projects, (x) => [h("b", { text: x.name }), " ", pill(x.ecosystem), x.role ? pill(x.role) : null,
+          x.workspace ? pill("workspace member") : null, h("div", { class: "mono faint", text: `${x.path || "(root)"} · ${x.manifests.join(", ")}` })], "No project manifests found.")),
+        h("div", { class: "card" }, h("h3", { text: "Workspaces & manifests" }),
+          list(p.workspaces, (w) => [h("span", { class: "mono", text: w.path }), " ", pill(w.kind), " ", `${w.members.length} member(s)`], "No workspace configuration."),
+          h("h4", { text: `Manifests (${(p.manifests || []).length}) · lock files (${(p.lockfiles || []).length})` }),
+          list((p.manifests || []).concat(p.lockfiles || []), (m) => [h("span", { class: "mono", text: m.path }), " ", pill(m.kind), m.parsed === false ? pill("recognised only") : null, (m.errors || []).length ? pill("parse error", "high") : null])),
+        h("div", { class: "card" }, h("h3", { text: "Source, test and docs roots" }),
+          h("h4", { text: "Source roots" }), list(p.source_roots, (r) => [h("span", { class: "mono", text: r.path || "(root)" }), " ", r.language ? pill(r.language) : null, h("span", { class: "faint", text: " " + r.origin })]),
+          h("h4", { text: "Test roots" }), list(p.test_roots, (r) => [h("span", { class: "mono", text: r.path }), ` · ${r.files} files `, h("span", { class: "faint", text: r.origin })]),
+          h("h4", { text: "Documentation" }), list(p.docs, (r) => [h("span", { class: "mono", text: r.path }), ` · ${r.files} files `, h("span", { class: "faint", text: r.reason })])),
+        h("div", { class: "card" }, h("h3", { text: "Generated & vendored code (excluded from analysis)" }),
+          list((p.generated || []).concat((p.vendored || []).map((v) => Object.assign({ vendored: true }, v))), (g) => [h("span", { class: "mono", text: g.path }), " ", pill(g.vendored ? "vendored" : "generated"), h("span", { class: "faint", text: " " + (g.reason || "") })], "None detected.")),
+        h("div", { class: "card" }, h("h3", { text: `Entry points (${(p.entry_points || []).length})` }),
+          list((p.entry_points || []).slice(0, 100), (e) => [h("b", { text: e.name }), " ", pill(e.kind), h("div", { class: "mono faint", text: `${e.target} · ${e.declared_in}${e.line ? ":" + e.line : ""}` })])),
+        h("div", { class: "card" }, h("h3", { text: "Containers, deployment & CI" }),
+          h("h4", { text: "Containers" }), list(p.containers, (c) => [h("span", { class: "mono", text: c.path }), " ", pill(c.kind), c.services && c.services.length ? " services: " + c.services.join(", ") : "", c.base_images && c.base_images.length ? " from " + c.base_images.join(", ") : ""]),
+          h("h4", { text: "Deployment" }), list(p.deployment, (d) => [h("span", { class: "mono", text: d.path }), " ", pill(d.kind)]),
+          h("h4", { text: "CI" }), list(p.ci, (c) => [h("span", { class: "mono", text: c.path }), " ", pill(c.provider), (c.jobs || []).length ? ` ${c.jobs.length} job(s)` : ""])),
+        h("div", { class: "card" }, h("h3", { text: "Existing architecture & dependency tooling" }),
+          h("h4", { text: "Architecture configuration" }), list(p.architecture_config, (a) => [h("span", { class: "mono", text: a.path }), " ", pill(a.tool), a.embedded ? pill("embedded") : null]),
+          h("h4", { text: "Dependency-analysis tools" }), list(p.dependency_tools, (t) => [pill(t.tool), " ", h("span", { class: "mono faint", text: t.evidence.join(", ") })])),
+        h("div", { class: "card" }, h("h3", { text: "Analyzers" }), table([
+          { key: "name", label: "Analyzer" }, { key: "applicable", label: "Ran", render: (r) => r.applicable ? pill("yes", "added") : pill("no") },
+          { key: "reason", label: "Why" }, { key: "duration_ms", label: "ms", num: true },
+          { key: "stats", label: "Stats", render: (r) => h("span", { class: "mono", text: Object.entries(r.stats || {}).map(([k, v]) => `${k}=${v}`).join(" ") }) }], analyzers, { scroll: false }))),
+      diagnosticsCard((snap && snap.diagnostics) || [], "Analysis diagnostics"));
+  }
+
+  class DependenciesTab {
+    constructor(app, root) {
+      this.app = app; this.root = root;
+      this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on"], external: false, stdlib: false, tests: true, typeOnly: true,
+        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: 150, cluster: false }, storage.get("rv.deps", {}));
+      this.opts.cycleMembers = null;
+    }
+    save() { const o = Object.assign({}, this.opts); delete o.cycleMembers; storage.set("rv.deps", o); }
+    async init() {
+      const o = this.opts, app = this.app;
+      this.si = app.snapshotIndex;
+      if (o.focus && !this.si.nodes.has(o.focus)) o.focus = null;
+      this.diagram = new Diagram({ title: "Dependencies", legend: kindLegend });
+      this.details = new DetailsPanel(app);
+      this.focusInput = h("input", { type: "search", list: "rv-nodes", placeholder: "type a name…", size: 26, "aria-label": "Focus node" });
+      this.datalist = h("datalist", { id: "rv-nodes" });
+      this.focusInput.addEventListener("change", () => {
+        const v = this.focusInput.value.trim();
+        const match = [...this.si.nodes.values()].find((n) => displayName(n) === v || n.path === v) ||
+          [...this.si.nodes.values()].find((n) => displayName(n).toLowerCase().includes(v.toLowerCase()));
+        o.focus = v && match ? match.id : null; o.cycleMembers = null; this.save(); this.draw();
+      });
+      const redraw = () => { this.save(); this.draw(); };
+      this.cyclesEl = h("div", { class: "card" });
+      this.fanEl = h("div", { class: "card" });
+      this.root.append(h("div", { class: "toolbar" },
+        field("Level", select([["auto", "Auto"], ["component", "Components"], ["project", "Projects"], ["package", "Packages / directories"], ["module", "Modules / files"], ["symbol", "Symbols (use with focus)"]], o.level, (v) => {
+          o.level = v; if (v === "symbol" && !o.relationships.includes("calls")) o.relationships = [...o.relationships, "calls"]; redraw(); })),
+        h("div", { class: "field" }, h("span", { text: "Focus" }), h("div", { class: "group" }, this.focusInput, this.datalist,
+          h("button", { class: "btn small", onclick: () => { o.focus = null; o.cycleMembers = null; this.focusInput.value = ""; redraw(); } }, "Clear"))),
+        field("Depth", numberInput(o.depth, 1, 10, (v) => { o.depth = v; redraw(); })),
+        field("Direction", select([["both", "Both"], ["out", "Depends on (outgoing)"], ["in", "Used by (incoming)"]], o.direction2, (v) => { o.direction2 = v; redraw(); })),
+        field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
+        h("div", { class: "field" }, h("span", { text: "Relationships" }), h("div", { class: "group" },
+          ["imports", "depends-on", "calls", "invokes", "builds"].map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
+        h("div", { class: "field" }, h("span", { text: "Include" }), h("div", { class: "group" },
+          checkbox("external", o.external, (c) => { o.external = c; redraw(); }), checkbox("stdlib", o.stdlib, (c) => { o.stdlib = c; redraw(); }),
+          checkbox("tests", o.tests, (c) => { o.tests = c; redraw(); }), checkbox("type-only imports", o.typeOnly, (c) => { o.typeOnly = c; redraw(); }),
+          checkbox("highlight cycles", o.cycles, (c) => { o.cycles = c; redraw(); }), checkbox("cycles only", o.cyclesOnly, (c) => { o.cyclesOnly = c; redraw(); }),
+          checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); })))),
+        h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el),
+        h("div", { class: "two-col" }, this.cyclesEl, this.fanEl));
+      this.draw();
+    }
+    setFocus(id) { this.opts.focus = id; this.opts.cycleMembers = null; const n = this.si.nodes.get(id); this.focusInput.value = n ? displayName(n) : ""; this.save(); this.draw(); }
+    async draw() {
+      const o = this.opts, si = this.si;
+      if (o.level === "symbol" && !o.focus && !o.cycleMembers) {
+        this.diagram.setTitle("Symbol-level call graph");
+        await this.diagram.render({ title: "", nodes: [], edges: [], subgraphs: new Map() }, {});
+        this.diagram.overlay.textContent = "Choose a focus node (a function, class or module) to explore the symbol-level call graph.";
+        return;
+      }
+      const view = o.level === "auto" ? autoLevel((x) => dependencyView(si, x), o, ["component", "package", "module"]) : dependencyView(si, o);
+      view.level = view.level || o.level;
+      const f = o.focus ? si.nodes.get(o.focus) : null;
+      this.diagram.setTitle(`Dependencies · ${view.level} level${o.level === "auto" ? " (auto)" : ""}${f ? " · focus " + displayName(f) : ""}`);
+      if (this.datalist.childElementCount === 0 || this.datalistLevel !== o.level) {
+        this.datalistLevel = o.level;
+        this.datalist.innerHTML = "";
+        const names = new Set();
+        for (const n of si.nodes.values()) if (!hasTag(n, "external") && (o.level === "symbol" || n.category !== "symbol")) names.add(displayName(n));
+        [...names].sort().slice(0, 5000).forEach((nm) => this.datalist.appendChild(h("option", { value: nm })));
+      }
+      await this.diagram.render(view, {
+        onNode: (id) => this.details.showNode(si, id),
+        onNodeDouble: (id) => this.setFocus(id),
+        onEdge: (e) => this.details.showEdge(si, e),
+        onCluster: (id) => this.details.showNode(si, id),
+      });
+      this.drawSide(view);
+    }
+    drawSide(view) {
+      const si = this.si, o = this.opts;
+      const name = (id) => { const n = si.nodes.get(id); return n ? displayName(n) : id; };
+      const snapCycles = (this.app.bundle.snapshot.cycles || []);
+      this.cyclesEl.innerHTML = "";
+      this.cyclesEl.append(h("h3", { text: `Cycles (${snapCycles.length} in snapshot)` }),
+        (view.cycles || []).length ? [h("h4", { text: `In this view (${view.cycles.length})` }), h("ul", { class: "plain" }, view.cycles.map((c) => h("li", null,
+          h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); o.cycleMembers = c; o.focus = null; this.draw(); } }, c.map(name).join(" ⇄ ")))))] : null,
+        h("h4", { text: "Detected by analysis" }),
+        snapCycles.length ? h("ul", { class: "plain" }, snapCycles.map((c) => h("li", null, pill(c.level), " ",
+          h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); o.level = c.level === "module" ? "module" : c.level === "project" ? "project" : "component"; o.cycleMembers = c.members; o.focus = null; this.draw(); } },
+            (c.example_path && c.example_path.length ? c.example_path : c.members).map(name).join(" → "))))) : h("div", { class: "empty", text: "No dependency cycles. 🎉" }));
+      const fan = new Map();
+      for (const e of view.edges) {
+        if (!fan.has(e.source)) fan.set(e.source, { id: e.source, out: 0, in: 0 });
+        if (!fan.has(e.target)) fan.set(e.target, { id: e.target, out: 0, in: 0 });
+        fan.get(e.source).out++; fan.get(e.target).in++;
+      }
+      this.fanEl.innerHTML = "";
+      this.fanEl.append(h("h3", { text: "Fan-in / fan-out in this view" }), table([
+        { key: "name", label: "Node", render: (r) => name(r.id), sort: (r) => name(r.id) },
+        { key: "in", label: "Used by", num: true }, { key: "out", label: "Depends on", num: true }], [...fan.values()],
+      { sort: "in", dir: -1, onRow: (r) => { this.details.showNode(si, r.id); this.diagram.select(r.id); } }));
+    }
+  }
+
+  class ActivityTab {
+    constructor(app, root) {
+      this.app = app; this.root = root;
+      this.opts = Object.assign({ auto: true }, storage.get("rv.activity", {}));
+    }
+    save() { storage.set("rv.activity", this.opts); }
+    async init() {
+      const app = this.app;
+      this.mapDiagram = new Diagram({ title: "Activity map", legend: diffLegend, emptyText: "No files are currently modified." });
+      this.flowDiagram = new Diagram({ title: "Affected flow", legend: roleLegend, emptyText: "No affected call flow." });
+      this.details = new DetailsPanel(app);
+      this.headEl = h("div", { class: "toolbar" });
+      this.statsEl = h("div", { class: "stats" });
+      this.tableEl = h("div", { class: "card" });
+      this.flowSide = h("div", { class: "card" });
+      this.root.append(this.headEl, this.statsEl, h("div", { class: "split" }, h("div", null, this.mapDiagram.el, this.tableEl), this.details.el),
+        h("h2", { text: "Execution / call flow that may be affected", style: { fontSize: "16px", margin: "16px 0 8px" } }),
+        h("div", { class: "split" }, h("div", null, this.flowDiagram.el), this.flowSide));
+      await this.load();
+    }
+    activate() { if (this.app.api.live && this.opts.auto) this.schedule(); }
+    deactivate() { clearTimeout(this.timer); }
+    schedule() {
+      clearTimeout(this.timer);
+      const secs = (this.data && this.data.poll_seconds) || 3;
+      this.timer = setTimeout(async () => { if (this.app.currentTab === "activity" && this.opts.auto) { await this.load(true); } this.schedule(); }, secs * 1000);
+    }
+    async load(quiet) {
+      const app = this.app;
+      let data;
+      try { data = await app.api.activity(); } catch (err) { this.headEl.innerHTML = ""; this.headEl.appendChild(h("div", { class: "notice error", text: "Activity unavailable: " + err.message })); return; }
+      const signature = JSON.stringify((data.events || []).map((e) => [e.path, e.last_observed, e.git_status])) + (data.baseline && data.baseline.label);
+      const changed = signature !== this.signature;
+      this.signature = signature;
+      this.data = data;
+      app.activityIndex = data.diff ? indexDiff(data.diff) : null;
+      this.drawHead();
+      if (!quiet || changed) await this.draw();
+    }
+    drawHead() {
+      const app = this.app, d = this.data, b = d.baseline || {};
+      this.headEl.innerHTML = "";
+      this.headEl.append(h("div", { class: "field" }, h("span", { text: "Baseline" }), h("div", null, h("b", { text: b.label || "" }),
+        b.kind === "session" ? pill("work session", "cycle") : pill(b.kind || ""), " ",
+        h("span", { class: "muted", text: b.kind === "session" ? `baseline commit ${(b.session.baseline_head || "").slice(0, 10)} · ${b.session.dirty_files_at_start} file(s) were already dirty` : "uncommitted changes relative to HEAD" }))));
+      if (app.api.live) {
+        const label = h("input", { placeholder: "session label (optional)", size: 18, "aria-label": "Session label" });
+        this.headEl.append(h("div", { class: "field" }, h("span", { text: "Work session" }), h("div", { class: "group" }, label,
+          h("button", { class: "btn", title: "Record the current working tree as the baseline; everything changed afterwards (including commits) is attributed to the session.",
+            onclick: async () => { await app.api.sessionStart(label.value); await this.load(); } }, b.kind === "session" ? "Restart session" : "Start session"),
+          b.kind === "session" ? h("button", { class: "btn", onclick: async () => { await app.api.sessionEnd(); await this.load(); } }, "End session") : null)),
+        h("div", { class: "field" }, h("span", { text: "Live" }), h("div", { class: "group" },
+          checkbox(`auto-refresh (${d.poll_seconds || 3}s)`, this.opts.auto, (c) => { this.opts.auto = c; this.save(); if (c) this.schedule(); else clearTimeout(this.timer); }),
+          h("button", { class: "btn small", onclick: () => this.load() }, "Refresh now"))));
+      }
+      this.headEl.append(h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` }));
+    }
+    async draw() {
+      const d = this.data, s = d.summary || {};
+      this.statsEl.innerHTML = "";
+      this.statsEl.append(stat(s.files || 0, "files changed", "modified"), stat(`+${s.lines_added || 0} / −${s.lines_removed || 0}`, "lines"),
+        stat(s.new_dependencies || 0, "new dependencies", s.new_dependencies ? "added" : ""), stat(s.cycles_introduced || 0, "cycles introduced", s.cycles_introduced ? "cycle" : ""),
+        stat((s.by_impact || {}).high || 0, "high-impact files", (s.by_impact || {}).high ? "removed" : ""), stat(s.tests_changed || 0, "test files changed"),
+        stat(s.config_changed || 0, "config files changed"), stat(s.entry_points_affected || 0, "entry points reaching changes"), stat(s.tests_reaching_changes || 0, "tests reaching changes"));
+      const di = this.app.activityIndex;
+      await this.mapDiagram.render(activityView(d, di), {
+        onNode: (id) => { const ev = (d.events || []).find((e) => e.module_id === id); if (ev) this.details.showActivity(ev, d); else if (di) this.details.showNode(di, id); },
+        onEdge: (e) => di && this.details.showEdge(di, Object.assign({}, e, { underlying: di.edges.filter((x) => x.source_id === e.source && x.target_id === e.target && x.direct).map((x) => x.id) })),
+      });
+      this.tableEl.innerHTML = "";
+      this.tableEl.append(h("h3", { text: `Modified files (${(d.events || []).length})` }), table([
+        { key: "path", label: "File", render: (r) => h("span", { class: "mono", text: r.path }) },
+        { key: "git_status", label: "Status", render: (r) => [pill(r.git_status, r.git_status === "deleted" ? "removed" : ["added", "untracked"].includes(r.git_status) ? "added" : "modified"), r.staged ? pill("staged") : null] },
+        { key: "owning_component_name", label: "Component" },
+        { key: "lines_added", label: "+/−", num: true, render: (r) => r.lines_added === null || r.lines_added === undefined ? "bin" : `+${r.lines_added} −${r.lines_removed}` },
+        { key: "impact_level", label: "Impact", sort: (r) => ({ none: 0, low: 1, medium: 2, high: 3 })[r.impact_level] || 0,
+          render: (r) => [pill(r.impact_level, r.impact_level), ...(r.architecture_impact || []).filter((i) => i.severity !== "none").slice(0, 3).map((i) => h("div", { class: "faint", text: i.kind.replace(/-/g, " ") + ": " + i.detail }))] },
+        { key: "tests_affected", label: "Tests", num: true, sort: (r) => (r.tests_affected || []).length, render: (r) => r.is_test ? "🧪 test" : String((r.tests_affected || []).length) },
+        { key: "configuration_affected", label: "Config", render: (r) => r.configuration_affected ? "⚙ " + (r.configuration_kind || "") : "" },
+        { key: "last_observed", label: "Last observed", render: (r) => fmtTime(r.last_observed) },
+        { key: "first_observed", label: "First observed", render: (r) => fmtTime(r.first_observed) },
+      ], d.events || [], { onRow: (r) => { this.details.showActivity(r, d); if (r.module_id) this.mapDiagram.select(r.module_id); }, sort: "impact_level", dir: -1, empty: "No files are currently modified." }));
+      const flow = d.flow || { nodes: [], edges: [] };
+      await this.flowDiagram.render(flowView(flow), { onNode: (id) => di && this.details.showNode(di, id), onCluster: (id) => di && this.details.showNode(di, id) });
+      const name = (id) => { const n = di && di.nodes.get(id); return n ? displayName(n) : id; };
+      const pathList = (items) => h("ul", { class: "plain" }, items.slice(0, 50).map((x) => h("li", null, h("b", { text: x.name }), " ", pill(x.kind),
+        x.path && x.path.length > 1 ? h("div", { class: "faint", text: x.path.map(name).join(" → ") }) : null)));
+      this.flowSide.innerHTML = "";
+      this.flowSide.append(h("h3", { text: "What may be affected" }), h("div", { class: "muted", text: flow.mode === "modules" ? "Module-level analysis (no call data)." : flow.mode === "none" ? "" : "Static call-graph analysis (heuristic; dynamic dispatch is not resolved)." }),
+        (flow.notes || []).map((n) => h("div", { class: "notice", text: n })),
+        h("h4", { text: `Entry points reaching the change (${(flow.entry_points || []).length})` }), (flow.entry_points || []).length ? pathList(flow.entry_points) : h("div", { class: "empty", text: "None found." }),
+        h("h4", { text: `Tests reaching the change (${(flow.tests || []).length})` }), (flow.tests || []).length ? pathList(flow.tests) : h("div", { class: "empty", text: "None found." }),
+        flow.truncated ? h("div", { class: "notice warn", text: "The flow graph was truncated; not every caller is shown." }) : null);
+    }
+  }
+
+  // ================================================================== APP
+  class App {
+    constructor(api, bundle) {
+      this.api = api; this.bundle = bundle; this.tabs = {}; this.currentTab = null;
+      THEME = bundle.theme;
+      this.snapshotIndex = indexSnapshot(bundle.snapshot);
+    }
+    header() {
+      const b = this.bundle, p = b.profile || b.snapshot.profile || {};
+      $("#mode-label").textContent = " · " + (b.snapshot.repository_name || "");
+      const info = $("#repo-info");
+      info.innerHTML = "";
+      const chips = [p.branch ? "⎇ " + p.branch : p.is_git ? "detached HEAD" : "no Git", p.head ? "HEAD " + p.head.slice(0, 10) : null,
+        `${b.snapshot.modules.length} modules`, `${b.snapshot.components.length} components`, `${b.snapshot.symbols.length} symbols`,
+        (p.languages || []).slice(0, 3).map((l) => l.display).join(", ")];
+      for (const c of chips) if (c) info.appendChild(h("span", { class: "chip", text: c }));
+      const badge = $("#mode-badge");
+      badge.textContent = this.api.live ? "● live" : `static report · ${fmtTime(b.generated_at)}`;
+      badge.classList.toggle("live", this.api.live);
+      document.title = `repoviz · ${b.snapshot.repository_name}`;
+    }
+    async init() {
+      this.header();
+      const themeBtn = $("#theme-toggle");
+      const applyTheme = (t) => { if (t) document.documentElement.setAttribute("data-theme", t); else document.documentElement.removeAttribute("data-theme"); };
+      applyTheme(storage.get("rv.theme", null));
+      themeBtn.addEventListener("click", () => {
+        const cur = document.documentElement.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        const next = cur === "dark" ? "light" : "dark"; storage.set("rv.theme", next); applyTheme(next); initMermaid(); this.rerender();
+      });
+      const ctors = { changes: ChangesTab, structure: StructureTab, dependencies: DependenciesTab, activity: ActivityTab };
+      for (const btn of $$(".tabs [role=tab]")) {
+        btn.addEventListener("click", () => this.show(btn.dataset.tab));
+        btn.addEventListener("keydown", (ev) => {
+          const all = $$(".tabs [role=tab]"); const i = all.indexOf(btn);
+          if (ev.key === "ArrowRight") { all[(i + 1) % all.length].focus(); all[(i + 1) % all.length].click(); }
+          if (ev.key === "ArrowLeft") { all[(i + all.length - 1) % all.length].focus(); all[(i + all.length - 1) % all.length].click(); }
+        });
+      }
+      this.ctors = ctors;
+      const fromHash = (location.hash.match(/tab=(\w+)/) || [])[1];
+      await this.show(ctors[fromHash] ? fromHash : storage.get("rv.tab", "changes"));
+    }
+    async ensure(tab) {
+      if (!this.tabs[tab]) {
+        const t = new this.ctors[tab](this, $("#tab-" + tab));
+        this.tabs[tab] = t;
+        try { await t.init(); } catch (err) { console.error(err); $("#tab-" + tab).appendChild(h("div", { class: "notice error", text: "Failed to initialise this tab: " + err.message })); }
+      }
+      return this.tabs[tab];
+    }
+    async show(tab) {
+      if (this.currentTab && this.tabs[this.currentTab] && this.tabs[this.currentTab].deactivate) this.tabs[this.currentTab].deactivate();
+      this.currentTab = tab;
+      storage.set("rv.tab", tab);
+      history.replaceState(null, "", "#tab=" + tab);
+      for (const btn of $$(".tabs [role=tab]")) btn.setAttribute("aria-selected", String(btn.dataset.tab === tab));
+      for (const panel of $$(".tabpanel")) panel.hidden = panel.id !== "tab-" + tab;
+      const t = await this.ensure(tab);
+      if (t.activate) t.activate();
+    }
+    rerender() { for (const t of Object.values(this.tabs)) if (t.draw) t.draw(); }
+    selectNode(idx, id) {
+      const t = this.tabs[this.currentTab];
+      if (t && t.details) t.details.showNode(idx, id);
+      if (t && t.diagram) t.diagram.select(id);
+    }
+    async focusDependencies(id) { await this.show("dependencies"); this.tabs.dependencies.setFocus(id); }
+    async showInStructure(id) {
+      await this.show("structure");
+      const si = this.snapshotIndex, n = si.nodes.get(id);
+      const target = n && (si.children.get(id) || []).length ? id : n && n.parent_id ? n.parent_id : null;
+      if (target) this.tabs.structure.setRoot(target);
+      this.tabs.structure.details.showNode(si, id);
+    }
+  }
+
+  function initMermaid() {
+    const t = document.documentElement.getAttribute("data-theme");
+    const dark = t ? t === "dark" : window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches;
+    window.mermaid.initialize({
+      startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default", maxTextSize: 5000000, maxEdges: 20000,
+      flowchart: { htmlLabels: true, useMaxWidth: false, curve: "basis", nodeSpacing: 30, rankSpacing: 50 },
+      themeVariables: { fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" },
+    });
+  }
+
+  async function main() {
+    const fail = (msg) => { $("main").innerHTML = ""; $("main").appendChild(h("div", { class: "notice error", text: msg })); };
+    if (!window.mermaid) { fail("Mermaid failed to load."); return; }
+    initMermaid();
+    let api, bundle;
+    try {
+      const embedded = await readEmbedded();
+      if (embedded) { api = new StaticApi(embedded); bundle = embedded; }
+      else { api = new LiveApi(); bundle = await api.bundle(); }
+    } catch (err) { fail("Could not load repository data: " + err.message); return; }
+    const app = new App(api, bundle);
+    APP = app;
+    window.repoviz = { app, toMermaid, changesView, dependencyView, structureView, flowView, activityView, indexDiff, indexSnapshot };
+    await app.init();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", main); else main();
+})();

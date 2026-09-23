@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repoviz"
+version = "0.1.0"
+description = "Read-only repository architecture, change, and activity visualizer built on Mermaid diagrams"
+readme = "README.md"
+requires-python = ">=3.10"
+# The runtime is standard-library only so the tool works offline and inside
+# minimal environments.  Everything below is optional.
+dependencies = ["tomli>=1.1; python_version < '3.11'"]
+
+[project.optional-dependencies]
+# Cross-check the AST import graph with grimp for working-tree snapshots.
+grimp = ["grimp>=3.0"]
+test = ["pytest>=7"]
+# End-to-end browser tests of the rendered diagrams.
+browser = ["playwright>=1.40"]
+
+[project.scripts]
+repoviz = "repoviz.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+repoviz = ["web/*.html", "web/*.js", "web/*.css", "web/*.json", "web/vendor/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "browser: renders diagrams in a headless browser (skipped when Playwright/Chromium are unavailable)",
+]
+
+[tool.repoviz]
+# repoviz analyzes itself with this configuration.
+exclude = ["src/repoviz/web/vendor/**"]

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%234f46e5%27/%3E%3C/svg%3E">
+<title>__TITLE__</title>
+<!--REPOVIZ:CSS-->
+</head>
+<body>
+<header class="app-header">
+  <div class="brand">repoviz<small id="mode-label"></small></div>
+  <div class="repo-info" id="repo-info" aria-live="polite"></div>
+  <div class="header-spacer"></div>
+  <span class="badge" id="mode-badge"></span>
+  <button class="btn small" id="theme-toggle" type="button" title="Toggle light/dark theme">◐ Theme</button>
+</header>
+<nav class="tabs" role="tablist" aria-label="Views">
+  <button role="tab" id="tabbtn-changes" aria-controls="tab-changes" data-tab="changes" aria-selected="true">Changes</button>
+  <button role="tab" id="tabbtn-structure" aria-controls="tab-structure" data-tab="structure" aria-selected="false">Structure</button>
+  <button role="tab" id="tabbtn-dependencies" aria-controls="tab-dependencies" data-tab="dependencies" aria-selected="false">Dependencies</button>
+  <button role="tab" id="tabbtn-activity" aria-controls="tab-activity" data-tab="activity" aria-selected="false">Activity &amp; Flow</button>
+</nav>
+<main>
+  <section class="tabpanel" id="tab-changes" role="tabpanel" aria-labelledby="tabbtn-changes"></section>
+  <section class="tabpanel" id="tab-structure" role="tabpanel" aria-labelledby="tabbtn-structure" hidden></section>
+  <section class="tabpanel" id="tab-dependencies" role="tabpanel" aria-labelledby="tabbtn-dependencies" hidden></section>
+  <section class="tabpanel" id="tab-activity" role="tabpanel" aria-labelledby="tabbtn-activity" hidden></section>
+  <noscript><div class="notice error">This page needs JavaScript to render diagrams.</div></noscript>
+</main>
+<!--REPOVIZ:DATA-->
+<!--REPOVIZ:MERMAID-->
+<!--REPOVIZ:APP-->
+</body>
+</html>
