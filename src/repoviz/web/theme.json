@@ -1,38 +1,206 @@
 {
   "status": {
-    "added":     {"fill": "#dcfce7", "stroke": "#15803d", "color": "#14532d", "width": 2.5, "dash": null,  "icon": "✚", "word": "added"},
-    "removed":   {"fill": "#fee2e2", "stroke": "#b91c1c", "color": "#7f1d1d", "width": 2.5, "dash": "6 4", "icon": "✖", "word": "removed"},
-    "modified":  {"fill": "#fef3c7", "stroke": "#b45309", "color": "#78350f", "width": 2.5, "dash": null,  "icon": "✎", "word": "modified"},
-    "unchanged": {"fill": "#f3f4f6", "stroke": "#9ca3af", "color": "#1f2937", "width": 1,   "dash": null,  "icon": "",  "word": "unchanged"}
+    "added": {
+      "fill": "#dcfce7",
+      "stroke": "#15803d",
+      "color": "#14532d",
+      "width": 2.5,
+      "dash": null,
+      "icon": "✚",
+      "word": "added"
+    },
+    "removed": {
+      "fill": "#fee2e2",
+      "stroke": "#b91c1c",
+      "color": "#7f1d1d",
+      "width": 2.5,
+      "dash": "6 4",
+      "icon": "✖",
+      "word": "removed"
+    },
+    "modified": {
+      "fill": "#fef3c7",
+      "stroke": "#b45309",
+      "color": "#78350f",
+      "width": 2.5,
+      "dash": null,
+      "icon": "✎",
+      "word": "modified"
+    },
+    "unchanged": {
+      "fill": "#f3f4f6",
+      "stroke": "#9ca3af",
+      "color": "#1f2937",
+      "width": 1,
+      "dash": null,
+      "icon": "",
+      "word": "unchanged"
+    }
   },
   "edge": {
-    "added":     {"stroke": "#16a34a", "width": 2.5, "dash": null,  "arrow": "==>",  "marker": "+ new"},
-    "removed":   {"stroke": "#dc2626", "width": 2,   "dash": "6 4", "arrow": "-.->", "marker": "− removed"},
-    "modified":  {"stroke": "#d97706", "width": 2,   "dash": null,  "arrow": "-->",  "marker": "~ changed"},
-    "unchanged": {"stroke": "#9ca3af", "width": 1.2, "dash": null,  "arrow": "-->",  "marker": ""},
-    "cycle":     {"stroke": "#7c3aed", "width": 2.5, "dash": "8 4", "arrow": "-.->", "marker": "⟲ cycle"}
+    "added": {
+      "stroke": "#16a34a",
+      "width": 2.5,
+      "dash": null,
+      "arrow": "==>",
+      "marker": "+ new"
+    },
+    "removed": {
+      "stroke": "#dc2626",
+      "width": 2,
+      "dash": "6 4",
+      "arrow": "-.->",
+      "marker": "− removed"
+    },
+    "modified": {
+      "stroke": "#d97706",
+      "width": 2,
+      "dash": null,
+      "arrow": "-->",
+      "marker": "~ changed"
+    },
+    "unchanged": {
+      "stroke": "#9ca3af",
+      "width": 1.2,
+      "dash": null,
+      "arrow": "-->",
+      "marker": ""
+    },
+    "cycle": {
+      "stroke": "#7c3aed",
+      "width": 2.5,
+      "dash": "8 4",
+      "arrow": "-.->",
+      "marker": "⟲ cycle"
+    }
   },
   "role": {
-    "changed": {"fill": "#fef3c7", "stroke": "#b45309", "color": "#78350f", "width": 2.5, "dash": null},
-    "caller":  {"fill": "#e0f2fe", "stroke": "#0369a1", "color": "#0c4a6e", "width": 1.5, "dash": null},
-    "callee":  {"fill": "#f1f5f9", "stroke": "#64748b", "color": "#1e293b", "width": 1,   "dash": "3 3"},
-    "path":    {"fill": "#e0f2fe", "stroke": "#0369a1", "color": "#0c4a6e", "width": 1,   "dash": null},
-    "entry":   {"fill": "#ede9fe", "stroke": "#6d28d9", "color": "#3b0764", "width": 2,   "dash": null},
-    "test":    {"fill": "#ccfbf1", "stroke": "#0f766e", "color": "#134e4a", "width": 2,   "dash": null}
+    "changed": {
+      "fill": "#fef3c7",
+      "stroke": "#b45309",
+      "color": "#78350f",
+      "width": 2.5,
+      "dash": null
+    },
+    "caller": {
+      "fill": "#e0f2fe",
+      "stroke": "#0369a1",
+      "color": "#0c4a6e",
+      "width": 1.5,
+      "dash": null
+    },
+    "callee": {
+      "fill": "#f1f5f9",
+      "stroke": "#64748b",
+      "color": "#1e293b",
+      "width": 1,
+      "dash": "3 3"
+    },
+    "path": {
+      "fill": "#e0f2fe",
+      "stroke": "#0369a1",
+      "color": "#0c4a6e",
+      "width": 1,
+      "dash": null
+    },
+    "entry": {
+      "fill": "#ede9fe",
+      "stroke": "#6d28d9",
+      "color": "#3b0764",
+      "width": 2,
+      "dash": null
+    },
+    "test": {
+      "fill": "#ccfbf1",
+      "stroke": "#0f766e",
+      "color": "#134e4a",
+      "width": 2,
+      "dash": null
+    }
   },
   "kind": {
-    "component": {"fill": "#eef2ff", "stroke": "#4f46e5", "color": "#1e1b4b", "width": 1.5, "dash": null},
-    "package":   {"fill": "#f8fafc", "stroke": "#64748b", "color": "#0f172a", "width": 1.2, "dash": null},
-    "module":    {"fill": "#ffffff", "stroke": "#94a3b8", "color": "#0f172a", "width": 1,   "dash": null},
-    "external":  {"fill": "#f5f5f4", "stroke": "#a8a29e", "color": "#44403c", "width": 1,   "dash": "4 3"},
-    "structural":{"fill": "#fafaf9", "stroke": "#d6d3d1", "color": "#57534e", "width": 1,   "dash": "2 2"},
-    "hot":       {"fill": "#ffedd5", "stroke": "#c2410c", "color": "#7c2d12", "width": 2,   "dash": null}
+    "component": {
+      "fill": "#eef2ff",
+      "stroke": "#4f46e5",
+      "color": "#1e1b4b",
+      "width": 1.5,
+      "dash": null
+    },
+    "package": {
+      "fill": "#f8fafc",
+      "stroke": "#64748b",
+      "color": "#0f172a",
+      "width": 1.2,
+      "dash": null
+    },
+    "module": {
+      "fill": "#ffffff",
+      "stroke": "#94a3b8",
+      "color": "#0f172a",
+      "width": 1,
+      "dash": null
+    },
+    "external": {
+      "fill": "#f5f5f4",
+      "stroke": "#a8a29e",
+      "color": "#44403c",
+      "width": 1,
+      "dash": "4 3"
+    },
+    "structural": {
+      "fill": "#fafaf9",
+      "stroke": "#d6d3d1",
+      "color": "#57534e",
+      "width": 1,
+      "dash": "2 2"
+    },
+    "hot": {
+      "fill": "#ffedd5",
+      "stroke": "#c2410c",
+      "color": "#7c2d12",
+      "width": 2,
+      "dash": null
+    }
   },
   "icons": {
-    "repository": "🏠", "project": "📦", "workspace-member": "📦", "workspace": "🗂", "package": "📁",
-    "namespace-package": "📂", "directory": "📂", "module": "📄", "file": "📄", "class": "🔷",
-    "function": "ƒ", "method": "ƒ", "main-block": "▶", "external-package": "🔗", "container-image": "🐳",
-    "container": "🐳", "compose": "🐳", "service": "⚙", "ci-pipeline": "🔁", "entry-point": "🚀",
-    "submodule": "🔗", "tests": "🧪", "docs": "📚"
+    "repository": "🏠",
+    "project": "📦",
+    "workspace-member": "📦",
+    "workspace": "🗂",
+    "package": "📁",
+    "namespace-package": "📂",
+    "directory": "📂",
+    "module": "📄",
+    "file": "📄",
+    "class": "🔷",
+    "function": "ƒ",
+    "method": "ƒ",
+    "main-block": "▶",
+    "external-package": "🔗",
+    "container-image": "🐳",
+    "container": "🐳",
+    "compose": "🐳",
+    "service": "⚙",
+    "ci-pipeline": "🔁",
+    "entry-point": "🚀",
+    "submodule": "🔗",
+    "tests": "🧪",
+    "docs": "📚"
+  },
+  "scope": {
+    "protected": {
+      "fill": "#fecaca",
+      "stroke": "#7f1d1d",
+      "color": "#450a0a",
+      "width": 4,
+      "dash": null
+    },
+    "out": {
+      "fill": "#ffedd5",
+      "stroke": "#c2410c",
+      "color": "#431407",
+      "width": 3.5,
+      "dash": null
+    }
   }
 }

@@ -191,3 +191,38 @@ ul.plain li:last-child { border-bottom: 0; }
   .viewport { height: 55vh; }
   .toolbar { padding: 8px; }
 }
+
+/* ---------- AI review ---------- */
+.section-title { font-size: 16px; margin: 16px 0 8px; }
+.small { font-size: 12px; }
+.review-split { grid-template-columns: minmax(0, 1fr) 420px; }
+.files-split { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); }
+@media (max-width: 1100px) { .review-split, .files-split { grid-template-columns: minmax(0, 1fr); } }
+.findings-card { max-height: 78vh; overflow: auto; }
+ul.findings li.finding { padding: 8px 0; }
+ul.findings li.finding.triaged { opacity: .6; }
+.finding-head { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.finding .loc { display: inline-block; margin: 2px 0; font-size: 12px; }
+.finding .actions, .file-card .actions { margin-top: 6px; }
+pre.excerpt { margin: 4px 0; padding: 4px 6px; background: var(--code-bg); border-radius: 4px; overflow-x: auto; white-space: pre; }
+.toolbar textarea { font: 12.5px var(--mono); padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); resize: vertical; }
+.note-form { border: 1px solid var(--accent); border-radius: 6px; padding: 8px; margin: 6px 0; display: grid; gap: 6px; background: var(--panel); }
+.note-form textarea { width: 100%; font: inherit; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+.diff-wrap { overflow: auto; max-height: 70vh; border: 1px solid var(--border); border-radius: 6px; }
+table.diff { font-family: var(--mono); font-size: 12px; border-collapse: collapse; width: 100%; }
+table.diff td { border: 0; padding: 0 6px; white-space: pre; vertical-align: top; }
+table.diff td.ln { color: var(--faint); text-align: right; user-select: none; width: 1%; }
+table.diff td.mk { width: 1%; font-weight: 700; user-select: none; }
+table.diff tr { cursor: pointer; }
+table.diff tr.add td.code, table.diff tr.add td.mk { background: var(--added-bg); }
+table.diff tr.del td.code, table.diff tr.del td.mk { background: var(--removed-bg); }
+table.diff tr.add td.mk { color: var(--added); }
+table.diff tr.del td.mk { color: var(--removed); }
+table.diff tr.hunk td { color: var(--muted); background: var(--panel-2); padding: 2px 6px; }
+table.diff tr.has-note td.code { box-shadow: inset 3px 0 0 var(--accent); }
+table.diff tr.note-row td { white-space: normal; font-family: var(--sans); background: var(--accent-soft); padding: 3px 6px; }
+table.diff tr.note-form-row td { white-space: normal; font-family: var(--sans); }
+table.diff tr.flash td.code { outline: 2px solid var(--accent); }
+pre.prompt { max-height: 360px; overflow: auto; background: var(--code-bg); padding: 10px; border-radius: 6px; white-space: pre-wrap; }
+del { color: var(--removed); }
+ins { color: var(--added); text-decoration: none; }

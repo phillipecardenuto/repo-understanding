@@ -48,6 +48,16 @@ class ComponentRule:
 
 
 @dataclass
+class DependencyRule:
+    """A forbidden dependency: code matching ``source`` must not depend on code matching ``target``."""
+
+    source: list[str]
+    target: list[str]
+    message: str = ""
+    severity: str = "high"
+
+
+@dataclass
 class Config:
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
@@ -76,6 +86,12 @@ class Config:
     poll_seconds: float = 3.0
     churn_commits: int = 300
     state_dir: str | None = None
+    # Review of AI-agent work
+    review_allowed: list[str] = field(default_factory=list)
+    review_protected: list[str] = field(default_factory=list)
+    review_rules: list[DependencyRule] = field(default_factory=list)
+    review_sensitive: bool = True
+    review_disabled_checks: list[str] = field(default_factory=list)
     # Where the values came from (for display/debugging).
     sources: list[str] = field(default_factory=list)
 
@@ -84,6 +100,8 @@ class Config:
         data.pop("sources", None)
         data.pop("poll_seconds", None)
         data.pop("max_diagram_nodes", None)
+        for key in [k for k in data if k.startswith("review_")]:
+            data.pop(key)
         return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict[str, Any]:
@@ -190,6 +208,32 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
     if activity is not None:
         cfg.poll_seconds = float(activity.get("poll_seconds", cfg.poll_seconds))
         cfg.churn_commits = int(activity.get("churn_commits", cfg.churn_commits))
+    review = take("review")
+    if review is not None:
+        if not isinstance(review, dict):
+            raise ConfigError("'review' must be a table")
+        if "allowed" in review:
+            cfg.review_allowed = _as_list(review["allowed"], "review.allowed")
+        if "protected" in review:
+            cfg.review_protected = _as_list(review["protected"], "review.protected")
+        if "sensitive" in review:
+            cfg.review_sensitive = bool(review["sensitive"])
+        if "disabled_checks" in review:
+            cfg.review_disabled_checks = _as_list(review["disabled_checks"], "review.disabled_checks")
+        rules = review.get("rules")
+        if rules is not None:
+            if not isinstance(rules, list):
+                raise ConfigError("'review.rules' must be an array of tables")
+            cfg.review_rules = []
+            for r in rules:
+                if not isinstance(r, dict) or not r.get("from") or not r.get("to"):
+                    raise ConfigError("each review rule needs 'from' and 'to' globs")
+                sev = str(r.get("severity", "high"))
+                if sev not in ("high", "medium", "low"):
+                    raise ConfigError("review rule severity must be high, medium or low")
+                cfg.review_rules.append(DependencyRule(_as_list(r["from"], "review.rules.from"),
+                                                       _as_list(r["to"], "review.rules.to"),
+                                                       str(r.get("message", "")), sev))
     unknown = sorted(set(data) - known)
     if unknown:
         cfg.sources.append(f"{origin} (ignored unknown keys: {', '.join(unknown)})")

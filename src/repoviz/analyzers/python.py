@@ -812,11 +812,16 @@ class PythonAnalyzer(Analyzer):
                         target_id = modules[target_path].node_id
                         if target_id == mod.node_id:
                             continue
-                        confidence = 1.0 if exact or imp.kind == "from" else 0.6
+                        confidence = 1.0 if exact else 0.6
                         if imp.kind == "dynamic":
                             confidence = min(confidence, 0.7)
-                        if not exact and imp.kind != "from":
+                        if not exact:
+                            # Only a prefix exists (``import pkg.missing``): the import would fail at runtime.
                             meta["unresolved_submodule"] = dotted
+                            if not imp.conditional:
+                                b.diagnostic("warning", "unresolved-internal-import",
+                                             f"'{dotted}' does not exist in the repository (closest: "
+                                             f"'{modules[target_path].qualname}').", self.name, f, imp.line)
                         b.add_edge(mod.node_id, target_id, REL_IMPORTS, analyzer=self.name, evidence=[ev],
                                    confidence=confidence, metadata=meta)
                         n_edges += 1

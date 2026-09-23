@@ -587,13 +587,16 @@
       }
     }
     for (const n of byParent.get(null) || []) lines.push(nodeLine(n, "  "));
+    // A second class (scope overlay) is applied after the status class so it wins.
+    for (const n of view.nodes) if (n.extraClass) lines.push(`  class ${n.id} ${n.extraClass}`);
     const ls = [];
     view.edges.forEach((e, i) => {
       const s = edgeStyle(e);
       lines.push(s.label && s.arrow !== "---" ? `  ${e.source} ${s.arrow}|"${mEsc(s.label, 60)}"| ${e.target}` : `  ${e.source} ${s.arrow} ${e.target}`);
       ls.push(`  linkStyle ${i} ${s.style}`);
     });
-    return lines.concat(ls, classDefs("st_", THEME.status), classDefs("kind_", THEME.kind), classDefs("role_", THEME.role)).join("\n") + "\n";
+    return lines.concat(ls, classDefs("st_", THEME.status), classDefs("kind_", THEME.kind), classDefs("role_", THEME.role),
+      classDefs("scope_", THEME.scope || {})).join("\n") + "\n";
   }
 
   // -------------------------------------------------------- diagram widget
@@ -1353,7 +1356,8 @@
           checkbox(`auto-refresh (${d.poll_seconds || 3}s)`, this.opts.auto, (c) => { this.opts.auto = c; this.save(); if (c) this.schedule(); else clearTimeout(this.timer); }),
           h("button", { class: "btn small", onclick: () => this.load() }, "Refresh now"))));
       }
-      this.headEl.append(h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` }));
+      this.headEl.append(h("button", { class: "btn small", onclick: () => this.app.show("review") }, "Review this work →"),
+        h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` }));
     }
     async draw() {
       const d = this.data, s = d.summary || {};
@@ -1394,6 +1398,567 @@
     }
   }
 
+  // ============================================================ AI REVIEW
+  /* Glob matching (mirror of globs.py) so scope edits apply instantly, also in the offline report. */
+  const globCache = new Map();
+  function globRegex(pattern, subtree) {
+    const key = pattern + (subtree ? "\u0001" : "");
+    if (globCache.has(key)) return globCache.get(key);
+    let pat = pattern.trim();
+    const dirOnly = pat.endsWith("/");
+    pat = pat.startsWith("/") ? pat.replace(/^\/+|\/+$/g, "") : pat.replace(/\/+$/, "");
+    const anchored = pattern.trim().startsWith("/") || pat.includes("/");
+    let out = "";
+    for (let i = 0; i < pat.length; i++) {
+      const c = pat[i];
+      if (c === "*") {
+        if (pat[i + 1] === "*") {
+          i++;
+          if (pat[i + 1] === "/") { i++; out += "(?:.*/)?"; } else out += ".*";
+        } else out += "[^/]*";
+      } else if (c === "?") out += "[^/]";
+      else out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+    const re = new RegExp("^" + (anchored ? "" : "(?:.*/)?") + out + (subtree ? (dirOnly ? "/.+" : "(?:/.*)?") : "") + "$", "s");
+    globCache.set(key, re);
+    return re;
+  }
+  const globMatch = (path, pattern) => !!pattern && globRegex(pattern, true).test(path.replace(/^\/+|\/+$/g, ""));
+  const matchAny = (path, patterns) => (patterns || []).some((p) => globMatch(path, p));
+  function scopeOf(path, scope) {
+    if (scope.protected.length && matchAny(path, scope.protected)) return "protected";
+    if (scope.allowed.length) return matchAny(path, scope.allowed) ? "allowed" : "out-of-scope";
+    return "unscoped";
+  }
+  const SEV = { high: 0, medium: 1, low: 2, info: 3 };
+  const VERDICT_LABELS = { "should-not-touch": "Should not have been modified", "logic-error": "Logic error", missed: "Missed / incomplete",
+    improve: "Should be improved", question: "Question", ok: "Looks good / not an issue" };
+  const VERDICT_FOR_CATEGORY = { scope: "should-not-touch", correctness: "logic-error", tests: "missed", security: "logic-error",
+    architecture: "improve", hygiene: "improve" };
+  const splitGlobs = (text) => (text || "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+  function scopePill(scope) {
+    return { protected: pill("⛔ protected", "high"), "out-of-scope": pill("⚠ out of scope", "medium"), allowed: pill("✓ in scope", "added"),
+      unscoped: null }[scope] || null;
+  }
+  function sevPill(sev) { return pill(sev, sev === "high" ? "high" : sev === "medium" ? "medium" : "low"); }
+  const locText = (path, line) => path ? `${path}${line ? ":" + line : ""}` : "";
+
+  /* Feedback prompt (mirror of review.feedback_markdown). */
+  function feedbackMarkdown(report, notes, minSeverity, includeFindings) {
+    const findings = new Map(report.findings.map((f) => [f.id, f]));
+    const triaged = new Set(notes.map((n) => n.finding_id).filter(Boolean));
+    const reverted = new Set(notes.filter((n) => n.verdict === "should-not-touch" && n.path).map((n) => n.path));
+    for (const f of report.findings) if (f.category === "scope" && reverted.has(f.path)) triaged.add(f.id);
+    const scope = report.scope || {};
+    const L = [`# Review feedback: ${report.target.label}`, "", `Compared \`${report.base.label}\` with \`${report.head.label}\`.`];
+    if ((scope.allowed || []).length || (scope.protected || []).length) {
+      L.push("");
+      if ((scope.allowed || []).length) L.push("Allowed scope: " + scope.allowed.map((p) => "`" + p + "`").join(", "));
+      if ((scope.protected || []).length) L.push("Do not modify: " + scope.protected.map((p) => "`" + p + "`").join(", "));
+    }
+    const sections = [["should-not-touch", "Revert: changes that should not have been made"], ["logic-error", "Fix: logic errors"],
+      ["missed", "Complete: missed or incomplete work"], ["improve", "Improve"], ["question", "Answer these questions"]];
+    let n = 0;
+    const loc = (p, l) => p ? "`" + locText(p, l) + "`" : "";
+    for (const [verdict, title] of sections) {
+      const group = notes.filter((x) => x.verdict === verdict);
+      if (!group.length) continue;
+      L.push("", `## ${title}`, "");
+      for (const note of group) {
+        n++;
+        const f = note.finding_id ? findings.get(note.finding_id) : null;
+        const path = note.path || (f && f.path), line = note.line || (f && f.line), symbol = note.symbol || (f && f.symbol);
+        L.push(`${n}. ${loc(path, line)}${symbol ? " (`" + symbol + "`)" : ""} — ${(note.comment || "").trim() || VERDICT_LABELS[verdict]}`);
+        if (f && !(note.comment || "").startsWith(f.title)) L.push(`   Related signal: ${f.title}: ${f.detail || ""}`);
+        const ex = note.excerpt || (f && f.excerpt);
+        if (ex) L.push("   ```", ...String(ex).split("\n").slice(0, 8).map((l) => "   " + l), "   ```");
+      }
+    }
+    if (includeFindings) {
+      const dismissed = new Set(notes.filter((x) => x.verdict === "ok").map((x) => x.finding_id));
+      const rest = report.findings.filter((f) => !triaged.has(f.id) && !dismissed.has(f.id) && SEV[f.severity] <= SEV[minSeverity]);
+      if (rest.length) {
+        L.push("", "## Automated review signals (verify each; fix or explain)", "");
+        for (const f of rest) {
+          n++;
+          L.push(`${n}. [${f.severity}] ${f.title}${f.path ? " — " + loc(f.path, f.line) : ""}: ${f.detail || ""}${f.suggestion ? " Suggestion: " + f.suggestion : ""}`);
+          if (f.excerpt) L.push("   ```", "   " + f.excerpt, "   ```");
+        }
+      }
+    }
+    if (!n) L.push("", "No issues to report.");
+    L.push("", "Please address every numbered item, stay within the allowed scope, and reply with one line per item describing what you changed (or why no change was needed).");
+    return L.join("\n") + "\n";
+  }
+
+  class ReviewTab {
+    constructor(app, root) {
+      this.app = app; this.root = root;
+      this.opts = Object.assign({ targetId: null, severity: "all", category: "all", mapLevel: "auto", minSeverity: "medium", includeFindings: true },
+        storage.get("rv.review", {}));
+      this.selectedComponent = null; this.selectedFile = null;
+    }
+    save() { storage.set("rv.review", this.opts); }
+    get repoKey() { return this.app.bundle.snapshot.repository_id; }
+    async init() {
+      const app = this.app;
+      this.targetSelect = h("select", { "aria-label": "Review target", onchange: () => { this.opts.targetId = this.targetSelect.value; this.save(); this.load(); } });
+      this.allowedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/billing/**, tests/billing/**", "aria-label": "Allowed paths" });
+      this.protectedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/auth/**, migrations/**", "aria-label": "Protected paths" });
+      this.statusEl = h("span", { class: "muted" });
+      const bar = h("div", { class: "toolbar" },
+        field("Review (feature / wave)", this.targetSelect));
+      if (app.api.live) {
+        const base = h("input", { size: 12, placeholder: "base e.g. main", list: "rv-revs-review", "aria-label": "Base revision" });
+        const head = h("input", { size: 12, placeholder: "target e.g. WORKTREE", list: "rv-revs-review", "aria-label": "Target revision" });
+        const rev = app.bundle.revisions || {};
+        const dl = h("datalist", { id: "rv-revs-review" }, ["WORKTREE", "INDEX", "HEAD", ...(rev.branches || []), ...(rev.tags || [])].map((v) => h("option", { value: v })));
+        bar.append(h("div", { class: "field" }, h("span", { text: "…or any range" }), h("div", { class: "group" }, base, head, dl,
+          h("button", { class: "btn", onclick: () => { if (!base.value && !head.value) return; this.custom = { base: base.value.trim() || "HEAD", target: head.value.trim() || "WORKTREE" }; this.load(); } }, "Review"))));
+      }
+      this.saveScopeBtn = h("button", { class: "btn small", hidden: true, onclick: () => this.saveScopeToSession() }, "Save to session");
+      bar.append(
+        field("Allowed to change (globs)", this.allowedInput),
+        field("Must not touch (globs)", this.protectedInput),
+        h("div", { class: "field" }, h("span", { text: "Scope" }), h("div", { class: "group" },
+          h("button", { class: "btn small primary", onclick: () => this.applyScopeFromInputs() }, "Apply scope"), this.saveScopeBtn)),
+        this.statusEl);
+      this.statsEl = h("div", { class: "stats" });
+      this.map = new Diagram({ title: "Where the agent went", legend: () => this.legend(), emptyText: "Nothing was changed." });
+      this.findingsEl = h("div", { class: "card findings-card" });
+      this.filesEl = h("div", { class: "card" });
+      this.fileEl = h("div", { class: "card file-card" }, h("div", { class: "details-empty", text: "Select a file to see its key changes and diff." }));
+      this.feedbackEl = h("div", { class: "card" });
+      this.mapToggle = h("label", { class: "check" }, "Map by ", select([["auto", "auto"], ["components", "components"], ["packages", "packages / directories"], ["files", "files"]],
+        this.opts.mapLevel, (v) => { this.opts.mapLevel = v; this.save(); this.drawMap(); }));
+      this.root.append(bar, this.statsEl,
+        h("div", { class: "split review-split" }, h("div", null, this.map.el, h("div", { class: "group", style: { margin: "6px 2px 12px" } }, this.mapToggle,
+          h("span", { class: "muted", text: "Click a component to list its files; click a file to open its change card." }))), this.findingsEl),
+        h("h2", { class: "section-title", text: "Changed modules" }),
+        h("div", { class: "split files-split" }, this.filesEl, this.fileEl),
+        h("h2", { class: "section-title", text: "Feedback for the agent" }), this.feedbackEl);
+      await this.loadTargets();
+      await this.load();
+    }
+    async loadTargets() {
+      const app = this.app;
+      try { this.targets = app.api.live ? await app.api.get("/api/review/targets") : (app.bundle.review_targets || []); }
+      catch (err) { this.targets = []; this.statusEl.textContent = "Could not list review targets: " + err.message; }
+      this.targetSelect.innerHTML = "";
+      for (const t of this.targets) this.targetSelect.appendChild(h("option", { value: t.id }, t.label));
+      if (!this.targets.some((t) => t.id === this.opts.targetId)) this.opts.targetId = this.targets.length ? this.targets[0].id : null;
+      if (this.opts.targetId) this.targetSelect.value = this.opts.targetId;
+    }
+    async load() {
+      const app = this.app;
+      this.statusEl.innerHTML = ""; this.statusEl.append(h("span", { class: "spinner" }), " reviewing…");
+      try {
+        if (app.api.live) {
+          const params = this.custom ? { base: this.custom.base, target: this.custom.target } : { id: this.opts.targetId || "" };
+          this.custom = null;
+          this.report = await app.api.get("/api/review?" + new URLSearchParams(params).toString());
+        } else {
+          this.report = (app.bundle.reviews || []).find((r) => r.target.id === this.opts.targetId) || (app.bundle.reviews || [])[0];
+          if (!this.report) throw new Error("this report contains no review (there were no changes to review)");
+        }
+      } catch (err) {
+        this.statusEl.textContent = "";
+        this.statsEl.innerHTML = "";
+        this.findingsEl.innerHTML = ""; this.findingsEl.appendChild(h("div", { class: "notice error", text: "Review failed: " + err.message }));
+        return;
+      }
+      const r = this.report;
+      this.key = r.target.key;
+      this.serverFindings = r.findings.filter((f) => f.kind !== "protected-touched" && f.kind !== "out-of-scope");
+      const local = storage.get(`rv.notes.${this.repoKey}.${this.key}`, null);
+      this.notes = app.api.live ? (r.notes || []) : (local || r.notes || []);
+      const scope = storage.get(`rv.scope.${this.repoKey}.${this.key}`, null) || { allowed: r.scope.allowed || [], protected: r.scope.protected || [] };
+      this.allowedInput.value = scope.allowed.join(", ");
+      this.protectedInput.value = scope.protected.join(", ");
+      this.saveScopeBtn.hidden = !(app.api.live && r.target.session_id);
+      this.statusEl.textContent = `${r.base.label} → ${r.head.label}`;
+      this.selectedComponent = null;
+      this.selectedDir = null;
+      this.selectedFile = null;
+      this.applyScope(scope, false);
+      this.draw();
+    }
+    applyScopeFromInputs() {
+      const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value) };
+      storage.set(`rv.scope.${this.repoKey}.${this.key}`, scope);
+      this.applyScope(scope, true);
+    }
+    async saveScopeToSession() {
+      const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value) };
+      try { await this.app.api.post("/api/session/scope", Object.assign({ session_id: this.report.target.session_id }, scope)); this.statusEl.textContent = "Scope saved to the session."; }
+      catch (err) { this.statusEl.textContent = "Could not save scope: " + err.message; }
+    }
+    /* Re-evaluate scope for every file and regenerate the scope findings (the rest come from the server). */
+    applyScope(scope, redraw) {
+      const r = this.report;
+      this.scope = scope;
+      r.scope = Object.assign({}, r.scope, { allowed: scope.allowed, protected: scope.protected });
+      const findings = this.serverFindings.slice();
+      for (const f of r.files) {
+        f.scope = scopeOf(f.path, scope);
+        if (f.scope === "protected") findings.push({ id: "f_scope_p_" + f.path, kind: "protected-touched", category: "scope", severity: "high",
+          title: "Protected area modified", detail: `${f.path} matches a protected pattern.`, path: f.path, component: f.component,
+          suggestion: "Revert this change unless it was explicitly requested." });
+        else if (f.scope === "out-of-scope") findings.push({ id: "f_scope_o_" + f.path, kind: "out-of-scope", category: "scope", severity: "medium",
+          title: "Change outside the agreed scope", detail: `${f.path} is not covered by the allowed patterns.`, path: f.path, component: f.component,
+          suggestion: "Confirm the change was necessary or revert it." });
+      }
+      findings.sort((a, b) => (SEV[a.severity] - SEV[b.severity]) || (a.category > b.category ? 1 : a.category < b.category ? -1 : 0));
+      r.findings = findings;
+      this.findingsByPath = new Map();
+      for (const f of findings) if (f.path) push(this.findingsByPath, f.path, f);
+      for (const c of r.components) {
+        c.scope = {};
+        c.findings = { high: 0, medium: 0, low: 0, info: 0 };
+        for (const path of c.paths) {
+          const file = r.files.find((x) => x.path === path);
+          if (file) c.scope[file.scope] = (c.scope[file.scope] || 0) + 1;
+          for (const f of this.findingsByPath.get(path) || []) c.findings[f.severity]++;
+        }
+      }
+      if (redraw) this.draw();
+    }
+    legend() {
+      const sw = (cls, text) => h("span", { class: "item" }, h("span", { class: "swatch " + cls }), text);
+      return [sw("added", "✚ new"), sw("modified", "✎ modified"), sw("removed", "✖ removed (dashed)"),
+        h("span", { class: "item" }, h("span", { class: "swatch", style: { background: "#fecaca", borderColor: "#7f1d1d", borderWidth: "4px" } }), "⛔ touches a protected area"),
+        h("span", { class: "item" }, h("span", { class: "swatch", style: { background: "#ffedd5", borderColor: "#c2410c", borderWidth: "3px" } }), "⚠ outside the allowed scope"),
+        h("span", { class: "item" }, h("span", { class: "line added" }), "+ new dependency"), h("span", { class: "item" }, h("span", { class: "line cycle" }), "⟲ new cycle")];
+    }
+    draw() {
+      const r = this.report, s = r.summary;
+      const counts = { high: 0, medium: 0, low: 0 };
+      for (const f of r.findings) if (counts[f.severity] !== undefined) counts[f.severity]++;
+      const prot = r.files.filter((f) => f.scope === "protected").length, out = r.files.filter((f) => f.scope === "out-of-scope").length;
+      this.statsEl.innerHTML = "";
+      this.statsEl.append(stat(s.files, "files touched", "modified"), stat(s.components, "components touched"),
+        stat(`+${s.lines_added} / −${s.lines_removed}`, "lines"), stat(s.symbols_changed, "functions / classes changed"),
+        stat(prot, "protected files touched", prot ? "removed" : ""), stat(out, "files outside scope", out ? "modified" : ""),
+        stat(counts.high, "high-severity signals", counts.high ? "removed" : ""), stat(counts.medium, "medium signals", counts.medium ? "modified" : ""),
+        stat(s.tests_changed, "test files changed"), stat(this.notes.length, "review notes"));
+      this.drawMap();
+      this.drawFindings();
+      this.drawFiles();
+      if (this.selectedFile) this.drawFile(this.selectedFile);
+      else { this.fileEl.innerHTML = ""; this.fileEl.appendChild(h("div", { class: "details-empty", text: "Select a file to see its key changes and diff." })); }
+      this.drawFeedback();
+    }
+    mapView() {
+      const r = this.report;
+      const view = { title: "Where the agent went", direction: "LR", mode: "diff", nodes: [], edges: [], subgraphs: new Map(), truncated: 0 };
+      const flags = (scopeCounts, findings) => {
+        const out = [];
+        if (scopeCounts.protected) out.push(`⛔ ${scopeCounts.protected} protected`);
+        if (scopeCounts["out-of-scope"]) out.push(`⚠ ${scopeCounts["out-of-scope"]} out of scope`);
+        if (findings.high) out.push(`❗${findings.high} high`);
+        return out;
+      };
+      let level = this.opts.mapLevel;
+      if (level === "auto") {
+        const dirs = new Set(r.files.map((f) => f.path.split("/").slice(0, -1).join("/")));
+        level = r.components.length >= 3 ? "components" : dirs.size >= 2 ? "packages" : "files";
+      }
+      view.level = level;
+      if (level === "packages") return this.packageView(view, flags);
+      if (level === "components") {
+        for (const c of r.components) {
+          const extra = c.scope.protected ? "scope_protected" : c.scope["out-of-scope"] ? "scope_out" : null;
+          view.nodes.push({ id: "rc_" + c.id, label: c.name, sublabel: [`${plural(c.files, "file")} · +${c.lines_added} −${c.lines_removed}`, ...flags(c.scope, c.findings)].join(" · "),
+            status: c.status === "added" || c.status === "removed" ? c.status : "modified", kind: "component", shape: "box", icon: c.type === "repository" ? "🏠" : "📦", extraClass: extra, ref: c.id });
+        }
+        const known = new Set(r.components.map((c) => c.id));
+        for (const e of r.component_edges || []) {
+          for (const [id, name] of [[e.source, e.source_name], [e.target, e.target_name]]) {
+            if (!known.has(id)) { known.add(id); view.nodes.push({ id: "rc_" + id, label: name, sublabel: "not changed", status: "unchanged", kind: "component", shape: "round", icon: "", ref: id }); }
+          }
+          view.edges.push({ source: "rc_" + e.source, target: "rc_" + e.target, status: e.status, cycle: e.in_cycle, cycleIntroduced: e.new_cycle, count: e.count, relationship: e.relationship });
+        }
+        return view;
+      }
+      const ids = new Map();
+      r.files.forEach((f, i) => ids.set(f.path, "rf_" + i));
+      for (const f of r.files) {
+        const sg = "sg_rc_" + (f.component_id || "root");
+        view.subgraphs.set(sg, f.component || "(repository root)");
+        const fl = this.findingsByPath.get(f.path) || [];
+        const high = fl.filter((x) => x.severity === "high").length;
+        const extra = f.scope === "protected" ? "scope_protected" : f.scope === "out-of-scope" ? "scope_out" : null;
+        view.nodes.push({ id: ids.get(f.path), label: f.path.split("/").pop(), sublabel: [`+${f.lines_added ?? "?"} −${f.lines_removed ?? "?"}`, f.symbols.length ? plural(f.symbols.length, "symbol") : "", high ? `❗${high} high` : "", f.scope === "protected" ? "⛔ protected" : f.scope === "out-of-scope" ? "⚠ out of scope" : ""].filter(Boolean).join(" · "),
+          status: f.status, kind: "module", shape: "box", parent: sg, icon: f.is_test ? "🧪" : "📄", extraClass: extra, ref: f.path });
+      }
+      const extraNodes = new Map();
+      for (const f of r.files) {
+        for (const d of f.dependencies || []) {
+          if (d.stdlib || d.status === "unchanged") continue;
+          let target = d.target_path && ids.get(d.target_path);
+          if (!target) {
+            target = "rx_" + (extraNodes.size + 1);
+            const existing = [...extraNodes.entries()].find(([, v]) => v.label === d.target);
+            if (existing) target = existing[0];
+            else extraNodes.set(target, { id: target, label: d.target, sublabel: d.external ? "external" : "unchanged", status: "unchanged", kind: d.external ? "external" : "module", shape: d.external ? "stadium" : "round", icon: d.external ? "🔗" : "" });
+          }
+          view.edges.push({ source: ids.get(f.path), target, status: d.status, cycle: d.new_cycle, cycleIntroduced: d.new_cycle, count: 1, relationship: d.relationship });
+        }
+      }
+      view.nodes.push(...extraNodes.values());
+      return view;
+    }
+    packageView(view, flags) {
+      const r = this.report;
+      const dirOf = (p) => p.split("/").slice(0, -1).join("/");
+      const groups = new Map();
+      for (const f of r.files) {
+        const d = dirOf(f.path);
+        if (!groups.has(d)) groups.set(d, { id: "rp_" + groups.size, dir: d, files: [], scope: {}, findings: { high: 0, medium: 0, low: 0, info: 0 }, added: 0, removed: 0 });
+        const g = groups.get(d);
+        g.files.push(f);
+        g.scope[f.scope] = (g.scope[f.scope] || 0) + 1;
+        g.added += f.lines_added || 0; g.removed += f.lines_removed || 0;
+        for (const x of this.findingsByPath.get(f.path) || []) g.findings[x.severity]++;
+      }
+      for (const g of groups.values()) {
+        const st = g.files.every((f) => f.status === "added") ? "added" : g.files.every((f) => f.status === "removed") ? "removed" : "modified";
+        view.nodes.push({ id: g.id, label: g.dir || "(repository root)", sublabel: [`${plural(g.files.length, "file")} · +${g.added} −${g.removed}`, ...flags(g.scope, g.findings)].join(" · "),
+          status: st, kind: "package", shape: "box", icon: "📁", extraClass: g.scope.protected ? "scope_protected" : g.scope["out-of-scope"] ? "scope_out" : null, ref: g.dir });
+      }
+      const extra = new Map(), agg = new Map();
+      for (const f of r.files) {
+        const src = groups.get(dirOf(f.path)).id;
+        for (const d of f.dependencies || []) {
+          if (d.stdlib || d.status === "unchanged") continue;
+          let tgt;
+          if (d.target_path && groups.has(dirOf(d.target_path))) tgt = groups.get(dirOf(d.target_path)).id;
+          else {
+            const label = d.external ? d.target : (d.target_path ? dirOf(d.target_path) || "(root)" : d.target);
+            if (!extra.has(label)) extra.set(label, { id: "rx_" + extra.size, label, sublabel: d.external ? "external" : "not changed", status: "unchanged",
+              kind: d.external ? "external" : "package", shape: d.external ? "stadium" : "round", icon: d.external ? "🔗" : "📁" });
+            tgt = extra.get(label).id;
+          }
+          if (tgt === src) continue;
+          const key = src + ">" + tgt + ">" + d.status;
+          const e = agg.get(key) || { source: src, target: tgt, status: d.status, cycle: false, cycleIntroduced: false, count: 0, relationship: d.relationship };
+          e.count++; e.cycle = e.cycle || d.new_cycle; e.cycleIntroduced = e.cycle;
+          agg.set(key, e);
+        }
+      }
+      view.nodes.push(...extra.values());
+      view.edges = [...agg.values()];
+      return view;
+    }
+    async drawMap() {
+      const view = this.mapView();
+      this.map.setTitle(`Where the agent went · by ${view.level} · ${this.report.target.label}`);
+      await this.map.render(view, {
+        onNode: (id) => {
+          const n = view.nodes.find((x) => x.id === id);
+          if (!n) return;
+          if (id.startsWith("rf_")) this.selectFile(n.ref);
+          else if (id.startsWith("rc_")) { this.selectedComponent = this.report.components.some((c) => c.id === n.ref) ? n.ref : null; this.selectedDir = null; this.drawFiles(); }
+          else if (id.startsWith("rp_")) { this.selectedDir = n.ref; this.selectedComponent = null; this.drawFiles(); }
+        },
+        onCluster: (id) => { this.selectedComponent = id.replace(/^rc_/, ""); this.drawFiles(); },
+      });
+    }
+    noteFor(findingId) { return this.notes.find((n) => n.finding_id === findingId); }
+    drawFindings() {
+      const r = this.report, o = this.opts;
+      const cats = [...new Set(r.findings.map((f) => f.category))].sort();
+      const list = r.findings.filter((f) => (o.severity === "all" || f.severity === o.severity) && (o.category === "all" || f.category === o.category));
+      this.findingsEl.innerHTML = "";
+      this.findingsEl.append(h("h3", { text: `Review signals (${r.findings.length})` }),
+        h("div", { class: "muted small", text: "Heuristic signals to guide your review — not proof of a bug. Triage each: dismiss, annotate, or send to the agent." }),
+        h("div", { class: "group", style: { margin: "6px 0" } },
+          select([["all", "all severities"], ["high", "high"], ["medium", "medium"], ["low", "low"], ["info", "info"]], o.severity, (v) => { o.severity = v; this.save(); this.drawFindings(); }),
+          select([["all", "all categories"], ...cats.map((c) => [c, c])], o.category, (v) => { o.category = v; this.save(); this.drawFindings(); })));
+      if (!list.length) { this.findingsEl.appendChild(h("div", { class: "empty", text: "No signals with these filters. 🎉" })); return; }
+      const ul = h("ul", { class: "plain findings" });
+      for (const f of list) {
+        const note = this.noteFor(f.id);
+        const li = h("li", { class: "finding" + (note ? " triaged" : "") },
+          h("div", { class: "finding-head" }, sevPill(f.severity), pill(f.category), " ", h("b", { text: f.title }),
+            note ? pill(note.verdict === "ok" ? "✓ dismissed" : "✎ " + (VERDICT_LABELS[note.verdict] || note.verdict), note.verdict === "ok" ? "added" : "modified") : null),
+          f.path ? h("a", { href: "#", class: "mono loc", onclick: (ev) => { ev.preventDefault(); this.selectFile(f.path, f.line); } }, locText(f.path, f.line)) : null,
+          f.detail ? h("div", { text: f.detail }) : null,
+          f.excerpt ? h("pre", { class: "excerpt", text: f.excerpt }) : null,
+          f.suggestion ? h("div", { class: "faint", text: "Suggestion: " + f.suggestion }) : null,
+          h("div", { class: "group actions" },
+            h("button", { class: "btn small", title: "Mark as reviewed: not an issue", onclick: () => this.addNote({ finding_id: f.id, verdict: "ok", path: f.path, line: f.line, comment: "" }) }, "✓ Not an issue"),
+            h("button", { class: "btn small", title: "Add this signal to the feedback for the agent", onclick: () => this.addNote({ finding_id: f.id, verdict: VERDICT_FOR_CATEGORY[f.category] || "improve", path: f.path, line: f.line, symbol: f.symbol, excerpt: f.excerpt, comment: `${f.title}: ${f.detail || ""}`.trim() }) }, "→ Send to agent"),
+            h("button", { class: "btn small", onclick: (ev) => this.noteForm(ev.target.closest("li"), { finding_id: f.id, path: f.path, line: f.line, symbol: f.symbol, excerpt: f.excerpt }, VERDICT_FOR_CATEGORY[f.category]) }, "✎ Note…"),
+            note ? h("button", { class: "btn small", onclick: () => this.removeNote(note.id) }, "Undo") : null));
+        ul.appendChild(li);
+      }
+      this.findingsEl.appendChild(ul);
+    }
+    drawFiles() {
+      const r = this.report;
+      const dirOf = (p) => p.split("/").slice(0, -1).join("/");
+      const rows = r.files.filter((f) => (!this.selectedComponent || (f.component_id || "root") === this.selectedComponent)
+        && (this.selectedDir === null || this.selectedDir === undefined || dirOf(f.path) === this.selectedDir));
+      const comp = this.selectedComponent ? r.components.find((c) => c.id === this.selectedComponent) : null;
+      const scopeName = comp ? comp.name : (this.selectedDir !== null && this.selectedDir !== undefined ? (this.selectedDir || "(repository root)") : null);
+      this.filesEl.innerHTML = "";
+      this.filesEl.append(h("h3", null, scopeName ? `Files in ${scopeName} (${rows.length})` : `All changed files (${rows.length})`, " ",
+        scopeName ? h("button", { class: "btn small", onclick: () => { this.selectedComponent = null; this.selectedDir = null; this.drawFiles(); } }, "Show all") : null),
+        table([
+          { key: "path", label: "File", render: (f) => h("span", { class: "mono", text: f.path }) },
+          { key: "status", label: "Change", render: (f) => statusPill(f.status) || pill("modified", "modified") },
+          { key: "scope", label: "Scope", render: (f) => scopePill(f.scope) || h("span", { class: "faint", text: "–" }), sort: (f) => ({ protected: 0, "out-of-scope": 1, unscoped: 2, allowed: 3 })[f.scope] },
+          { key: "lines_added", label: "+/−", num: true, render: (f) => f.lines_added === null || f.lines_added === undefined ? "bin" : `+${f.lines_added} −${f.lines_removed}`, sort: (f) => (f.lines_added || 0) + (f.lines_removed || 0) },
+          { key: "symbols", label: "Symbols", num: true, render: (f) => String(f.symbols.length), sort: (f) => f.symbols.length },
+          { key: "findings", label: "Signals", sort: (f) => -(this.findingsByPath.get(f.path) || []).reduce((a, x) => a + (3 - SEV[x.severity]) * 10, 0),
+            render: (f) => { const fl = this.findingsByPath.get(f.path) || []; const hi = fl.filter((x) => x.severity === "high").length; return fl.length ? [hi ? pill(`${hi} high`, "high") : null, ` ${fl.length}`] : ""; } },
+          { key: "tests", label: "Tests", num: true, render: (f) => f.is_test ? "🧪" : String((f.tests_affected || []).length), sort: (f) => (f.tests_affected || []).length },
+          { key: "notes", label: "Notes", num: true, render: (f) => { const n = this.notes.filter((x) => x.path === f.path).length; return n ? "💬 " + n : ""; } },
+        ], rows, { onRow: (f) => this.selectFile(f.path), sort: "findings", empty: "No changed files." }));
+    }
+    selectFile(path, line) {
+      this.selectedFile = path;
+      this.drawFile(path, line);
+      this.fileEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    drawFile(path, focusLine) {
+      const r = this.report, f = r.files.find((x) => x.path === path);
+      this.fileEl.innerHTML = "";
+      if (!f) { this.fileEl.appendChild(h("div", { class: "details-empty", text: "This file is not part of the review." })); return; }
+      const fileNotes = this.notes.filter((n) => n.path === f.path);
+      const notesByLine = new Map();
+      for (const n of fileNotes) if (n.line) push(notesByLine, n.line, n);
+      this.fileEl.append(h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
+        h("div", { class: "muted", text: [f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
+        h("div", { class: "group actions" },
+          h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, "⛔ Should not be touched"),
+          h("button", { class: "btn small", onclick: (ev) => this.noteForm(ev.target.closest(".actions"), { path: f.path }, "improve") }, "✎ Note on this file…"),
+          f.module_id && this.app.snapshotIndex.nodes.has(f.module_id) ? h("button", { class: "btn small", onclick: () => this.app.focusDependencies(f.module_id) }, "Show dependencies") : null));
+      // Key changes: which functions / classes changed and how much.
+      this.fileEl.appendChild(h("h4", { text: `Key changes (${f.symbols.length})` }));
+      if (f.symbols.length) {
+        this.fileEl.appendChild(table([
+          { key: "status", label: "", render: (k) => statusPill(k.status) },
+          { key: "qualified_name", label: "Symbol", render: (k) => [h("span", { class: "mono", text: `${k.kind} ${k.name}` }), k.public === false ? h("span", { class: "faint", text: " (private)" }) : null] },
+          { key: "signature", label: "Signature", render: (k) => k.signature_before && k.signature_before !== k.signature
+            ? h("span", { class: "mono" }, h("del", { text: k.signature_before }), " → ", h("ins", { text: k.signature || "" })) : h("span", { class: "mono faint", text: k.signature || "" }) },
+          { key: "lines_added", label: "+/−", num: true, render: (k) => `+${k.lines_added} −${k.lines_removed}`, sort: (k) => k.lines_added + k.lines_removed },
+        ], f.symbols, { onRow: (k) => this.scrollToLine(k.line), scroll: false }));
+      } else this.fileEl.appendChild(h("div", { class: "empty", text: f.language ? "No function or class changed (module-level or non-code change)." : "No symbol information for this file type." }));
+      if ((f.dependencies || []).length) {
+        this.fileEl.appendChild(h("h4", { text: `Dependency changes (${f.dependencies.length})` }));
+        this.fileEl.appendChild(h("ul", { class: "plain" }, f.dependencies.map((d) => h("li", null, statusPill(d.status) || pill(d.status), " ", d.relationship, " → ",
+          h("b", { text: d.target }), d.external ? pill(d.stdlib ? "stdlib" : "external") : null, d.new_cycle ? pill("⟲ new cycle", "cycle") : null,
+          (d.reasons || []).length ? h("span", { class: "faint", text: " " + d.reasons.join("; ") }) : null))));
+      }
+      const fl = this.findingsByPath.get(f.path) || [];
+      if (fl.length) {
+        this.fileEl.appendChild(h("h4", { text: `Signals in this file (${fl.length})` }));
+        this.fileEl.appendChild(h("ul", { class: "plain" }, fl.map((x) => h("li", null, sevPill(x.severity), " ", h("b", { text: x.title }), x.line ? h("a", { href: "#", class: "mono", onclick: (ev) => { ev.preventDefault(); this.scrollToLine(x.line); } }, ` line ${x.line}`) : null, x.detail ? h("span", { class: "faint", text: " — " + x.detail }) : null))));
+      }
+      if ((f.tests_affected || []).length && !f.is_test) {
+        this.fileEl.appendChild(h("h4", { text: `Tests that exercise this module (${f.tests_affected.length})` }));
+        this.fileEl.appendChild(h("div", { class: "mono faint", text: f.tests_affected.join(", ") }));
+      }
+      this.fileEl.appendChild(h("h4", null, "Diff ", h("span", { class: "faint", text: "— click a line to leave a note for the agent" })));
+      if (!f.hunks || !f.hunks.length) { this.fileEl.appendChild(h("div", { class: "empty", text: f.diff_omitted ? `Diff not shown: ${f.diff_omitted}.` : "No textual diff." })); return; }
+      const tbl = h("table", { class: "diff" });
+      const lineSymbol = (line) => { const k = f.symbols.find((s) => s.line && s.end_line && s.line <= line && line <= s.end_line); return k ? k.qualified_name : null; };
+      for (const hk of f.hunks) {
+        tbl.appendChild(h("tr", { class: "hunk" }, h("td", { colspan: 4, text: `@@ -${hk.old_start},${hk.old_len} +${hk.new_start},${hk.new_len} @@` })));
+        let o = hk.old_start, n = hk.new_start;
+        for (const raw of hk.lines) {
+          const t = raw[0], text = raw.slice(1);
+          const oldNo = t === "+" ? "" : o, newNo = t === "-" ? "" : n;
+          const cls = t === "+" ? "add" : t === "-" ? "del" : "ctx";
+          const anchorLine = t === "-" ? o : n;
+          const lineNotes = t !== "-" ? notesByLine.get(n) || [] : [];
+          const tr = h("tr", { class: cls + (lineNotes.length ? " has-note" : ""), dataset: { line: String(t === "-" ? "" : n) }, title: "Click to add a note on this line" },
+            h("td", { class: "ln", text: oldNo }), h("td", { class: "ln", text: newNo }),
+            h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), h("td", { class: "code", text: text }));
+          tr.addEventListener("click", () => this.noteForm(tr, { path: f.path, line: anchorLine, side: t === "-" ? "old" : "new", symbol: lineSymbol(anchorLine), excerpt: text.trim() }, "logic-error", true));
+          tbl.appendChild(tr);
+          for (const nn of lineNotes) tbl.appendChild(h("tr", { class: "note-row" }, h("td", { colspan: 2 }), h("td", { class: "mk", text: "💬" }),
+            h("td", null, pill(VERDICT_LABELS[nn.verdict] || nn.verdict, nn.verdict === "ok" ? "added" : "modified"), " ", nn.comment || "")));
+          if (t !== "+") o++;
+          if (t !== "-") n++;
+        }
+      }
+      this.fileEl.appendChild(h("div", { class: "diff-wrap" }, tbl));
+      if (focusLine) this.scrollToLine(focusLine);
+    }
+    scrollToLine(line) {
+      if (!line) return;
+      const rows = $$("table.diff tr", this.fileEl).filter((tr) => tr.dataset.line);
+      const row = rows.find((tr) => parseInt(tr.dataset.line, 10) === line) || rows.find((tr) => parseInt(tr.dataset.line, 10) >= line);
+      if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("flash"); setTimeout(() => row.classList.remove("flash"), 1500); }
+    }
+    /* Inline note form; `anchor` is where it appears, `ref` what the note is about. */
+    noteForm(anchor, ref, defaultVerdict, asRow) {
+      $$(".note-form", this.root).forEach((x) => x.remove());
+      const verdict = select(Object.entries(VERDICT_LABELS).filter(([k]) => k !== "ok"), defaultVerdict || "improve", () => {});
+      const text = h("textarea", { rows: 3, placeholder: "What should the agent do? (e.g. 'this should use the cached rate, not recompute it')", "aria-label": "Note" });
+      const form = h("div", { class: "note-form" },
+        h("div", { class: "muted", text: ref.path ? `Note on ${locText(ref.path, ref.line)}${ref.symbol ? " (" + ref.symbol + ")" : ""}` : "General note" }),
+        verdict, text,
+        h("div", { class: "group" },
+          h("button", { class: "btn small primary", onclick: () => { this.addNote(Object.assign({}, ref, { verdict: verdict.value, comment: text.value.trim() })); } }, "Add to feedback"),
+          h("button", { class: "btn small", onclick: () => form.closest(".note-form-row") ? form.closest(".note-form-row").remove() : form.remove() }, "Cancel")));
+      if (asRow) {
+        const row = h("tr", { class: "note-form-row" }, h("td", { colspan: 4 }, form));
+        anchor.after(row);
+      } else anchor.appendChild(form);
+      text.focus();
+    }
+    addNote(note) {
+      note = Object.assign({ id: "n_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created_at: new Date().toISOString() }, note);
+      if (note.finding_id) this.notes = this.notes.filter((n) => n.finding_id !== note.finding_id);
+      this.notes.push(note);
+      this.persistNotes();
+      this.draw();
+    }
+    removeNote(id) { this.notes = this.notes.filter((n) => n.id !== id); this.persistNotes(); this.draw(); }
+    persistNotes() {
+      storage.set(`rv.notes.${this.repoKey}.${this.key}`, this.notes);
+      if (this.app.api.live) {
+        clearTimeout(this.saveTimer);
+        this.saveTimer = setTimeout(() => this.app.api.post("/api/review/notes", { key: this.key, notes: this.notes })
+          .then(() => { this.statusEl.textContent = `notes saved (${this.notes.length})`; }, (err) => { this.statusEl.textContent = "Could not save notes: " + err.message; }), 400);
+      }
+    }
+    drawFeedback() {
+      const o = this.opts, r = this.report;
+      const prompt = feedbackMarkdown(r, this.notes.filter((n) => n.verdict !== "ok"), o.minSeverity, o.includeFindings);
+      const general = h("div", { class: "group" });
+      const preview = h("pre", { class: "prompt", text: prompt });
+      const copy = () => {
+        const done = () => { copyBtn.textContent = "Copied ✓"; setTimeout(() => (copyBtn.textContent = "Copy prompt"), 1500); };
+        if (navigator.clipboard) navigator.clipboard.writeText(prompt).then(done, () => download("review-feedback.md", prompt, "text/markdown"));
+        else download("review-feedback.md", prompt, "text/markdown");
+      };
+      const copyBtn = h("button", { class: "btn primary", onclick: copy }, "Copy prompt");
+      this.feedbackEl.innerHTML = "";
+      this.feedbackEl.append(
+        h("div", { class: "muted", text: "Your notes become a numbered, file:line-referenced prompt you can paste back to the coding agent." }),
+        h("h4", { text: `Notes (${this.notes.length})` }),
+        this.notes.length ? h("ul", { class: "plain" }, this.notes.map((n) => h("li", null,
+          pill(VERDICT_LABELS[n.verdict] || n.verdict, n.verdict === "ok" ? "added" : n.verdict === "should-not-touch" || n.verdict === "logic-error" ? "high" : "modified"), " ",
+          n.path ? h("a", { href: "#", class: "mono", onclick: (ev) => { ev.preventDefault(); this.selectFile(n.path, n.line); } }, locText(n.path, n.line)) : h("span", { class: "faint", text: "general" }),
+          n.symbol ? h("span", { class: "faint", text: ` (${n.symbol})` }) : null, " ", n.comment || "",
+          h("button", { class: "btn small", style: { marginLeft: "8px" }, onclick: () => this.removeNote(n.id) }, "Remove")))) : h("div", { class: "empty", text: "No notes yet: use the buttons on signals, files and diff lines." }),
+        general,
+        h("div", { class: "group", style: { margin: "8px 0" } },
+          checkbox("include untriaged automated signals", o.includeFindings, (c) => { o.includeFindings = c; this.save(); this.drawFeedback(); }),
+          h("span", { class: "muted", text: "at or above" }),
+          select([["high", "high"], ["medium", "medium"], ["low", "low"], ["info", "info"]], o.minSeverity, (v) => { o.minSeverity = v; this.save(); this.drawFeedback(); }),
+          copyBtn, h("button", { class: "btn", onclick: () => download("review-feedback.md", prompt, "text/markdown") }, "Download .md"),
+          this.notes.length ? h("button", { class: "btn", onclick: () => { if (confirm("Remove all notes for this review?")) { this.notes = []; this.persistNotes(); this.draw(); } } }, "Clear notes") : null),
+        h("details", { open: true }, h("summary", { class: "muted" }, "Prompt preview"), preview));
+      general.appendChild(h("button", { class: "btn small", onclick: (ev) => this.noteForm(general, {}, "missed") }, "✎ General note (e.g. a missed requirement)…"));
+    }
+  }
+
   // ================================================================== APP
   class App {
     constructor(api, bundle) {
@@ -1424,7 +1989,7 @@
         const cur = document.documentElement.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
         const next = cur === "dark" ? "light" : "dark"; storage.set("rv.theme", next); applyTheme(next); initMermaid(); this.rerender();
       });
-      const ctors = { changes: ChangesTab, structure: StructureTab, dependencies: DependenciesTab, activity: ActivityTab };
+      const ctors = { review: ReviewTab, changes: ChangesTab, structure: StructureTab, dependencies: DependenciesTab, activity: ActivityTab };
       for (const btn of $$(".tabs [role=tab]")) {
         btn.addEventListener("click", () => this.show(btn.dataset.tab));
         btn.addEventListener("keydown", (ev) => {
@@ -1434,8 +1999,10 @@
         });
       }
       this.ctors = ctors;
+      this.ready = true;
       const fromHash = (location.hash.match(/tab=(\w+)/) || [])[1];
-      await this.show(ctors[fromHash] ? fromHash : storage.get("rv.tab", "changes"));
+      const initial = [pendingTab, fromHash, storage.get("rv.tab", "review")].find((t) => t && ctors[t]) || "review";
+      await this.show(initial);
     }
     async ensure(tab) {
       if (!this.tabs[tab]) {
@@ -1478,6 +2045,16 @@
       startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default", maxTextSize: 5000000, maxEdges: 20000,
       flowchart: { htmlLabels: true, useMaxWidth: false, curve: "basis", nodeSpacing: 30, rankSpacing: 50 },
       themeVariables: { fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" },
+    });
+  }
+
+  /* Tabs clicked while the data is still loading are remembered and opened once the app is ready. */
+  let pendingTab = null;
+  for (const btn of $$(".tabs [role=tab]")) {
+    btn.addEventListener("click", () => {
+      if (window.repoviz && window.repoviz.app && window.repoviz.app.ready) return;
+      pendingTab = btn.dataset.tab;
+      for (const b of $$(".tabs [role=tab]")) b.setAttribute("aria-selected", String(b === btn));
     });
   }
 

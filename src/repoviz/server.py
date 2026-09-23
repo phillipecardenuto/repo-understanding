@@ -106,8 +106,60 @@ class AppState:
 
     def session_end(self) -> dict[str, Any]:
         with self.lock:
-            s = self.repo.state.end_session()
+            s = self.repo.state.end_session(self.repo.git, self.repo.root)
         return s.to_dict() if s else {}
+
+    # -- review ------------------------------------------------------------------------
+
+    def review_targets(self) -> list[dict[str, Any]]:
+        from .review import review_targets
+
+        with self.lock:
+            return [t.to_dict() for t in review_targets(self.repo)]
+
+    def review(self, query: dict[str, str]) -> dict[str, Any]:
+        from .review import build_review, resolve_target
+
+        with self.lock:
+            try:
+                target = resolve_target(self.repo, query.get("id") or None, query.get("base") or None,
+                                        query.get("target") or None)
+                report = build_review(self.repo, target)
+            except (RepositoryError, GitError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            report["notes"] = self.repo.state.load_notes(target.key)
+        return report
+
+    def notes(self, query: dict[str, str]) -> dict[str, Any]:
+        key = query.get("key") or ""
+        if not key:
+            raise ApiError(400, "missing key")
+        return {"key": key, "notes": self.repo.state.load_notes(key)}
+
+    def save_notes(self, body: dict[str, Any]) -> dict[str, Any]:
+        key, notes = body.get("key"), body.get("notes")
+        if not isinstance(key, str) or not key or not isinstance(notes, list) or len(notes) > 2000:
+            raise ApiError(400, "expected {key, notes: [...]}")
+        clean = [n for n in notes if isinstance(n, dict)]
+        with self.lock:
+            self.repo.state.save_notes(key, clean)
+        return {"key": key, "saved": len(clean)}
+
+    def save_scope(self, body: dict[str, Any]) -> dict[str, Any]:
+        def globs_of(value: Any) -> list[str] | None:
+            if value is None:
+                return None
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ApiError(400, "scope patterns must be lists of strings")
+            return [v.strip() for v in value if v.strip()][:200]
+
+        with self.lock:
+            session = self.repo.state.load_session(str(body.get("session_id") or ""))
+            if session is None:
+                raise ApiError(400, "unknown session")
+            session = self.repo.state.update_scope(session, globs_of(body.get("allowed")),
+                                                   globs_of(body.get("protected")))
+        return session.to_dict()
 
 
 def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandler]:
@@ -178,6 +230,12 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.activity())
                 elif path == "/api/profile":
                     self._json(200, state.repo.discover().to_dict())
+                elif path == "/api/review/targets":
+                    self._json(200, state.review_targets())
+                elif path == "/api/review":
+                    self._json(200, state.review(self._query()))
+                elif path == "/api/review/notes":
+                    self._json(200, state.notes(self._query()))
                 else:
                     ctype = mimetypes.guess_type(path)[0] or "text/plain"
                     self._json(404, {"error": f"not found: {path}", "type": ctype})
@@ -195,7 +253,7 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 self._json(HTTPStatus.FORBIDDEN, {"error": "missing X-Repoviz header"})
                 return
             length = int(self.headers.get("Content-Length") or 0)
-            if length > 64_000:
+            if length > 2_000_000:
                 self._json(413, {"error": "request too large"})
                 return
             try:
@@ -207,6 +265,10 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.session_start(body))
                 elif path == "/api/session/end":
                     self._json(200, state.session_end())
+                elif path == "/api/review/notes":
+                    self._json(200, state.save_notes(body))
+                elif path == "/api/session/scope":
+                    self._json(200, state.save_scope(body))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:

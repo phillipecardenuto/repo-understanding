@@ -19,7 +19,7 @@ from repoviz.server import create_server
 playwright = pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
 
-TABS = ("changes", "structure", "dependencies", "activity")
+TABS = ("review", "changes", "structure", "dependencies", "activity")
 ALL_RENDERED = """(tab) => { const vs = document.querySelectorAll('#tab-' + tab + ' .viewport');
   return vs.length > 0 && Array.from(vs).every(v => v.querySelector('svg') ||
     (!v.querySelector('.overlay').hidden && !v.querySelector('.overlay').textContent.includes('Rendering'))); }"""
@@ -116,3 +116,40 @@ def test_live_app_and_session_controls(page, shop_repo) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_review_tab_triage_and_feedback(page, make_repo, tmp_path: Path) -> None:
+    from test_review import APP, agent_wave
+
+    repo = make_repo(APP)
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave 1", allowed=["src/app/billing/**", "tests/**"],
+                          protected=["src/app/auth/**"])
+    agent_wave(repo)
+    report = tmp_path / "review.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert page.evaluate("document.querySelectorAll('#tab-review .viewport g.node').length") > 0
+    text = page.inner_text("#tab-review")
+    assert "Protected area modified" in text and "Call to a removed function" in text
+    # The map marks the protected area with its own style.
+    assert "scope_protected" in page.evaluate("repoviz.app.tabs.review.map.text")
+    # Scope can be edited in the page (client-side re-evaluation).
+    page.fill("#tab-review textarea >> nth=1", "src/app/auth/**, src/app/util/**")
+    page.click("#tab-review >> text=Apply scope")
+    assert page.evaluate("repoviz.app.tabs.review.report.files.filter(f => f.scope === 'protected').length") == 2
+    # Open a file, annotate a diff line, send a signal to the agent.
+    page.click("#tab-review .files-split tbody tr >> text=src/app/billing/invoice.py")
+    page.click("#tab-review table.diff tr.add >> nth=0")
+    page.fill("#tab-review .note-form textarea", "Remove the breakpoint before merging")
+    page.click("#tab-review .note-form >> text=Add to feedback")
+    page.click("#tab-review .findings-card li.finding:has-text('Call to a removed function') >> text=→ Send to agent")
+    prompt = page.inner_text("#tab-review pre.prompt")
+    assert "Remove the breakpoint before merging" in prompt and "`src/app/billing/invoice.py:" in prompt
+    assert "Call to a removed function" in prompt and "Do not modify: `src/app/auth/**`" in prompt
+    # Notes survive a reload (static reports keep them in the browser).
+    page.reload()
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert "Remove the breakpoint before merging" in page.inner_text("#tab-review pre.prompt")
+    assert page.errors == []  # type: ignore[attr-defined]

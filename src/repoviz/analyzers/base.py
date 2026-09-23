@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 from ..config import Config
 from ..ids import IdRegistry, edge_id
+from ..redact import redact
 from ..model import (
     CATEGORY_COMPONENT,
     CATEGORY_MODULE,
@@ -155,7 +156,7 @@ class AnalysisContext:
             return None
         end = min(end or start, start + max_lines - 1, len(lines))
         text = "\n".join(l.rstrip() for l in lines[start - 1:end])
-        return text[:400]
+        return redact(text[:400])
 
     def cached(self, key: tuple[Any, ...], compute: Any) -> Any:
         """Per-file cache that survives across snapshots (keys must include a content hash)."""

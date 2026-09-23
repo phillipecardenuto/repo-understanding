@@ -10,7 +10,9 @@ Examples::
     repoviz diff --mode staged --fail-on new-cycle
     repoviz mermaid --view dependencies --level module
     repoviz discover
-    repoviz session start --label "agent task 42"
+    repoviz session start --label "wave 3" --allow "src/billing/**" --protect "src/auth/**"
+    repoviz review                        # what did the agent touch? what looks wrong?
+    repoviz review --format prompt        # feedback to paste back to the agent
     repoviz activity
 """
 
@@ -345,12 +347,22 @@ def cmd_session(args: argparse.Namespace) -> int:
         if not repo.is_git:
             print("repoviz: sessions need a Git repository", file=sys.stderr)
             return EXIT_ERROR
-        s = repo.state.start_session(repo.git, repo.root, label=args.label or "")
+        s = repo.state.start_session(repo.git, repo.root, label=args.label or "", allowed=args.allow,
+                                     protected=args.protect)
         print(f"session {s.id} started at {s.started_at} (baseline {(s.baseline_head or 'empty')[:12]}, "
               f"{len(s.overrides)} dirty file(s) captured)")
+        if s.allowed or s.protected:
+            print(f"  scope: allowed {s.allowed or '(any)'}; protected {s.protected or '(none)'}")
+    elif args.action == "scope":
+        s = repo.current_session()
+        if s is None:
+            print("no active session", file=sys.stderr)
+            return EXIT_ERROR
+        s = repo.state.update_scope(s, args.allow or None, args.protect or None)
+        print(f"session {s.id} scope: allowed {s.allowed or '(any)'}; protected {s.protected or '(none)'}")
     elif args.action == "end":
-        s = repo.state.end_session()
-        print(f"session {s.id} ended" if s else "no active session")
+        s = repo.state.end_session(repo.git, repo.root)
+        print(f"session {s.id} ended; review it later with: repoviz review session:{s.id}" if s else "no active session")
     elif args.action == "list":
         for s in repo.state.list_sessions():
             print(f"{s.id}  {s.started_at}  {'active' if s.active else 'ended ' + (s.ended_at or '')}  {s.label}")
@@ -362,6 +374,70 @@ def cmd_session(args: argparse.Namespace) -> int:
             print(json.dumps(s.to_dict(), indent=2))
         print(f"state directory: {repo.state.dir}")
     return EXIT_OK
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    from .render.html import dumps
+    from .review import (SEVERITY_ORDER, build_review, feedback_markdown, format_review_text, resolve_target,
+                         review_targets, scope_for)
+
+    repo = _open(args)
+    if args.list:
+        for t in review_targets(repo):
+            print(f"{t.id:<40} {t.label}")
+        return EXIT_OK
+    try:
+        target = resolve_target(repo, args.target, args.base, args.head_rev)
+    except ValueError as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect))
+    notes = repo.state.load_notes(target.key)
+    if args.format == "json":
+        report["notes"] = notes
+        _write(dumps(report), args.output)
+    elif args.format == "prompt":
+        _write(feedback_markdown(report, notes, min_severity=args.min_severity), args.output)
+    elif args.format == "markdown":
+        _write(format_review_markdown(report), args.output)
+    else:
+        _write(format_review_text(report), args.output)
+    failed = []
+    for cond in args.fail_on:
+        if cond in SEVERITY_ORDER:
+            n = sum(1 for f in report["findings"] if SEVERITY_ORDER[f["severity"]] <= SEVERITY_ORDER[cond])
+            if n:
+                failed.append(f"{n} finding(s) at or above {cond}")
+        elif cond in ("protected", "out-of-scope"):
+            key = "protected" if cond == "protected" else "out_of_scope"
+            if report["summary"][key]:
+                failed.append(f"{report['summary'][key]} {cond} file(s)")
+        elif any(f["kind"] == cond for f in report["findings"]):
+            failed.append(f"finding '{cond}' present")
+    if failed:
+        print("repoviz: review gate failed: " + "; ".join(failed), file=sys.stderr)
+        return EXIT_GATE
+    return EXIT_OK
+
+
+def format_review_markdown(report: dict[str, Any]) -> str:
+    s = report["summary"]
+    lines = [f"### AI change review: {report['target']['label']}", "",
+             f"`{report['base']['label']}` → `{report['head']['label']}` · {s['files']} files · "
+             f"{s['components']} components · +{s['lines_added']} −{s['lines_removed']} · "
+             + (", ".join(f"{v} {k}" for k, v in s["findings"].items() if v) or "no findings"), ""]
+    lines += ["| Component | Files | +/− | Scope | Findings |", "|---|---:|---:|---|---|"]
+    for c in report["components"]:
+        scope = ", ".join(f"{v} {k}" for k, v in c["scope"].items())
+        found = ", ".join(f"{v} {k}" for k, v in c["findings"].items() if v) or "–"
+        lines.append(f"| {c['name']} | {c['files']} | +{c['lines_added']} −{c['lines_removed']} | {scope} | {found} |")
+    if report["findings"]:
+        lines += ["", "| Severity | Finding | Location |", "|---|---|---|"]
+        for f in report["findings"]:
+            loc = f"`{f['path']}:{f['line']}`" if f.get("path") and f.get("line") else (f"`{f['path']}`" if f.get("path") else "")
+            detail = str(f.get("detail", "")).replace("|", "\\|")
+            lines.append(f"| {f['severity']} | **{f['title']}** — {detail} | {loc} |")
+    return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- parser
@@ -454,10 +530,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-session", action="store_true", help="compare with HEAD even if a session is active")
     p.set_defaults(func=cmd_activity)
 
-    p = sub.add_parser("session", parents=[common], help="manage work sessions (baselines for agent activity)")
-    p.add_argument("action", choices=("start", "status", "end", "list"))
-    p.add_argument("--label", help="label for a new session")
+    p = sub.add_parser("session", parents=[common], help="manage work sessions (waves of agent work)")
+    p.add_argument("action", choices=("start", "status", "scope", "end", "list"))
+    p.add_argument("--label", help="label for a new session (e.g. the feature or wave name)")
+    p.add_argument("--allow", action="append", default=[], metavar="GLOB",
+                   help="paths the agent may change in this session (repeatable)")
+    p.add_argument("--protect", action="append", default=[], metavar="GLOB",
+                   help="paths the agent must not change in this session (repeatable)")
     p.set_defaults(func=cmd_session)
+
+    p = sub.add_parser("review", parents=[common], help="review what an AI agent changed (scope, findings, feedback)")
+    p.add_argument("target", nargs="?", help="what to review: session (current), session:<id> (a past wave), all, "
+                   "branch, last-commit, or a comparison such as main...HEAD. Default: the current session, else "
+                   "uncommitted changes")
+    p.add_argument("--base", help="custom base revision")
+    p.add_argument("--head", dest="head_rev", help="custom target revision")
+    p.add_argument("--allow", action="append", default=[], metavar="GLOB", help="additional allowed path (repeatable)")
+    p.add_argument("--protect", action="append", default=[], metavar="GLOB",
+                   help="additional protected path (repeatable)")
+    p.add_argument("--format", choices=("text", "json", "markdown", "prompt"), default="text",
+                   help="prompt = feedback for the agent (reviewer notes + automated signals)")
+    p.add_argument("--min-severity", choices=("high", "medium", "low", "info"), default="medium",
+                   help="lowest severity of automated signals included in --format prompt")
+    p.add_argument("--list", action="store_true", help="list reviewable targets (sessions, waves, presets)")
+    p.add_argument("--fail-on", action="append", default=[], metavar="CONDITION",
+                   help="exit 3 when: high | medium | low (findings at or above), protected, out-of-scope, "
+                   "or a finding kind such as new-cycle; repeatable")
+    p.set_defaults(func=cmd_review)
     return parser
 
 

@@ -64,7 +64,20 @@ external_dependencies = false
 poll_seconds = 3                  # live app auto-refresh
 churn_commits = 300               # history window for hotspots (0 disables)
 
-state_dir = "~/.cache/repoviz"    # sessions and observations (also REPOVIZ_STATE_DIR)
+state_dir = "~/.cache/repoviz"    # sessions, observations and review notes (also REPOVIZ_STATE_DIR)
+
+# ----- reviewing agent work (see review.md) -----------------------------------------------
+[review]
+allowed = ["src/**", "tests/**"]  # files outside are flagged "out of scope"
+protected = ["src/auth/**"]       # files here are flagged "protected area modified"
+sensitive = true                  # flag CI / lock files / deployment / migrations / .env
+disabled_checks = []              # e.g. ["todo", "debug-output"]
+
+[[review.rules]]                  # forbidden dependencies
+from = ["src/ui/**"]
+to = ["src/db/**"]
+message = "UI must go through the service layer"
+severity = "high"                 # high | medium | low
 ```
 
 ## Glob syntax

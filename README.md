@@ -14,10 +14,14 @@ name or hosting provider. It discovers what the repository contains, and
 configuration can override every inference. The runtime needs only Python ≥ 3.10
 and `git`: no Node.js, no Graphviz, no network (Mermaid is vendored).
 
-It answers questions like:
+It is built for **supervising AI coding agents** across features and
+implementation waves, and for understanding any codebase. It answers questions like:
 
 | Question | Where |
 |---|---|
+| Which modules did the agent touch? Did it touch anything it should not have? | **AI Review** tab, `repoviz review` |
+| What are the key changes in a module, and do they look right? | **AI Review** → change cards (symbols, signatures, diff) |
+| What should I tell the agent to fix, complete or revert? | **AI Review** → notes → feedback prompt, `repoviz review --format prompt` |
 | What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
 | What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
 | What changed since another commit / branch / tag / merge base? | **Changes** tab, `repoviz diff` |
@@ -46,6 +50,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 
 | Command | Purpose |
 |---|---|
+| `repoviz review [TARGET] [--format text\|markdown\|prompt\|json] [--fail-on …]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
@@ -53,7 +58,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz discover [--json]` | What discovery found: languages, manifests, roots, entry points, CI… |
 | `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
 | `repoviz activity [--json]` | Files being modified now, with impact, tests and config flags. |
-| `repoviz session start\|status\|end\|list` | Manage work-session baselines. |
+| `repoviz session start\|status\|scope\|end\|list [--allow G] [--protect G]` | Manage work sessions (waves) and their scope. |
 
 Every command takes `-C PATH` (repository), `--config FILE`, `--exclude GLOB`,
 `--source-root DIR` and `-o FILE`.
@@ -77,7 +82,22 @@ Special revisions are `WORKTREE`, `WORKTREE-TRACKED`, `INDEX` (or `STAGED`),
 `git rev-parse --end-of-options`, and nothing is checked out: every state is read
 straight from the object database, the index or the disk.
 
-## The four tabs
+## The tabs
+
+**AI Review** (default). Pick the current work session, a past wave, the branch,
+the last commit or any range.
+
+- **Scope:** set what the agent may change and what it must not touch.
+- **"Where the agent went" map:** touched components, packages or files, with
+  lines changed. Protected and out-of-scope areas are highlighted.
+- **Review signals:** triage each one (dismiss, annotate, or send to the agent).
+- **Changed-modules table.** Each file opens a change card:
+  - key changes: functions and classes with before/after signatures;
+  - dependency changes;
+  - tests that exercise it;
+  - the diff, where any line can be annotated.
+- **Notes → prompt:** notes become a feedback prompt for the agent. See
+  [docs/review.md](docs/review.md).
 
 **Changes.** Compares two states at an aggregation level: Auto, Components,
 Projects, Packages/directories, or Modules/files. Shows changed nodes plus their
@@ -133,20 +153,33 @@ languages without call data). The live app refreshes automatically.
 Every diagram also carries an `accTitle`/`accDescr`, all data is available in
 tables, and diagrams can be navigated with the keyboard (arrows, +/-, 0 to fit).
 
-## AI coding agents: what changed in this session?
+## Supervising AI coding agents
 
-A **work session** records the working tree when the agent starts, including
-already-dirty files. Everything changed afterwards is attributed to the session,
-even if the agent commits along the way.
+A **work session** ("wave") records the working tree when the agent starts,
+including already-dirty files. Everything changed afterwards is attributed to
+the session, even if the agent commits along the way. The session also records
+the agreed **scope**.
 
 ```bash
-repoviz session start --label "refactor billing"   # before the agent starts
+repoviz session start --label "wave 3: billing" --allow "src/billing/**" --protect "src/auth/**"
 # ... the agent works (and maybe commits) ...
-repoviz diff session                                 # architecture diff of the session
-repoviz activity                                     # files touched, impact, affected tests
-repoviz diff session --fail-on new-cycle --fail-on new-component-dependency
-repoviz session end
+repoviz review                          # where it went, scope violations, review signals
+repoviz review --format prompt          # numbered file:line feedback to paste back to the agent
+repoviz review --fail-on protected --fail-on high   # guardrail for scripted loops (exit 3)
+repoviz session end                     # freezes the wave; later: repoviz review session:<id>
 ```
+
+Review signals flag likely problems for a human to check:
+
+- protected or out-of-scope files;
+- new cycles or forbidden dependencies;
+- broken imports, and calls to functions the agent removed;
+- changed signatures whose callers were not updated;
+- untested changes and weakened tests (skips, removed assertions);
+- swallowed exceptions, debugger statements and possible secrets.
+
+See [docs/review.md](docs/review.md) for the full list and the configuration
+(`[review]` scope and forbidden-dependency rules).
 
 `repoviz serve --session` starts a session automatically, and the Activity tab
 can start or restart sessions. Session data lives in `~/.cache/repoviz`
@@ -226,7 +259,7 @@ pytest                                   # unit, integration and (if Chromium is
 PLAYWRIGHT_BROWSERS_PATH=/path/to/browsers pytest tests/test_browser.py
 ```
 
-Documentation: [architecture](docs/architecture.md) ·
+Documentation: [reviewing agent work](docs/review.md) · [architecture](docs/architecture.md) ·
 [configuration](docs/configuration.md) · [data model](docs/data-model.md).
 
 Mermaid 11.17.2 is vendored in `src/repoviz/web/vendor/` under the MIT licence

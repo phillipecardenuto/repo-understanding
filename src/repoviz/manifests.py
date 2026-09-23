@@ -115,7 +115,7 @@ def parse_pep508(req: str, scope: str, text: str = "", base_dir: str = "", start
     m = _PEP508.match(req)
     if not m:
         return None
-    name, _extras, rest = m.group(1), m.group(2), m.group(3)
+    name, rest = m.group(1), m.group(3)
     spec = rest.split(";", 1)[0].strip()
     local = None
     if spec.startswith("@"):

@@ -109,8 +109,10 @@ def comparison_payload(repo: Repository, comp: Comparison, index: int = 0, compa
 
 
 def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = None, include_activity: bool = True,
-                 mode: str = "static") -> dict[str, Any]:
+                 mode: str = "static", include_reviews: bool | None = None, max_reviews: int = 6) -> dict[str, Any]:
     snapshot = repo.snapshot("WORKTREE", "working tree")
+    if include_reviews is None:
+        include_reviews = mode == "static"  # the live app fetches reviews on demand
     comps = comparisons if comparisons is not None else repo.default_comparisons()
     payloads = []
     errors = []
@@ -135,6 +137,23 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
             errors.append({"severity": "error", "code": "activity-failed", "message": str(exc), "analyzer": "report"})
     for p in payloads:
         p.pop("_revisions", None)
+    reviews = []
+    targets = []
+    if include_reviews:
+        from ..review import build_review, review_targets
+
+        try:
+            targets = review_targets(repo)[:max_reviews]
+        except Exception as exc:
+            errors.append({"severity": "error", "code": "review-failed", "message": str(exc), "analyzer": "report"})
+        for t in targets:
+            try:
+                report = build_review(repo, t, max_total_diff_lines=20000 if mode == "static" else 40000)
+                report["notes"] = repo.state.load_notes(t.key)
+                reviews.append(report)
+            except Exception as exc:  # a broken target must not prevent the report
+                errors.append({"severity": "error", "code": "review-failed", "message": f"{t.label}: {exc}",
+                               "analyzer": "report"})
     snap = snapshot.to_dict()
     if mode == "static":
         compact_snapshot(snap)
@@ -151,6 +170,8 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "snapshot": snap,
         "comparisons": payloads,
         "activity": to_jsonable(activity) if activity is not None else None,
+        "reviews": reviews,
+        "review_targets": [t.to_dict() for t in targets],
         "theme": theme(),
         "config": {"sources": repo.config.sources, "max_diagram_nodes": repo.config.max_diagram_nodes,
                    "external_dependencies": repo.config.external_dependencies},

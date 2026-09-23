@@ -13,6 +13,7 @@ sources without reading file contents twice.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -47,6 +48,9 @@ class RevSpec:
     @classmethod
     def parse(cls, text: str) -> "RevSpec":
         token = text.strip()
+        past = re.fullmatch(r"(?i)session(-end)?@([0-9A-Za-z_-]+)", token)
+        if past:  # SESSION@<id> = baseline of a (past) session, SESSION-END@<id> = its end state
+            return cls("session-end" if past.group(1) else "session-at", past.group(2))
         alias = _ALIASES.get(token.upper())
         if alias == WORKTREE:
             return cls("worktree")
@@ -70,12 +74,16 @@ class RevSpec:
             "index": "index (staged)",
             "session": "session baseline",
             "empty": "empty tree",
+            "session-at": f"baseline of session {self.rev}",
+            "session-end": f"end of session {self.rev}",
         }.get(self.kind, self.rev)
 
     def __str__(self) -> str:
         return {
             "worktree": WORKTREE, "worktree-tracked": WORKTREE_TRACKED, "index": INDEX, "session": SESSION,
             "empty": EMPTY,
+            "session-at": f"SESSION@{self.rev}",
+            "session-end": f"SESSION-END@{self.rev}",
         }.get(self.kind, self.rev)
 
 

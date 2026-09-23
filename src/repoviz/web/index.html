@@ -17,13 +17,15 @@
   <button class="btn small" id="theme-toggle" type="button" title="Toggle light/dark theme">◐ Theme</button>
 </header>
 <nav class="tabs" role="tablist" aria-label="Views">
-  <button role="tab" id="tabbtn-changes" aria-controls="tab-changes" data-tab="changes" aria-selected="true">Changes</button>
+  <button role="tab" id="tabbtn-review" aria-controls="tab-review" data-tab="review" aria-selected="true">AI Review</button>
+  <button role="tab" id="tabbtn-changes" aria-controls="tab-changes" data-tab="changes" aria-selected="false">Changes</button>
   <button role="tab" id="tabbtn-structure" aria-controls="tab-structure" data-tab="structure" aria-selected="false">Structure</button>
   <button role="tab" id="tabbtn-dependencies" aria-controls="tab-dependencies" data-tab="dependencies" aria-selected="false">Dependencies</button>
   <button role="tab" id="tabbtn-activity" aria-controls="tab-activity" data-tab="activity" aria-selected="false">Activity &amp; Flow</button>
 </nav>
 <main>
-  <section class="tabpanel" id="tab-changes" role="tabpanel" aria-labelledby="tabbtn-changes"></section>
+  <section class="tabpanel" id="tab-review" role="tabpanel" aria-labelledby="tabbtn-review"></section>
+  <section class="tabpanel" id="tab-changes" role="tabpanel" aria-labelledby="tabbtn-changes" hidden></section>
   <section class="tabpanel" id="tab-structure" role="tabpanel" aria-labelledby="tabbtn-structure" hidden></section>
   <section class="tabpanel" id="tab-dependencies" role="tabpanel" aria-labelledby="tabbtn-dependencies" hidden></section>
   <section class="tabpanel" id="tab-activity" role="tabpanel" aria-labelledby="tabbtn-activity" hidden></section>

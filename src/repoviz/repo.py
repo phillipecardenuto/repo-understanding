@@ -159,6 +159,15 @@ class Repository:
             if session is None:
                 raise RepositoryError("no active session; start one with 'repoviz session start'")
             return self.state.baseline_source(session, self.git)
+        if rs.kind in ("session-at", "session-end"):
+            session = self.state.load_session(rs.rev)
+            if session is None:
+                raise RepositoryError(f"unknown session {rs.rev!r} (see 'repoviz session list')")
+            if rs.kind == "session-at":
+                return self.state.baseline_source(session, self.git)
+            if session.active:
+                return WorkingTreeSource(self.git, include_untracked=True)
+            return self.state.end_source(session, self.git)
         rev = rs.rev
         if rev.startswith("merge-base:"):
             _, a, b = rev.split(":", 2)

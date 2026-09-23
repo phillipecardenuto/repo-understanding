@@ -21,7 +21,6 @@ from typing import Any
 
 from .. import classify
 from ..ids import stable_hash
-from ..manifests import load_jsonc
 from ..model import CATEGORY_MODULE, CATEGORY_SYMBOL, REL_IMPORTS, ComponentNode
 from .base import (
     CAP_CALLS,
