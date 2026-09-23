@@ -415,6 +415,8 @@ class EdgeChange:
     in_base_cycle: bool = False
     in_target_cycle: bool = False
     base_evidence: list[SourceEvidence] = field(default_factory=list)
+    #: Flags (type_checking_only, lazy_only, scope...) of the base version of a modified edge.
+    base_flags: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = self.edge.to_dict()
@@ -425,6 +427,8 @@ class EdgeChange:
         data["in_target_cycle"] = self.in_target_cycle
         if self.base_evidence:
             data["base_evidence"] = [e.to_dict() for e in self.base_evidence]
+        if self.base_flags:
+            data["base_flags"] = dict(self.base_flags)
         return data
 
 

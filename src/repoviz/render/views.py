@@ -114,6 +114,12 @@ class Grouper:
         return result
 
 
+def default_icons() -> dict[str, str]:
+    from .theme import theme
+
+    return theme()["icons"]
+
+
 def _icon(node: ComponentNode, icons: dict[str, str]) -> str:
     if "test" in node.tags and node.category != CATEGORY_SYMBOL:
         return "🧪"
@@ -160,7 +166,7 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
                  relationships: Iterable[str] = DEFAULT_RELATIONSHIPS, include_external: bool = False,
                  max_nodes: int = 250, icons: dict[str, str] | None = None, hide_cosmetic: bool = True,
                  neighbor_limit: int = 25) -> ViewGraph:
-    icons = icons or {}
+    icons = default_icons() if icons is None else icons
     rels = set(relationships)
     nodes = {nid: c.node for nid, c in diff.nodes.items()}
     status = {nid: c.status for nid, c in diff.nodes.items()}
@@ -173,6 +179,9 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
 
     base_pairs: dict[tuple[str, str], int] = {}
     target_pairs: dict[tuple[str, str], int] = {}
+    # Cycles follow the analysis default: type-checking-only imports do not form runtime cycles.
+    base_runtime: set[tuple[str, str]] = set()
+    target_runtime: set[tuple[str, str]] = set()
     changed_pairs: set[tuple[str, str]] = set()
     rel_of: dict[tuple[str, str], str] = {}
     for ch in diff.edges.values():
@@ -184,14 +193,19 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
             continue
         pair = (s, t)
         rel_of.setdefault(pair, e.relationship)
+        base_flags = ch.base_flags if ch.status == MODIFIED else e.metadata
         if ch.status in (UNCHANGED, MODIFIED, REMOVED):
             base_pairs[pair] = base_pairs.get(pair, 0) + e.occurrences
+            if not base_flags.get("type_checking_only"):
+                base_runtime.add(pair)
         if ch.status in (UNCHANGED, MODIFIED, ADDED):
             target_pairs[pair] = target_pairs.get(pair, 0) + e.occurrences
+            if not e.metadata.get("type_checking_only"):
+                target_runtime.add(pair)
         if ch.status != UNCHANGED:
             changed_pairs.add(pair)
-    base_cycles = _scc_pairs(base_pairs)
-    target_cycles = _scc_pairs(target_pairs)
+    base_cycles = _scc_pairs(base_runtime)
+    target_cycles = _scc_pairs(target_runtime)
 
     edges: list[VEdge] = []
     for pair in sorted(set(base_pairs) | set(target_pairs)):
@@ -271,11 +285,12 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
                     relationships: Iterable[str] = DEFAULT_RELATIONSHIPS, include_external: bool = False,
                     include_tests: bool = True, focus: str | None = None, depth: int = 1, max_nodes: int = 250,
                     icons: dict[str, str] | None = None) -> ViewGraph:
-    icons = icons or {}
+    icons = default_icons() if icons is None else icons
     rels = set(relationships)
     nodes = snapshot.node_index()
     grouper = Grouper(nodes, level, include_external)
     pairs: dict[tuple[str, str], int] = {}
+    runtime: set[tuple[str, str]] = set()
     rel_of: dict[tuple[str, str], str] = {}
     for e in snapshot.dependency_edges + snapshot.call_edges:
         if not e.direct or e.relationship not in rels:
@@ -289,7 +304,9 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
             continue
         pairs[(s, t)] = pairs.get((s, t), 0) + e.occurrences
         rel_of.setdefault((s, t), e.relationship)
-    cycles = _scc_pairs(pairs)
+        if not e.metadata.get("type_checking_only"):
+            runtime.add((s, t))
+    cycles = _scc_pairs(runtime)
     visible: set[str] = {x for p in pairs for x in p}
     if focus:
         fg = grouper.group(focus) or focus
@@ -319,7 +336,7 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
 
 def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, depth: int = 3,
                    include_files: bool = False, max_nodes: int = 250, icons: dict[str, str] | None = None) -> ViewGraph:
-    icons = icons or {}
+    icons = default_icons() if icons is None else icons
     nodes = snapshot.node_index()
     children = snapshot.children()
     start = root or next((n.id for n in snapshot.components if n.component_type == "repository"), None)

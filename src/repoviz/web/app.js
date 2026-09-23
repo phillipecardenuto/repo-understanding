@@ -235,6 +235,7 @@
     }
     const group = makeGrouper(di, o.level, o.external);
     const base = new Map(), target = new Map(), changedPairs = new Set(), relOf = new Map(), under = new Map();
+    const baseRuntime = new Set(), targetRuntime = new Set(); // type-checking-only imports never form runtime cycles
     for (const e of di.edges) {
       if (!e.direct || !rels.has(e.relationship)) continue;
       if (!o.external && e.metadata && e.metadata.external) continue;
@@ -243,11 +244,12 @@
       const key = s + "\u0000" + t;
       if (!relOf.has(key)) relOf.set(key, e.relationship);
       push(under, key, e.id);
-      if (e.status !== "added") base.set(key, (base.get(key) || 0) + e.occurrences);
-      if (e.status !== "removed") target.set(key, (target.get(key) || 0) + e.occurrences);
+      const baseFlags = e.status === "modified" ? e.base_flags || {} : e.metadata || {};
+      if (e.status !== "added") { base.set(key, (base.get(key) || 0) + e.occurrences); if (!baseFlags.type_checking_only) baseRuntime.add(key); }
+      if (e.status !== "removed") { target.set(key, (target.get(key) || 0) + e.occurrences); if (!(e.metadata || {}).type_checking_only) targetRuntime.add(key); }
       if (e.status !== "unchanged") changedPairs.add(key);
     }
-    const bc = cyclePairs(base.keys()).pairs, tc = cyclePairs(target.keys()).pairs;
+    const bc = cyclePairs(baseRuntime).pairs, tc = cyclePairs(targetRuntime).pairs;
     const edges = [];
     for (const key of [...new Set([...base.keys(), ...target.keys()])].sort()) {
       const inB = base.has(key), inT = target.has(key);
@@ -336,7 +338,7 @@
   function dependencyView(si, o) {
     const rels = new Set(o.relationships);
     const group = makeGrouper(si, o.level, o.external);
-    const pairs = new Map(), relOf = new Map(), under = new Map();
+    const pairs = new Map(), relOf = new Map(), under = new Map(), runtime = new Set();
     for (const e of si.edges) {
       if (!e.direct || !rels.has(e.relationship)) continue;
       const md = e.metadata || {};
@@ -351,9 +353,10 @@
       const key = s + "\u0000" + t;
       pairs.set(key, (pairs.get(key) || 0) + e.occurrences);
       if (!relOf.has(key)) relOf.set(key, e.relationship);
+      if (!md.type_checking_only) runtime.add(key);
       push(under, key, e.id);
     }
-    const cyc = cyclePairs(pairs.keys());
+    const cyc = cyclePairs(runtime);
     let edges = [...pairs].map(([key, count]) => {
       const [s, t] = key.split("\u0000");
       return { source: s, target: t, status: "unchanged", cycle: o.cycles && cyc.pairs.has(key), count, relationship: relOf.get(key), underlying: under.get(key) };
@@ -956,8 +959,9 @@
   class ChangesTab {
     constructor(app, root) {
       this.app = app; this.root = root;
-      this.opts = Object.assign({ level: "auto", scope: "neighbors", relationships: ["imports", "depends-on"], external: false, hideCosmetic: true,
-        maxNodes: 150, cluster: true, comparison: null, mode: "all", base: "HEAD", target: "WORKTREE", mbRef: "" }, storage.get("rv.changes", {}));
+      const cfg = app.bundle.config || {};
+      this.opts = Object.assign({ level: "auto", scope: "neighbors", relationships: ["imports", "depends-on"], external: !!cfg.external_dependencies, hideCosmetic: true,
+        maxNodes: cfg.max_diagram_nodes || 150, cluster: true, comparison: null, mode: "all", base: "HEAD", target: "WORKTREE", mbRef: "" }, storage.get("rv.changes", {}));
     }
     save() { storage.set("rv.changes", this.opts); }
     async init() {
@@ -1097,7 +1101,7 @@
   class StructureTab {
     constructor(app, root) {
       this.app = app; this.root = root;
-      this.opts = Object.assign({ depth: 3, files: false, symbols: false, layout: "tree", hotspots: false, maxNodes: 200, root: null }, storage.get("rv.structure", {}));
+      this.opts = Object.assign({ depth: 3, files: false, symbols: false, layout: "tree", hotspots: false, maxNodes: (app.bundle.config || {}).max_diagram_nodes || 200, root: null }, storage.get("rv.structure", {}));
     }
     save() { storage.set("rv.structure", this.opts); }
     async init() {
@@ -1187,7 +1191,7 @@
         h("div", { class: "card" }, h("h3", { text: "Existing architecture & dependency tooling" }),
           h("h4", { text: "Architecture configuration" }), list(p.architecture_config, (a) => [h("span", { class: "mono", text: a.path }), " ", pill(a.tool), a.embedded ? pill("embedded") : null]),
           h("h4", { text: "Dependency-analysis tools" }), list(p.dependency_tools, (t) => [pill(t.tool), " ", h("span", { class: "mono faint", text: t.evidence.join(", ") })])),
-        h("div", { class: "card" }, h("h3", { text: "Analyzers" }), table([
+        h("div", { class: "card wide" }, h("h3", { text: "Analyzers" }), table([
           { key: "name", label: "Analyzer" }, { key: "applicable", label: "Ran", render: (r) => r.applicable ? pill("yes", "added") : pill("no") },
           { key: "reason", label: "Why" }, { key: "duration_ms", label: "ms", num: true },
           { key: "stats", label: "Stats", render: (r) => h("span", { class: "mono", text: Object.entries(r.stats || {}).map(([k, v]) => `${k}=${v}`).join(" ") }) }], analyzers, { scroll: false }))),
@@ -1197,8 +1201,9 @@
   class DependenciesTab {
     constructor(app, root) {
       this.app = app; this.root = root;
-      this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on"], external: false, stdlib: false, tests: true, typeOnly: true,
-        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: 150, cluster: false }, storage.get("rv.deps", {}));
+      const cfg = app.bundle.config || {};
+      this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on"], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
+        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false }, storage.get("rv.deps", {}));
       this.opts.cycleMembers = null;
     }
     save() { const o = Object.assign({}, this.opts); delete o.cycleMembers; storage.set("rv.deps", o); }

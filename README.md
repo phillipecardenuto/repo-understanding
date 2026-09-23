@@ -1,0 +1,231 @@
+# repoviz
+
+A local, **read-only** tool that analyzes any Git repository and shows its
+structure, dependencies, architectural changes and current development activity
+as interactive **Mermaid** diagrams. It runs either as:
+
+1. a **live web application** backed by a small local analysis server
+   (`repoviz serve`), or
+2. a **self-contained HTML report** that opens offline from `file://`
+   (`repoviz report`).
+
+It is not tailored to any language, layout, namespace, build system, branch
+name or hosting provider. It discovers what the repository contains, and
+configuration can override every inference. The runtime needs only Python ≥ 3.10
+and `git`: no Node.js, no Graphviz, no network (Mermaid is vendored).
+
+It answers questions like:
+
+| Question | Where |
+|---|---|
+| What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
+| What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
+| What changed since another commit / branch / tag / merge base? | **Changes** tab, `repoviz diff` |
+| Did a change introduce a new dependency or a dependency cycle? Resolve one? | **Changes** tab, `repoviz diff --fail-on new-cycle` |
+| Which parts of the repository are being modified right now? | **Activity & Flow** tab, `repoviz activity` |
+| Which execution/call flow, entry points and tests may be affected? | **Activity & Flow** tab (affected flow) |
+| What has an AI coding agent changed during its current work session? | `repoviz session start` + **Activity & Flow** tab |
+
+## Quick start
+
+```bash
+pip install .                      # or: pip install -e .   (no runtime dependencies)
+repoviz serve --open               # live app for the repository in the current directory
+repoviz report -o report.html      # offline, single-file interactive report
+repoviz diff                       # HEAD vs working tree, as text
+```
+
+To run without installing, use `PYTHONPATH=src python -m repoviz …` from a checkout.
+
+Optional extras: `pip install '.[grimp]'` adds a grimp cross-check of the Python
+import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
+| `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
+| `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
+| `repoviz mermaid --view changes\|dependencies\|structure\|flow` | Print Mermaid text (paste into docs or PRs). |
+| `repoviz discover [--json]` | What discovery found: languages, manifests, roots, entry points, CI… |
+| `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
+| `repoviz activity [--json]` | Files being modified now, with impact, tests and config flags. |
+| `repoviz session start\|status\|end\|list` | Manage work-session baselines. |
+
+Every command takes `-C PATH` (repository), `--config FILE`, `--exclude GLOB`,
+`--source-root DIR` and `-o FILE`.
+
+### Comparisons
+
+The default comparison is **HEAD vs the working tree**. `SPEC` accepts:
+
+| Spec | Meaning |
+|---|---|
+| `all` (default) | HEAD vs working tree: staged + unstaged + untracked |
+| `staged` | HEAD vs index: staged changes only |
+| `unstaged` | index vs working tree (tracked files): unstaged changes only |
+| `session` | session baseline vs working tree |
+| `A..B` | commit, branch or tag vs another one, e.g. `v1.0..v2.0`, `main..feature` |
+| `A...B` | merge base of A and B vs B, e.g. `main...` = changes since branching from main |
+| `A` | revision A vs working tree |
+
+Special revisions are `WORKTREE`, `WORKTREE-TRACKED`, `INDEX` (or `STAGED`),
+`SESSION`, `EMPTY` and `HEAD`. Revisions are validated with
+`git rev-parse --end-of-options`, and nothing is checked out: every state is read
+straight from the object database, the index or the disk.
+
+## The four tabs
+
+**Changes.** Compares two states at an aggregation level: Auto, Components,
+Projects, Packages/directories, or Modules/files. Shows changed nodes plus their
+strongest neighbours (hubs are summarised), everything, or only changes. Summary
+cards cover nodes, relationships, new dependencies and cycles. Below the diagram
+are tables of new and removed dependencies (with evidence), cycles introduced,
+resolved or changed, and every changed node with the reason it changed. The live
+app accepts any comparison; a static report offers the precomputed ones.
+
+**Structure.** Containment from the repository root down to modules and symbols,
+as a tree or as nested boxes, with churn hotspots from Git history. Double-click
+a node to drill down. Below it, the discovery profile lists:
+
+- languages, with whether each is analyzed or structure-only
+- projects, workspaces, manifests and lock files
+- source, test and docs roots
+- generated and vendored code
+- entry points
+- containers, deployment and CI definitions
+- existing architecture configuration and dependency tooling
+- analyzer runs and diagnostics
+
+**Dependencies.** The dependency graph at any level, filtered by relationship
+(`imports`, `depends-on` from manifests, `calls`, `invokes`, `builds`). Options
+cover external packages, stdlib, tests and type-only imports. You can focus on a
+node, choose depth and direction (depends on / used by), and highlight or isolate
+cycles. Clicking an edge label explains *why* one thing depends on another, with
+file:line evidence and source excerpts for every underlying import.
+
+**Activity & Flow.** For each file currently being modified: Git status,
+owning component, lines added and removed, and first/last observation times.
+It also shows architecture impact (dependencies added or removed, component
+dependencies, cycles introduced, public API added or removed), affected tests and
+configuration changes. An activity map groups the files by component. The
+affected-flow diagram shows changed symbols, their callers and callees, and the
+entry points and tests that can reach them (static call graph; module level for
+languages without call data). The live app refreshes automatically.
+
+### Visual conventions (never colour alone)
+
+| | Fill / line | Border / style | Text marker |
+|---|---|---|---|
+| Added node | green | solid, thick | `✚` + "added" |
+| Removed node | red | **dashed** | `✖` + "removed" |
+| Modified node | amber | solid, thick | `✎` + "modified" |
+| Unchanged node | neutral | thin | – |
+| Added edge | green | thick arrow `==>` | "+ new" |
+| Removed edge | red | dashed | "− removed" |
+| Evidence changed | amber | solid | "~ changed" |
+| Unchanged edge | gray | thin | – |
+| Edge in a cycle | purple | dashed | "⟲ cycle" / "⟲ new cycle" |
+
+Every diagram also carries an `accTitle`/`accDescr`, all data is available in
+tables, and diagrams can be navigated with the keyboard (arrows, +/-, 0 to fit).
+
+## AI coding agents: what changed in this session?
+
+A **work session** records the working tree when the agent starts, including
+already-dirty files. Everything changed afterwards is attributed to the session,
+even if the agent commits along the way.
+
+```bash
+repoviz session start --label "refactor billing"   # before the agent starts
+# ... the agent works (and maybe commits) ...
+repoviz diff session                                 # architecture diff of the session
+repoviz activity                                     # files touched, impact, affected tests
+repoviz diff session --fail-on new-cycle --fail-on new-component-dependency
+repoviz session end
+```
+
+`repoviz serve --session` starts a session automatically, and the Activity tab
+can start or restart sessions. Session data lives in `~/.cache/repoviz`
+(override with `REPOVIZ_STATE_DIR` or `state_dir`), never inside the repository.
+
+With Claude Code, you can record activity while the agent edits by adding a hook
+in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": "repoviz activity > /dev/null"}]}
+    ]
+  }
+}
+```
+
+## Supported ecosystems
+
+| Area | Support |
+|---|---|
+| Structure (every language) | Filesystem and Git analyzers: directories, files, roles, churn. Unsupported languages appear as structural nodes plus a diagnostic. |
+| Python | AST analyzer. Handles src/flat/namespace layouts, absolute, relative, `TYPE_CHECKING`, conditional, lazy and `importlib` imports, symbols, call flow (aliases, re-exports, inheritance, nested functions), entry points and test functions. Optional grimp cross-check. |
+| JavaScript / TypeScript | Lexer-based analyzer. Handles ES modules, `export … from`, `require`, dynamic `import()`, extension and `index` probing, `.js`→`.ts`, `tsconfig` `paths`/`baseUrl`, and workspace packages (source preferred over `dist`). Also Vue/Svelte `<script>` blocks, symbols and heuristic call flow. |
+| Go | Package-level imports resolved against `go.mod` module paths; functions and methods. |
+| Manifests | `pyproject.toml` (PEP 621, Poetry, PDM, Hatch, setuptools, uv workspaces), `setup.py` (read with `ast`, never executed), `setup.cfg`, requirements, Pipfile, conda, `package.json` and npm/yarn/pnpm/lerna/rush workspaces, `tsconfig`, Deno, `Cargo.toml` and workspaces, `go.mod`/`go.work`, Maven, Gradle (+ settings), `.sln`/`.csproj`, Composer, Gemfile/gemspec, pubspec, mix, SwiftPM, CMake. Lock files are recognized. |
+| Containers, deployment, CI | Dockerfiles (base images, COPY sources, CMD/ENTRYPOINT), Compose services and `depends_on`, Kubernetes/Helm/Kustomize/Terraform/Procfile and more, GitHub Actions, GitLab CI, CircleCI, Jenkins, Azure, Buildkite… |
+
+New languages plug in through the analyzer interface; see
+[docs/architecture.md](docs/architecture.md).
+
+## Configuration
+
+Discovery is automatic. Use `[tool.repoviz]` in `pyproject.toml` or a
+`.repoviz.toml` file to override it:
+
+```toml
+exclude = ["legacy/**"]
+source_roots = ["src", "lib"]
+test_roots = ["tests", "integration"]
+generated = ["**/*_generated.py"]
+
+[components.billing]
+paths = ["services/billing/**", "libs/payments/**"]
+type = "service"
+
+[cycles]
+include_type_checking = false   # TYPE_CHECKING-only imports do not form cycles (default)
+
+[analyzers]
+disabled = ["go"]
+```
+
+See [docs/configuration.md](docs/configuration.md) for every option.
+
+## Safety and privacy
+
+- The tool never modifies the repository. Git runs with `GIT_OPTIONAL_LOCKS=0`
+  (even `git status` does not rewrite the index), and the test suite checks that
+  every file, including `.git`, is untouched after analysis.
+- Repository code is never imported or executed. Python is parsed with `ast`
+  and `setup.py` is read, not run. The optional grimp check is static too.
+- The server binds to 127.0.0.1 and rejects foreign `Host` headers (DNS
+  rebinding). State-changing requests need a custom header (CSRF), and revisions
+  from the UI can never be interpreted as git options.
+- Mermaid runs with `securityLevel: "strict"`, and labels built from file names
+  are escaped.
+- If Git refuses a repository ("dubious ownership"), the tool respects that and
+  analyzes it as a plain directory, with a diagnostic explaining why.
+
+## Development
+
+```bash
+pip install -e '.[test,grimp,browser]'
+pytest                                   # unit, integration and (if Chromium is present) browser tests
+PLAYWRIGHT_BROWSERS_PATH=/path/to/browsers pytest tests/test_browser.py
+```
+
+Documentation: [architecture](docs/architecture.md) ·
+[configuration](docs/configuration.md) · [data model](docs/data-model.md).
+
+Mermaid 11.17.2 is vendored in `src/repoviz/web/vendor/` under the MIT licence
+(`LICENSE-mermaid.txt`).

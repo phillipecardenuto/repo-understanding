@@ -176,7 +176,9 @@ def diff_snapshots(base: RepositorySnapshot, target: RepositorySnapshot) -> Repo
         else:
             reasons = _edge_changes(before, after)
             ch = EdgeChange(after, MODIFIED if reasons else UNCHANGED, reasons, before.in_cycle, after.in_cycle,
-                            base_evidence=before.evidence if reasons else [])
+                            base_evidence=before.evidence if reasons else [],
+                            base_flags={k: before.metadata[k] for k in EDGE_FLAGS if before.metadata.get(k)}
+                            if reasons else {})
         diff.edges[eid] = ch
         {ADDED: diff.added_edges, REMOVED: diff.removed_edges, MODIFIED: diff.modified_edges,
          UNCHANGED: diff.unchanged_edges}[ch.status].append(eid)

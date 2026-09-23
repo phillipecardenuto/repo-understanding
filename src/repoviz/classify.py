@@ -230,14 +230,15 @@ def deployment_kind(path: str) -> str | None:
         "tiltfile": "tilt", "nomad.hcl": "nomad", "samconfig.toml": "aws-sam", "template.yaml": None,
         "pulumi.yaml": "pulumi", "cdk.json": "aws-cdk", "ansible.cfg": "ansible", "docker-bake.hcl": "docker-bake",
     }
+    parts = path.lower().split("/")
+    # Directory context wins over file names (a k8s manifest may well be called app.yaml).
+    if lower.endswith((".yaml", ".yml")) and lower not in ("chart.yaml", "kustomization.yaml", "kustomization.yml") \
+            and any(p in ("k8s", "kubernetes", "manifests", "deploy", "deployment", "helm", "charts") for p in parts[:-1]):
+        return "kubernetes"
     if lower in table and table[lower]:
         return table[lower]
     if lower.endswith(".tf") or lower.endswith(".tf.json"):
         return "terraform"
-    parts = path.lower().split("/")
-    if lower.endswith((".yaml", ".yml")) and any(p in ("k8s", "kubernetes", "manifests", "deploy", "deployment",
-                                                        "helm", "charts") for p in parts[:-1]):
-        return "kubernetes"
     return None
 
 

@@ -152,7 +152,8 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "comparisons": payloads,
         "activity": to_jsonable(activity) if activity is not None else None,
         "theme": theme(),
-        "config": {"sources": repo.config.sources, "max_diagram_nodes": repo.config.max_diagram_nodes},
+        "config": {"sources": repo.config.sources, "max_diagram_nodes": repo.config.max_diagram_nodes,
+                   "external_dependencies": repo.config.external_dependencies},
     }
 
 

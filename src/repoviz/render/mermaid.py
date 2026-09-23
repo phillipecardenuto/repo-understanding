@@ -17,17 +17,12 @@ cycle      purple dashed arrow labelled "⟲ cycle" (combined with the status ma
 
 from __future__ import annotations
 
-import json
-from functools import lru_cache
-from importlib import resources
 from typing import Any
 
+from .theme import theme
 from .views import VEdge, VNode, ViewGraph
 
-
-@lru_cache(maxsize=1)
-def theme() -> dict[str, Any]:
-    return json.loads(resources.files("repoviz").joinpath("web/theme.json").read_text(encoding="utf-8"))
+__all__ = ["escape", "theme", "to_mermaid"]
 
 
 _ESCAPES = {'"': "#quot;", "<": "#lt;", ">": "#gt;", "#": "#35;", "&": "#amp;", "`": "#96;", "\n": " ",

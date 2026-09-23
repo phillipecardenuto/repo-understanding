@@ -183,6 +183,7 @@ ul.plain li:last-child { border-bottom: 0; }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent);
   border-radius: 50%; animation: spin .8s linear infinite; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.two-col > .wide { grid-column: 1 / -1; }
 .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
 @media (max-width: 640px) {
   main { padding: 10px; }
