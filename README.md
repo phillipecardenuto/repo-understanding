@@ -36,6 +36,8 @@ repoviz diff                       # HEAD vs working tree, as text
 ```
 
 To run without installing, use `PYTHONPATH=src python -m repoviz …` from a checkout.
+On a machine without network access, use `pip install --no-build-isolation .`
+(it needs only the `setuptools` already present in the environment).
 
 Optional extras: `pip install '.[grimp]'` adds a grimp cross-check of the Python
 import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.

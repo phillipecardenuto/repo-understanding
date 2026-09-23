@@ -117,7 +117,8 @@ main { padding: 14px 16px 40px; }
 .viewport .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   background: color-mix(in srgb, var(--panel) 70%, transparent); font-weight: 600; }
 .viewport .overlay[hidden] { display: none; }
-.viewport g.node, .viewport .edgeLabel { cursor: pointer; }
+.viewport g.node, .viewport .edgeLabel, .viewport path.flowchart-link { cursor: pointer; }
+.viewport path.flowchart-link:hover { filter: drop-shadow(0 0 2px var(--accent)); }
 .viewport g.node.rv-selected rect, .viewport g.node.rv-selected polygon, .viewport g.node.rv-selected path,
 .viewport g.node.rv-selected circle { stroke: var(--accent) !important; stroke-width: 4px !important; }
 .viewport g.node.rv-dim { opacity: .25; }

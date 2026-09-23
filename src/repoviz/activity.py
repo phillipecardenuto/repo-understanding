@@ -22,7 +22,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from . import classify
-from .diff import diff_snapshots, symbol_changes
+from .diff import symbol_changes
 from .flow import affected_flow
 from .model import (
     ADDED,
@@ -209,7 +209,7 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
     target_source = repo.open_source("WORKTREE")
     base_snap = repo.snapshot_of(base_source, baseline["label"])
     target_snap = repo.snapshot_of(target_source, "working tree")
-    diff = diff_snapshots(base_snap, target_snap)
+    diff = repo.diff(base_snap, target_snap)
 
     candidates = set(status_by_path)
     if session is not None:

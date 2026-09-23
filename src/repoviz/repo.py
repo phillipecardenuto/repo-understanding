@@ -86,6 +86,7 @@ class Repository:
         self.name = self.root.name
         self.file_cache: dict[Any, Any] = {}
         self._snapshots: OrderedDict[tuple[str, ...], RepositorySnapshot] = OrderedDict()
+        self._diffs: OrderedDict[tuple[str, ...], RepositoryDiff] = OrderedDict()
         self._lock = threading.RLock()
         self.state = StateStore(self.root, self.name, self.config.state_dir)
 
@@ -236,14 +237,29 @@ class Repository:
             return f"merge-base({a}, {RevSpec.parse(b).label})"
         return RevSpec.parse(spec).label
 
-    def compare(self, base: str | None = None, target: str | None = None, *, mode: str | None = None,
-                spec: str | None = None) -> tuple[Comparison, RepositoryDiff]:
+    def diff(self, base: RepositorySnapshot, target: RepositorySnapshot) -> RepositoryDiff:
+        """Diff two snapshots (cached: snapshots with the same revision IDs give the same diff)."""
         from .diff import diff_snapshots
 
+        key = (base.kind, base.revision_id, base.label, target.kind, target.revision_id, target.label)
+        with self._lock:
+            cached = self._diffs.get(key)
+            if cached is not None:
+                self._diffs.move_to_end(key)
+                return cached
+        result = diff_snapshots(base, target)
+        with self._lock:
+            self._diffs[key] = result
+            while len(self._diffs) > 8:
+                self._diffs.popitem(last=False)
+        return result
+
+    def compare(self, base: str | None = None, target: str | None = None, *, mode: str | None = None,
+                spec: str | None = None) -> tuple[Comparison, RepositoryDiff]:
         comp = self.resolve_comparison(base, target, mode=mode, spec=spec)
         base_snap = self.snapshot(comp.base, comp.base_label)
         target_snap = self.snapshot(comp.target, comp.target_label)
-        return comp, diff_snapshots(base_snap, target_snap)
+        return comp, self.diff(base_snap, target_snap)
 
     def default_comparisons(self) -> list[Comparison]:
         """Comparisons worth precomputing for a static report."""

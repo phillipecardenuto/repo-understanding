@@ -726,12 +726,13 @@
       }
       const edgeByKey = new Map();
       view.edges.forEach((e) => edgeByKey.set(`L_${e.source}_${e.target}_`, e));
-      for (const el of $$(".edgeLabel [data-id], g.edgeLabel [data-id]", this.stage)) {
+      for (const el of $$(".edgeLabel [data-id], path.flowchart-link[data-id]", this.stage)) {
         const did = el.getAttribute("data-id") || "";
         const key = did.replace(/\d+$/, "");
         const e = edgeByKey.get(key);
         if (!e || !handlers.onEdge) continue;
         const target = el.closest(".edgeLabel") || el;
+        if (target.tagName === "path") { target.style.pointerEvents = "stroke"; target.setAttribute("stroke-linecap", "round"); }
         target.style.cursor = "pointer";
         target.addEventListener("click", (ev) => { if (this.suppressClick) return; ev.stopPropagation(); handlers.onEdge(e); });
       }
