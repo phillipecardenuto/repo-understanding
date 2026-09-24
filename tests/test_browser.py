@@ -377,3 +377,31 @@ def test_review_commit_by_commit_in_the_live_app(page, make_repo) -> None:
         assert page.errors == []  # type: ignore[attr-defined]
     finally:
         srv.shutdown()
+
+
+def test_commit_view_failures_and_reviewed_marks(page, make_repo) -> None:
+    repo = _wave_with_commits(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    showing = "(s) => { const t = repoviz.app.tabs.review; return s ? !!(t.report.commit && t.report.commit.subject === s) : (!t.commit && t.report === t.waveReport); }"
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/")
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        wave = page.evaluate("repoviz.app.tabs.review.report.files.map(f => f.path).sort()")
+        # A reviewed mark set while looking at one commit still counts for the whole wave.
+        page.evaluate("repoviz.app.tabs.review.selectCommit(repoviz.app.tabs.review.commitItems()[1].sha)")
+        page.wait_for_function(showing, arg="agent: b", timeout=30_000)
+        page.evaluate("repoviz.app.tabs.review.setReviewed('app/b.py', true)")
+        page.evaluate("repoviz.app.tabs.review.selectCommit(null)")
+        page.wait_for_function(showing, arg=None, timeout=30_000)
+        assert page.evaluate("(() => { const t = repoviz.app.tabs.review; return t.isReviewed(t.report.files.find(f => f.path === 'app/b.py')); })()")
+        # If a commit cannot be reviewed, the page goes back to the whole wave instead of showing a stale step.
+        page.evaluate("repoviz.app.tabs.review.selectCommit(repoviz.app.tabs.review.commitItems()[1].sha)")
+        page.wait_for_function(showing, arg="agent: b", timeout=30_000)
+        page.route("**/api/review?*commit=*", lambda route: route.abort())
+        page.evaluate("repoviz.app.tabs.review.stepCommit(1)")
+        page.wait_for_function(showing, arg=None, timeout=30_000)
+        assert page.evaluate("repoviz.app.tabs.review.report.files.map(f => f.path).sort()") == wave
+        page.wait_for_function("() => document.querySelector('#tab-review').innerText.includes('Could not review this commit')", timeout=30_000)
+    finally:
+        srv.shutdown()

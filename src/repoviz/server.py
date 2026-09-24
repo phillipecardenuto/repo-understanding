@@ -196,7 +196,8 @@ class AppState:
             commit = (query.get("commit") or "").strip() or None  # one step of the range, reviewed on its own
             sources = (self.repo.open_source(target.base), self.repo.open_source(target.target))
             key = (target.key, target.base, target.target, sources[0].revision_id, sources[1].revision_id,
-                   tuple(scope.allowed), tuple(scope.protected), self.repo.config.fingerprint(), commit)
+                   tuple(scope.allowed), tuple(scope.protected), self.repo.config.fingerprint(), commit,
+                   self.repo.git.head() if self.repo.git else None)  # commits and uncommitted work depend on HEAD
             with self.cache_lock:
                 body = self._reviews.get(key)
             if body is None:

@@ -147,7 +147,7 @@ def review_targets(repo: "Repository", limit_sessions: int = 20) -> list[ReviewT
                 pass
         if repo.git.try_run("rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"):
             info = repo.git.commit_info(head)
-            subject = f": {info.subject}" if info else ""
+            subject = f": {_redact(info.subject)}" if info else ""
             out.append(ReviewTarget("last-commit", f"Last commit{subject}"[:120], "HEAD~1", "HEAD", "preset",
                                     f"commit:{head}"))
     ended = [s for s in repo.state.list_sessions() if not s.active]
@@ -566,7 +566,10 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     _test_coverage_findings(add, files, impact)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
-        _coupling_findings(add, files, coupling, changed_set, target_src)
+        # One commit alone: the companion may be in another commit of the wave, so only mark partners as changed.
+        wave_touched = changed_set | {f["path"] for c in (crange.listing or {}).get("commits", []) for f in c["files"]}
+        _coupling_findings(add if not commit else (lambda f, key="": None), files, coupling,
+                           wave_touched if commit else changed_set, target_src)
     session = repo.state.load_session(target.session_id) if target.session_id else None
     commits = _attach_commits(repo, target, crange, files, sub_changes, target_src, changed_set, session,
                               add if not commit else None, commit)
@@ -615,7 +618,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "introduced_cycles": [c.to_dict() for c in diff.introduced_cycles],
         "history": coupling.summary() if coupling is not None else None,
         "commits": commits,
-        "commit": next((c for c in commits["items"] if c["sha"] == commit), None) if commit else None,
+        "commit": _commit_item(repo, commits, commit) if commit else None,
         "verdicts": VERDICTS,
     }
 
@@ -637,6 +640,18 @@ class _CommitRange:
     session: Any = None
 
 
+def _merge_base_of(repo: "Repository", spec: str) -> str | None:
+    """The commit a ``merge-base:A:B`` spec resolves to: merge-base(A, B), with B = HEAD for working-tree specs
+    (the same rule as :meth:`Repository.open_source`)."""
+    from .sources import RevSpec
+
+    _, a, b = spec.split(":", 2)
+    try:
+        return repo.git.merge_base(a, "HEAD" if RevSpec.parse(b).kind != "git" else b) if repo.git else None
+    except Exception:
+        return None
+
+
 def _commit_range(repo: "Repository", target: ReviewTarget) -> _CommitRange:
     """The commits between the two ends of a review target, and whether uncommitted work follows them."""
     cr = _CommitRange()
@@ -656,9 +671,8 @@ def _commit_range(repo: "Repository", target: ReviewTarget) -> _CommitRange:
         if cr.base is None:
             return cr
     elif base.startswith("merge-base:"):
-        try:
-            cr.base = git.merge_base(base.split(":", 2)[1], "HEAD")
-        except Exception:
+        cr.base = _merge_base_of(repo, base)
+        if cr.base is None:
             return cr
     elif base in ("INDEX", "WORKTREE", "WORKTREE-TRACKED"):
         return cr
@@ -700,16 +714,44 @@ def _commit_sources(repo: "Repository", target: ReviewTarget, commit: str,
             exclude = {p for p in session.overrides if start.content_hash(p) == now.content_hash(p)}
         return (repo.open_source(cr.head), repo.open_source(target.target), f"HEAD ({cr.head[:8]})",
                 repo._label(target.target), exclude, UNCOMMITTED)
-    if not re.fullmatch(r"[0-9a-fA-F]{4,40}", commit):
+    if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit):  # SHA-1 or SHA-256 ids, possibly abbreviated
         raise ValueError("commit must be a commit id")
     out = git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{commit}^{{commit}}")
     sha = out.strip() if out else None
-    listed = {c["sha"] for c in (cr.listing or {}).get("commits", [])}
-    if sha is None or (listed and sha not in listed):
+    if sha is None or not _in_range(git, sha, cr):
         raise ValueError(f"commit {commit} is not part of this review")
     parent = git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{sha}^1^{{commit}}")
     base = repo.open_source(parent.strip()) if parent else repo.open_source("EMPTY")
-    return base, repo.open_source(sha), f"{sha[:8]}^", sha[:8], set(), sha
+    commit_src = repo.open_source(sha)
+    exclude = set()
+    session = cr.session
+    if session is not None and session.overrides and target.base.startswith("SESSION"):
+        # The commit only recorded an edit that was already there when the session started: not the agent's work.
+        start = repo.open_source(target.base)
+        exclude = {p for p in session.overrides if start.content_hash(p) == commit_src.content_hash(p)}
+    return base, commit_src, f"{sha[:8]}^", sha[:8], exclude, sha
+
+
+def _commit_item(repo: "Repository", commits: dict[str, Any], sha: str) -> dict[str, Any] | None:
+    """The reviewed commit's entry, also for a commit beyond the listing cap."""
+    item = next((c for c in commits["items"] if c["sha"] == sha), None)
+    if item is None and repo.git is not None and sha != UNCOMMITTED:
+        info = repo.git.commit_info(sha)
+        if info is not None:
+            item = {"sha": sha, "short": sha[:8], "subject": _redact(info.subject[:200]), "author": _redact(info.author),
+                    "time": info.date, "parents": [], "files": [], "signals": 0}
+    return item
+
+
+def _in_range(git: Any, sha: str, cr: _CommitRange) -> bool:
+    """Whether ``sha`` is one of the commits of the range (also those beyond the listing cap)."""
+    if any(c["sha"] == sha for c in (cr.listing or {}).get("commits", [])):
+        return True
+    if cr.listing is None or not cr.head or cr.head == cr.base:
+        return False  # no commits in this review (or its history is unavailable)
+    reaches_head = git.try_run("merge-base", "--is-ancestor", sha, cr.head) is not None
+    in_base = cr.base is not None and git.try_run("merge-base", "--is-ancestor", sha, cr.base) is not None
+    return reaches_head and not in_base
 
 
 def _attach_commits(repo: "Repository", target: ReviewTarget, cr: _CommitRange, files: list[dict[str, Any]],
@@ -724,7 +766,8 @@ def _attach_commits(repo: "Repository", target: ReviewTarget, cr: _CommitRange, 
 
     items: list[dict[str, Any]] = []
     for c in (cr.listing or {}).get("commits", []):
-        items.append({"sha": c["sha"], "short": c["sha"][:8], "subject": c["subject"][:200], "author": c["author"],
+        items.append({"sha": c["sha"], "short": c["sha"][:8], "subject": _redact(c["subject"][:200]),
+                      "author": _redact(c["author"]),
                       "time": _dt.datetime.fromtimestamp(c["time"], _dt.timezone.utc).isoformat(timespec="seconds"),
                       "parents": c["parents"], "files": c["files"]})
     touched: dict[str, list[str]] = {}
@@ -770,12 +813,16 @@ def _attach_commits(repo: "Repository", target: ReviewTarget, cr: _CommitRange, 
     for c in items:
         for f in c["files"]:
             f["in_review"] = f["path"] in in_review
-    # Changed by the range's commits, yet identical at both ends: the agent went back and forth.
-    if add is not None and cr.base is not None:
+    # Changed by the range's commits, yet identical at both ends: the agent went back and forth.  Git's own tree
+    # difference decides (it also sees submodule pointers and symlinks, which file listings leave out).
+    if add is not None and cr.base is not None and cr.head and items:
         skip = set(session.overrides) if session is not None else set()
+        net = set(repo.git.changed_paths(cr.base, cr.head)) if repo.git is not None else set()
+        submodules = set(target_src.submodules or ()) | set(cr.session.submodules if cr.session else ())
         subjects = {c["sha"]: c["subject"] for c in items}
         for path, shas in sorted(touched.items()):
-            if path in changed or path in skip or any(path.startswith(p + "/") for p in (target_src.submodules or ())):
+            if path in net or path in changed or path in skip or path in submodules \
+                    or any(path.startswith(p + "/") for p in submodules):
                 continue
             listed = "; ".join(f"{sha[:8]} {subjects[sha][:60]}" for sha in shas[:3])
             add(Finding("reverted-within-wave", "hygiene", "info", "Changed, then changed back",
@@ -1067,11 +1114,7 @@ def _history_rev(repo: "Repository", target: ReviewTarget) -> str | None:
         session = repo.state.load_session(sid) if sid else repo.current_session()
         return (session.baseline_head if session else None) or git.head()
     if base.startswith("merge-base:"):
-        ref = base.split(":", 2)[1]
-        try:
-            return git.merge_base(ref, "HEAD")
-        except Exception:
-            return git.head()
+        return _merge_base_of(repo, base) or git.head()
     if base in ("EMPTY", "INDEX", "WORKTREE"):
         return git.head()
     out = git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}")

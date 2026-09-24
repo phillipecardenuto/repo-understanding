@@ -1791,7 +1791,7 @@
       this.loading = false;
       this.loadedAt = Date.now();
       if (!r) { this.statusEl.textContent = ""; this.showEmpty("No review in this report", "There were no changes to review when this report was generated."); return; }
-      const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope)].join("|");
+      const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope), (r.commits || {}).head || ""].join("|");
       if (prev && prev.sig === sig) { if (announce) this.statusEl.textContent = `${r.base.label} → ${r.head.label} · up to date`; return; }
       this.report = r;
       this.waveReport = r;
@@ -1843,7 +1843,11 @@
       if (this.app.api.live) {
         this.statusEl.innerHTML = ""; put(this.statusEl, h("span", { class: "spinner" }), ` reviewing ${item.short || "uncommitted work"}…`);
         try { r = await this.app.api.get("/api/review?" + new URLSearchParams(Object.assign({}, this.lastParams, { commit: sha })).toString()); }
-        catch (err) { this.statusEl.textContent = "Could not review this commit: " + err.message; this.commit = null; this.drawCommits(); return; }
+        catch (err) {
+          if (this.commit === sha) { this.commit = null; this.useReport(wave); }  // never leave the previous step on screen as "the wave"
+          this.statusEl.textContent = "Could not review this commit: " + err.message;
+          return;
+        }
         if (this.commit !== sha) return;  // another commit was chosen meanwhile
         this.statusEl.textContent = `${r.base.label} → ${r.head.label}`;
       } else r = filterByCommit(wave, item);
@@ -1968,11 +1972,16 @@
       if (redraw) this.draw();
     }
     // -- reviewed files & keyboard navigation ------------------------------------------------
-    isReviewed(f) { return !!f && this.reviewed[f.path] === (f.version || "1"); }
+    /* Marks belong to the wave: a file seen in one commit's view is marked with its version at the end of the wave. */
+    markVersion(f) {
+      const w = this.waveReport && this.waveReport !== this.report ? this.waveReport.files.find((x) => x.path === f.path) : null;
+      return (w || f).version || "1";
+    }
+    isReviewed(f) { return !!f && this.reviewed[f.path] === this.markVersion(f); }
     setReviewed(path, on, advance) {
       const f = this.report.files.find((x) => x.path === path);
       if (!f) return;
-      if (on) this.reviewed[path] = f.version || "1"; else delete this.reviewed[path];
+      if (on) this.reviewed[path] = this.markVersion(f); else delete this.reviewed[path];
       storage.set(`rv.reviewed.${this.repoKey}.${this.key}`, this.reviewed);
       if (advance) {
         const order = this.navOrder();

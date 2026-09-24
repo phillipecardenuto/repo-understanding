@@ -565,3 +565,174 @@ def test_commit_review_api_and_cli(make_repo, capsys) -> None:
     assert main(["review", "-C", repo.path, "--base", "HEAD~3", "--head", "HEAD", "--commit", shas[2][:8]]) == 0
     assert "commit " + shas[2][:8] + " add d" in capsys.readouterr().out
     assert main(["review", "-C", repo.path, "--base", "HEAD~1", "--head", "HEAD", "--commit", shas[0][:8]]) == 1
+
+
+# --------------------------------------------------------------------------- regressions from the code review
+
+
+def test_live_review_sees_new_commits_without_file_changes(make_repo) -> None:
+    repo = make_repo({"a.py": "A = 0\n"})
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave")
+    Path(repo.path, "a.py").write_text("A = 1\n")
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        def subjects():
+            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=30)
+            conn.request("GET", "/api/review?id=session", headers={"X-Repoviz": "1"})
+            return [c["subject"] for c in json.loads(conn.getresponse().read())["commits"]["items"]]
+        assert subjects() == ["Uncommitted changes"]
+        repo.stage("a.py").git("commit", "-qm", "agent: a")  # same content, now committed
+        assert subjects() == ["agent: a"]
+    finally:
+        srv.shutdown()
+
+
+def test_reverted_within_wave_ignores_submodule_pointers_and_symlinks(make_repo) -> None:
+    from test_large_repo_fixes import _git
+
+    lib = make_repo({"x.py": "X = 1\n"})
+    main = make_repo({"a.py": "A = 0\n"})
+    _git(main.path, "submodule", "add", "-q", lib.path, "sub")
+    _git(main.path, "commit", "-qm", "add sub")
+    Path(lib.path, "x.py").write_text("X = 2\n")
+    lib.commit("lib 2")
+    _git(str(Path(main.path, "sub")), "pull", "-q", "origin", "main")
+    _git(main.path, "commit", "-qam", "bump sub")
+    Path(main.path, "link.py").symlink_to("a.py")
+    main.commit("add a link")
+    r = Repository(main.path)
+    kinds = by_kind(build_review(r, resolve_target(r, base="HEAD~2", target="HEAD")))
+    assert "reverted-within-wave" not in kinds
+
+
+def test_commit_review_is_limited_to_the_range(make_repo, monkeypatch) -> None:
+    repo, shas = _commits_repo(make_repo)
+    r = Repository(repo.path)
+    with pytest.raises(ValueError):  # the uncommitted review has no commits: an old commit is refused
+        build_review(r, resolve_target(r, "all"), commit=shas[0])
+    monkeypatch.setattr(review_mod, "MAX_COMMITS", 1)
+    one = build_review(r, resolve_target(r, base="HEAD~3", target="HEAD"), commit=shas[0])  # beyond the cap
+    assert one["commit"]["subject"] == "change a" and [f["path"] for f in one["files"]] == ["a.py"]
+
+
+def test_merge_base_range_uses_its_second_revision(make_repo) -> None:
+    repo = make_repo({"a.py": "A = 0\n", "b.py": "B = 0\n"})
+    repo.git("checkout", "-q", "-b", "feature")
+    repo.write({"a.py": "A = 1\n"}).commit("feature work")
+    repo.git("checkout", "-q", "main")
+    repo.write({"b.py": "B = 1\n"}).commit("main work")
+    repo.git("checkout", "-q", "-b", "other")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "main...feature"))
+    assert [c["subject"] for c in report["commits"]["items"]] == ["feature work"]
+    assert "reverted-within-wave" not in by_kind(report)
+
+
+def test_commit_of_a_session_does_not_blame_pre_session_edits(make_repo) -> None:
+    repo = make_repo({"a.py": "A = 0\n", "notes.txt": "draft\n"})
+    Path(repo.path, "notes.txt").write_text("the human's edit\n")
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave")
+    Path(repo.path, "a.py").write_text("A = 1\n")
+    repo.git("commit", "-qam", "agent: a (commit -a also records notes.txt)")
+    r = Repository(repo.path)
+    target = resolve_target(r, "session")
+    sha = build_review(r, target)["commits"]["items"][0]["sha"]
+    assert [f["path"] for f in build_review(r, target, commit=sha)["files"]] == ["a.py"]
+
+
+def test_commit_review_has_no_missed_companion_already_in_the_wave(make_repo) -> None:
+    repo = make_repo({"app.py": "x = 0\n", "schema.sql": "-- 0\n", ".repoviz.toml": "[history]\nmin_commits = 3\n"})
+    for i in range(1, 7):
+        repo.write({"app.py": f"x = {i}\n", "schema.sql": f"-- {i}\n"}).commit(f"feature {i}")
+    first = repo.write({"app.py": "x = 'agent'\n"}).commit("agent: app")
+    repo.write({"schema.sql": "-- agent\n"}).commit("agent: schema")
+    r = Repository(repo.path)
+    target = resolve_target(r, base="HEAD~2", target="HEAD")
+    assert "missed-companion" not in by_kind(build_review(r, target))
+    one = build_review(r, target, commit=first)
+    assert "missed-companion" not in by_kind(one)
+    assert one["files"][0]["usually_changes_with"][0]["changed"] is True
+
+
+def test_commit_subjects_are_redacted(make_repo) -> None:
+    repo = make_repo({"a.py": "A = 0\n"})
+    repo.write({"a.py": "A = 1\n"}).commit(f"use token {SECRET} for CI")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "last-commit"))
+    assert SECRET not in json.dumps(report) and "for CI" in report["commits"]["items"][0]["subject"]
+
+
+def test_commit_review_in_a_sha256_repository(make_repo, tmp_path: Path) -> None:
+    root = tmp_path / "sha256"
+    root.mkdir()
+    import subprocess
+
+    if subprocess.run(["git", "init", "-q", "--object-format=sha256", "-b", "main"], cwd=root).returncode:
+        pytest.skip("this Git has no SHA-256 support")
+    run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True, text=True).stdout  # noqa: E731
+    (root / "a.py").write_text("A = 0\n")
+    run("add", "-A"), run("commit", "-qm", "init")
+    (root / "a.py").write_text("A = 1\n")
+    run("commit", "-qam", "change a")
+    r = Repository(root)
+    target = resolve_target(r, "last-commit")
+    sha = build_review(r, target)["commits"]["items"][0]["sha"]
+    assert len(sha) == 64 and build_review(r, target, commit=sha)["commit"]["subject"] == "change a"
+
+
+def test_router_registered_through_a_package_reexport(make_repo) -> None:
+    repo = make_repo(FASTAPI_APP)
+    repo.write({"app/routes/reports.py": REPORTS_ROUTE, "app/services/reports.py": "def build_report():\n    return {}\n",
+                "app/routes/__init__.py": "from .reports import router as reports_router\n"})
+    main = Path(repo.path, "app/main.py")
+    main.write_text(main.read_text().replace("from app.routes import images",
+                                             "from app.routes import images, reports_router")
+                    + "app.include_router(reports_router)\n")
+    assert "unwired-module" not in by_kind(_review_all(repo))
+
+
+def test_express_router_mounted_with_an_inline_require(make_repo) -> None:
+    repo = make_repo({
+        "package.json": '{"name": "api", "dependencies": {"express": "^4"}}',
+        "src/app.js": "const express = require('express');\nconst app = express();\n"
+                      "app.use('/users', require('./routes/users'));\nmodule.exports = app;\n",
+        "src/routes/users.js": "const express = require('express');\nconst router = express.Router();\n"
+                               "module.exports = router;\n",
+    })
+    repo.write({"src/routes/orders.js": "const express = require('express');\nconst router = express.Router();\n"
+                                        "module.exports = router;\n"})
+    Path(repo.path, "src/app.js").write_text(Path(repo.path, "src/app.js").read_text().replace(
+        "module.exports", "app.use('/orders', require('./routes/orders'));\nmodule.exports"))
+    assert "unwired-module" not in by_kind(_review_all(repo))
+
+
+def test_route_handlers_make_an_application(make_repo) -> None:
+    app = {k: v for k, v in FASTAPI_APP.items() if k != "Dockerfile"}  # no container, compose file or Procfile
+    repo = make_repo(app)
+    repo.write({"app/utils/formatting.py": "def pretty(x):\n    return str(x)\n",
+                "app/services/stats.py": "def count():\n    return 0\n",
+                "tests/test_stats.py": "from app.services.stats import count\n\n\ndef test_count():\n"
+                                       "    assert count() == 0\n"})
+    kinds = by_kind(_review_all(repo))
+    assert kinds["unwired-module"][0]["severity"] == "medium"
+    assert [f["path"] for f in kinds["unreachable-from-entry"]] == ["app/services/stats.py"]
+
+
+def test_default_export_imported_under_another_name(make_repo) -> None:
+    repo = make_repo({"package.json": '{"name": "api"}',
+                      "src/app.js": "const express = require('express');\nconst app = express();\n"})
+    repo.write({"src/handlers.js": "export default function listOrders(req, res) {\n  res.json([]);\n}\n"})
+    Path(repo.path, "src/app.js").write_text("import ordersHandler from './handlers.js';\n"
+                                             + Path(repo.path, "src/app.js").read_text()
+                                             + "app.get('/orders', ordersHandler);\n")
+    assert "unwired-symbol" not in by_kind(_review_all(repo))
+
+
+def test_common_file_names_are_not_matched_from_anywhere(make_repo) -> None:
+    repo = make_repo({"package.json": '{"name": "api", "main": "index.js"}',
+                      "index.js": "module.exports = {};\n"})
+    repo.write({"src/feature/index.js": "export function helper() { return 1; }\n"})
+    assert [f["path"] for f in by_kind(_review_all(repo))["unwired-module"]] == ["src/feature/index.js"]

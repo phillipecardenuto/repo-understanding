@@ -36,6 +36,11 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   - New command `repoviz coupling` lists the strongest pairs.
   - Thresholds go in the new `[history]` configuration table.
 
+### Fixed
+
+- Commit subjects and authors are redacted wherever reviews show them, including
+  the "Last commit: …" target label.
+
 ### Documentation
 
 - **Feature wishlist** ([docs/wishlist.md](docs/wishlist.md)). It surveys

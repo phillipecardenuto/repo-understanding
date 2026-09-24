@@ -71,10 +71,13 @@ _PY_REGISTER = re.compile(r"\b(include_router|register_blueprint)\s*\(")
 _JS_REGISTER = re.compile(r"\.use\s*\(")
 # Import statements, including parenthesized / braced ones spanning several lines.
 _PY_IMPORT = re.compile(r"^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+import[ \t]*(\([^)]*\)|[^\n]*)|import[ \t]+([^\n]*))", re.M)
-_JS_IMPORT = re.compile(r"^[ \t]*(?:import\s+([^;'\"]*?)\s*from\s*|import\s*|export\s+[^;'\"]*?\s*from\s*|"
-                        r"(?:const|let|var)\s+([^=;]+?)\s*=\s*require\(\s*)['\"]([^'\"]+)['\"]\)?;?", re.M)
+_JS_IMPORT = re.compile(r"^[ \t]*(?:import\s+(?P<imp>[^;'\"]*?)\s*from\s*|import\s*|export\s+(?P<exp>[^;'\"]*?)\s*from\s*|"
+                        r"(?:const|let|var)\s+(?P<req>[^=;]+?)\s*=\s*require\(\s*)['\"](?P<spec>[^'\"]+)['\"]\)?;?", re.M)
+_JS_INLINE_LOAD = re.compile(r"\b(?:require|import)\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _IMPORT_LINE = re.compile(r"^\s*(from\s+\S+\s+import\b|import\b|export\b.*\bfrom\b|(const|let|var)\s+.*=\s*require\()")
 _WORD = re.compile(r"[A-Za-z_$][\w$]*")
+#: File names too common to be matched by name alone (``"main": "index.js"`` is not every index.js).
+_GENERIC_NAMES = {"index", "main", "mod", "lib", "__init__", "__main__", "setup", "utils", "helpers", "config"}
 #: Entry points that make a repository an application: services and containers.
 _SERVICE_ENTRY_KINDS = ("compose-command", "procfile", "container-")
 
@@ -126,9 +129,6 @@ def _reference_tokens(node: Any) -> list[str]:
     tokens = [path] if path else []
     if "/" in stem and stem != path:
         tokens.append(stem)
-    if path and not _is_init(node):  # loaded by file name: asset('app.js'), <script src="/assets/app.js">
-        base = posixpath.basename(path)
-        tokens += [f'"{base}"', f"'{base}'", f'/{base}"', f"/{base}'"]
     qn = (node.qualified_name or "").removesuffix(".__init__")
     if node.language == "python" and "." in qn:
         tokens.append(qn)
@@ -163,8 +163,10 @@ def unwired_code(diff: RepositoryDiff, target: RepositorySnapshot, source: Any, 
     # (or by nobody yet) are normal API.  Containers make the whole repository an application; route and task
     # handlers make their own component one (a library's examples/ folder does not make the library an app).
     repo_app = any(str(n.metadata.get("entry_kind", "")).startswith(_SERVICE_ENTRY_KINDS) for n in entries)
-    app_components = {n.metadata.get("component_id") for n in entries
-                      if str(n.metadata.get("entry_kind", "")).startswith("decorated handler")}
+    app_components = {n.metadata.get("component_id")
+                      or (module_of_path[n.path].metadata.get("component_id") if n.path in module_of_path else None)
+                      for n in entries if str(n.metadata.get("entry_kind", "")).startswith("decorated handler")}
+    app_components.discard(None)
 
     def application(module: Any) -> bool:
         return repo_app or module.metadata.get("component_id") in app_components
@@ -228,7 +230,7 @@ def unwired_code(diff: RepositoryDiff, target: RepositorySnapshot, source: Any, 
                                register_in=registration_file(m.language) if router else None,
                                application=application(m) or bool(router)))
             unwired_ids.add(m.id)
-        elif router and not any(_router_used(m, idx[u], text) for u in users if idx[u].path):
+        elif router and not _router_wired(m, users, importers, idx, text):
             out.append(Unwired("unwired-module", m.path, m.qualified_name, router=router, router_kind=router_kind,
                                importers=sorted(idx[u].path for u in users if idx[u].path),
                                register_in=registration_file(m.language)))
@@ -285,6 +287,8 @@ def unwired_code(diff: RepositoryDiff, target: RepositorySnapshot, source: Any, 
             continue
         if s.id in callers or s.id in invoked or wired_by_convention(s.path, s.language, ignore):
             continue
+        if s.metadata.get("default_export") and importers.get(module.id):
+            continue  # imported under whatever name the importer chose
         checked += 1
         if checked > MAX_CANDIDATES or _name_used(s, module, importers, idx, text):
             continue
@@ -329,9 +333,12 @@ def _referenced_modules(candidates: list[Any], target: RepositorySnapshot, text:
     tokens = {k: v for k, v in tokens.items() if v}
     if not tokens:
         return set()
-    # Files in the same directory may use the bare file name (<script src="app.js">, CMD python worker.py).
+    # Files in the same directory may use the bare file name (<script src="app.js">, CMD python worker.py), and
+    # files in a parent directory may load it by a quoted name (asset('app.js')) when no file of that name sits
+    # next to them.  Generic entry names (index.js, main.py) are too ambiguous for that.
     local = {c.id: (posixpath.dirname(c.path), posixpath.basename(c.path)) for c in candidates
              if c.id in tokens and not _is_init(c)}
+    known = set(nodes_by_path(target))
     own = {c.path: c.id for c in candidates}
     # Every token contains the file's stem (or the package's name) as a word: a cheap first filter.
     by_word: dict[str, list[str]] = {}
@@ -363,8 +370,13 @@ def _referenced_modules(candidates: list[Any], target: RepositorySnapshot, text:
             toks = tokens[cid]
             if cid in found or own.get(path) == cid:
                 continue
-            if cid in local and local[cid][0] == folder:
-                toks = toks + [local[cid][1]]
+            if cid in local:
+                cand_dir, base = local[cid]
+                if cand_dir == folder:
+                    toks = toks + [base]
+                elif (not folder or cand_dir.startswith(folder + "/")) \
+                        and base.split(".", 1)[0] not in _GENERIC_NAMES and posixpath.join(folder, base) not in known:
+                    toks = toks + [f'"{base}"', f"'{base}'", f'/{base}"', f"/{base}'"]
             if any(t in data for t in toks) and _reference_outside_imports(data, toks):
                 found.add(cid)
     return found
@@ -407,8 +419,34 @@ def _bound_names(clause: str, language: str | None) -> set[str]:
     return {n for n in names if n and _WORD.fullmatch(n)}
 
 
-def _router_used(module: Any, user: Any, text: Callable[[str], str]) -> bool:
-    """Whether ``user`` does something with the router module besides importing it (registers it, lists it...)."""
+def _router_wired(module: Any, users: set[str], importers: dict[str, set[str]], idx: dict[str, Any],
+                  text: Callable[[str], str]) -> bool:
+    """Whether some importer uses the router, directly or through a package ``__init__`` / index barrel that
+    re-exports it."""
+    for uid in sorted(users):
+        user = idx.get(uid)
+        if user is None or not user.path:
+            continue
+        used, names = _router_used(module, user, text)
+        if used:
+            return True
+        base = posixpath.basename(user.path)
+        if names and (base == "__init__.py" or base.startswith("index.")):
+            for wid in importers.get(uid, ()):
+                w = idx.get(wid)
+                if w is not None and w.path and w.id != module.id and _uses_names(text(w.path), names, w.language):
+                    return True
+    return False
+
+
+def _uses_names(data: str, names: set[str], language: str | None) -> bool:
+    body = (_PY_IMPORT if language == "python" else _JS_IMPORT).sub("", data)
+    return any(re.search(r"(?<![\w$])" + re.escape(n) + r"(?![\w$])", body) for n in names)
+
+
+def _router_used(module: Any, user: Any, text: Callable[[str], str]) -> tuple[bool, set[str]]:
+    """Whether ``user`` does something with the router module besides importing it (registers it, lists it...),
+    and the names its imports bind to the module."""
     stem = posixpath.basename(module.path).rsplit(".", 1)[0]
     qn = module.qualified_name or ""
     data = text(user.path)
@@ -436,13 +474,17 @@ def _router_used(module: Any, user: Any, text: Callable[[str], str]) -> bool:
     else:
         pattern = _JS_IMPORT
         for m in pattern.finditer(data):
-            spec = m.group(3) or ""
+            spec = m.group("spec") or ""
             if posixpath.basename(spec).rsplit(".", 1)[0] == stem or spec.endswith("/" + stem):
-                names |= _bound_names((m.group(1) or "") + "," + (m.group(2) or ""), "js")
+                names |= _bound_names(",".join(m.group(g) or "" for g in ("imp", "exp", "req")), "js")
     body = pattern.sub("", data)
     names -= {"import", "from", "as", "require", "const", "let", "var", "default", "type"}
-    return any(d in body for d in dotted) or any(re.search(r"(?<![\w$])" + re.escape(n) + r"(?![\w$])", body)
+    if user.language != "python" and any(posixpath.basename(sp).rsplit(".", 1)[0] == stem
+                                         for sp in _JS_INLINE_LOAD.findall(body)):
+        return True, names  # app.use('/orders', require('./routes/orders'))
+    used = any(d in body for d in dotted) or any(re.search(r"(?<![\w$])" + re.escape(n) + r"(?![\w$])", body)
                                                  for n in names)
+    return used, names
 
 
 def _registration_file(target: RepositorySnapshot, text: Callable[[str], str], language: str | None,
