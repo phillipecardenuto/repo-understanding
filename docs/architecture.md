@@ -183,7 +183,18 @@ fetches `/api/*`; the static report inlines Mermaid, the script and a
 `<script type="application/json">` payload (with `<` escaped as `<`). The
 app builds view graphs, serializes them to Mermaid, renders with
 `securityLevel: "strict"`, then attaches its own pan/zoom, keyboard and click
-handlers to the SVG. Server endpoints:
+handlers to the SVG.
+
+Icons are defined once in `app.js` as SVG path data: 24×24, 2px round strokes,
+plus a light-background and a dark-background colour per icon. At startup they
+become a stylesheet in which each `.rvi-<name>` class paints its icon with a CSS
+mask (`data:` URI, allowed by the CSP). Mermaid labels contain only a short
+`<i class='rvi rvi-folder'></i>` token. The strict sanitizer keeps it, and
+Mermaid sizes the node with the icon's width because page CSS applies while it
+measures. Icons inside nodes keep their light-theme colours (node fills stay
+light in both themes). *SVG* downloads embed the icon stylesheet.
+
+Server endpoints:
 
 | Endpoint | Description |
 |---|---|

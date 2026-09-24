@@ -153,6 +153,14 @@ languages without call data). The live app refreshes automatically.
 Every diagram also carries an `accTitle`/`accDescr`, all data is available in
 tables, and diagrams can be navigated with the keyboard (arrows, +/-, 0 to fit).
 
+Nodes carry a kind icon from repoviz's own line-icon set, each in its own colour:
+house (repository), package (project / component), folder (package /
+directory), code file (module), flask (tests), link (external), play (entry
+point), class, function, container, CI, configuration and docs. The icons are
+drawn with CSS, so they look the same on every OS and in both themes; they are
+also kept in downloaded SVGs. `repoviz mermaid` output for Markdown (e.g. GitHub)
+uses emoji instead, because it can't carry the stylesheet.
+
 ## Supervising AI coding agents
 
 A **work session** ("wave") records the working tree when the agent starts,

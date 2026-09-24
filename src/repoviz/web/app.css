@@ -45,6 +45,10 @@ a { color: var(--accent); }
 button, select, input { font: inherit; color: inherit; }
 code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Icons (drawn by app.js with CSS masks); the box is reserved here so nothing shifts while the script loads. */
+.rvi { display: inline-block; width: 1.2em; height: 1.2em; vertical-align: -.25em; flex: none; }
+.tabs [role=tab] .rvi { opacity: .85; }
+.tabs [role=tab][aria-selected="true"] .rvi { opacity: 1; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* ---------- header & tabs ---------- */

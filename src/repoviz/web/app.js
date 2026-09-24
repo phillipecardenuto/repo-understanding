@@ -133,14 +133,110 @@
     return null;
   }
 
+  // ---------------------------------------------------------------- icons
+  /* repoviz line icons: 24×24, 2px round strokes, drawn for this tool.  Each entry is
+     [colour on light backgrounds, colour on dark backgrounds, ...path data]; a path prefixed with
+     "dash:" is drawn dashed, "dot:" with a heavy stroke (for dots).  Icons are painted with a CSS
+     mask, so one definition serves diagrams (Mermaid labels), legends, tables and buttons. */
+  const CIRCLE = "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z";
+  const FILE = "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z";
+  const FOLDER = "M3 7.5A2.5 2.5 0 0 1 5.5 5h3.4a2 2 0 0 1 1.6.8l1.1 1.4a2 2 0 0 0 1.6.8h5.3A2.5 2.5 0 0 1 21 10.5v6a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5Z";
+  const ICONS = {
+    house: ["#4f46e5", "#a5b4fc", "M3 10.2 12 3l9 7.2", "M5.5 8.6V19a1.5 1.5 0 0 0 1.5 1.5h3.2V15a1.8 1.8 0 0 1 3.6 0v5.5H17a1.5 1.5 0 0 0 1.5-1.5V8.6"],
+    box: ["#7c3aed", "#c4b5fd", "M12 2.8 20.5 7.5v9L12 21.2 3.5 16.5v-9Z", "M3.8 7.6 12 12.2l8.2-4.6", "M12 12.2v9", "m7.8 5.2 8.4 4.7"],
+    layers: ["#7c3aed", "#c4b5fd", "M12 3 21 8l-9 5-9-5Z", "m3 12 9 5 9-5", "m3 16.5 9 5 9-5"],
+    folder: ["#d97706", "#fbbf24", FOLDER, "M3 10.5h18"],
+    "folder-dashed": ["#d97706", "#fbbf24", "dash:" + FOLDER],
+    "file-code": ["#0284c7", "#7dd3fc", FILE, "M14 3v5h5", "m10 12.5-2 2 2 2", "m14 12.5 2 2-2 2"],
+    file: ["#64748b", "#cbd5e1", FILE, "M14 3v5h5", "M9 13h6", "M9 17h4"],
+    manifest: ["#7c3aed", "#c4b5fd", "M9 4.5H7a2 2 0 0 0-2 2V19a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6.5a2 2 0 0 0-2-2h-2", "M9.5 3h5a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-.5.5h-5a.5.5 0 0 1-.5-.5v-2a.5.5 0 0 1 .5-.5Z", "M9 12h6", "M9 16h4"],
+    class: ["#0d9488", "#5eead4", "M6.5 3.5h11A2.5 2.5 0 0 1 20 6v12a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18V6a2.5 2.5 0 0 1 2.5-2.5Z", "M4 9h16", "M4 14.5h16"],
+    function: ["#c026d3", "#f0abfc", "M15.5 4.2c-.8-.6-1.9-.8-2.9-.4-1.1.5-1.6 1.6-1.8 2.8L9.4 17.4c-.2 1.2-.7 2.3-1.8 2.8-1 .4-2.1.2-2.9-.4", "M7.5 9.5h8"],
+    terminal: ["#059669", "#6ee7b7", "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z", "m7 9 3 3-3 3", "M13 15h4"],
+    play: ["#059669", "#6ee7b7", CIRCLE, "M10 8.8v6.4a.6.6 0 0 0 .9.5l5.2-3.2a.6.6 0 0 0 0-1l-5.2-3.2a.6.6 0 0 0-.9.5Z"],
+    link: ["#0891b2", "#67e8f9", "M10 13.5a4.5 4.5 0 0 0 6.4.4l2.8-2.8a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2", "M14 10.5a4.5 4.5 0 0 0-6.4-.4l-2.8 2.8a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"],
+    container: ["#0369a1", "#7dd3fc", "M4.5 6.5h15A1.5 1.5 0 0 1 21 8v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17V8a1.5 1.5 0 0 1 1.5-1.5Z", "M7.5 9.5v6", "M12 9.5v6", "M16.5 9.5v6"],
+    cloud: ["#0369a1", "#7dd3fc", "M7 19a4.5 4.5 0 0 1-.6-9A6 6 0 0 1 18 9.5a4.8 4.8 0 0 1-.5 9.5Z"],
+    sliders: ["#64748b", "#cbd5e1", "M4 7h9", "M17 7h3", "M13 7a2 2 0 1 0 4 0 2 2 0 1 0-4 0", "M4 12h3", "M11 12h9", "M7 12a2 2 0 1 0 4 0 2 2 0 1 0-4 0", "M4 17h11", "M19 17h1", "M15 17a2 2 0 1 0 4 0 2 2 0 1 0-4 0"],
+    workflow: ["#ea580c", "#fdba74", "M20 11a8 8 0 0 0-14.5-4.6L4 8", "M4 4v4h4", "M4 13a8 8 0 0 0 14.5 4.6L20 16", "M20 20v-4h-4"],
+    flask: ["#16a34a", "#86efac", "M9 3h6", "M10 3v5.5L4.8 17.6A2.2 2.2 0 0 0 6.7 21h10.6a2.2 2.2 0 0 0 1.9-3.4L14 8.5V3", "M7.2 14h9.6"],
+    book: ["#e11d48", "#fda4af", "M5 5.5A2.5 2.5 0 0 1 7.5 3H19v14H7.5A2.5 2.5 0 0 0 5 19.5Z", "M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5", "M9 7h6"],
+    branch: ["#64748b", "#cbd5e1", "M6 8.5v7", "M6 3.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z", "M6 15.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z", "M18 3.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z", "M18 8.5c0 4.5-4 5.5-8 6-2 .3-3.3.8-4 1"],
+    dots: ["#64748b", "#cbd5e1", "dot:M6 12h.01", "dot:M12 12h.01", "dot:M18 12h.01"],
+    lock: ["#dc2626", "#fca5a5", "M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19.5v-7A1.5 1.5 0 0 1 6.5 11Z", "M8 11V7.5a4 4 0 0 1 8 0V11", "M12 15v2"],
+    alert: ["#ea580c", "#fdba74", "M10.3 4.2 2.6 17.5a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z", "M12 9.5v4", "M12 17h.01"],
+    "alert-circle": ["#dc2626", "#fca5a5", CIRCLE, "M12 8v4.5", "M12 16h.01"],
+    check: ["#16a34a", "#86efac", CIRCLE, "m8.5 12.2 2.4 2.4 4.6-4.8"],
+    comment: ["#6366f1", "#a5b4fc", "M20 15.5a2 2 0 0 1-2 2H8l-4 3.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2Z"],
+    // interface icons (drawn in the text colour)
+    review: ["#4f46e5", "#a5b4fc", "M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z", "m20.5 20.5-4.5-4.5", "m8 11 2 2 4-4"],
+    diff: ["#4f46e5", "#a5b4fc", FILE, "M14 3v5h5", "M12 9.5v5", "M9.5 12h5", "M9.5 17.5h5"],
+    tree: ["#4f46e5", "#a5b4fc", "M9.5 3h5v4.5h-5Z", "M3.5 16.5h5V21h-5Z", "M15.5 16.5h5V21h-5Z", "M12 7.5V12", "M6 16.5V12h12v4.5"],
+    graph: ["#4f46e5", "#a5b4fc", "M20.5 5a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z", "M8.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z", "M20.5 19a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z", "m8.2 10.8 7.6-4.4", "m8.2 13.2 7.6 4.4"],
+    pulse: ["#4f46e5", "#a5b4fc", "M3 12h4l3-8 4 16 3-8h4"],
+    moon: ["#4f46e5", "#a5b4fc", "M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"],
+  };
+  function iconSvg(name) {
+    const paths = ICONS[name].slice(2).map((d) => {
+      const extra = d.startsWith("dash:") ? " stroke-dasharray='3 2.4'" : d.startsWith("dot:") ? " stroke-width='3.5'" : "";
+      return `<path d='${d.replace(/^(dash|dot):/, "")}'${extra}/>`;
+    }).join("");
+    return `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${paths}</svg>`;
+  }
+  /* Stylesheet for the icons; `standalone` omits page-theme rules (used inside downloaded SVGs). */
+  function iconCss(standalone) {
+    const rules = [".rvi{display:inline-block;width:1.2em;height:1.2em;vertical-align:-.25em;margin-right:.1em;flex:none;background-color:var(--cl);"
+      + "-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}"];
+    for (const [name, def] of Object.entries(ICONS)) {
+      rules.push(`.rvi-${name}{--m:url("data:image/svg+xml,${encodeURIComponent(iconSvg(name))}");--cl:${def[0]};--cd:${def[1]}}`);
+    }
+    if (!standalone) {
+      // Page backgrounds turn dark with the theme; diagram nodes keep their light fills, so their icons keep the light colours.
+      rules.push(":root[data-theme=dark] .rvi{background-color:var(--cd)}",
+        "@media (prefers-color-scheme: dark){:root:not([data-theme=light]) .rvi{background-color:var(--cd)}}",
+        ":root g.node .rvi,:root:not([data-theme=light]) g.node .rvi,:root[data-theme=dark] g.node .rvi{background-color:var(--cl)}",
+        ".rvi.mono,:root .rvi.mono,:root[data-theme=dark] .rvi.mono,:root:not([data-theme=light]) .rvi.mono{background-color:currentColor}");
+    }
+    return rules.join("\n");
+  }
+  (function installIcons() {
+    if (document.getElementById("rv-icons")) return;
+    const style = document.createElement("style");
+    style.id = "rv-icons";
+    style.textContent = iconCss(false);
+    document.head.appendChild(style);
+  })();
+  /* An icon element for HTML; `mono` draws it in the surrounding text colour. */
+  function iconEl(name, mono) {
+    if (!name || !ICONS[name]) return null;
+    return h("i", { class: `rvi rvi-${name}${mono ? " mono" : ""}`, "aria-hidden": "true" });
+  }
+  /* Icon markup inside Mermaid labels (kept by Mermaid's sanitizer; sized by the page CSS when it measures). */
+  const iconMarkup = (name) => (ICONS[name] ? `<i class='rvi rvi-${name}'></i>` : mEsc(name));
+  /* Inline icon token for label and sublabel text; nodeLabel() turns it into markup after escaping. */
+  const ic = (name) => `\u0001${name}\u0001`;
+
   // ---------------------------------------------------------------- theme
   let THEME = null;
+  const TYPE_ICONS = {
+    repository: "house", project: "box", "workspace-member": "box", workspace: "layers", package: "folder",
+    "namespace-package": "folder-dashed", directory: "folder", module: "file-code", file: "file", class: "class",
+    function: "function", method: "function", "main-block": "terminal", "external-package": "link", submodule: "link",
+    "container-image": "container", container: "container", compose: "container", service: "sliders",
+    "ci-pipeline": "workflow", "entry-point": "play", tests: "flask", docs: "book",
+  };
+  /* Icon name for a model node. */
   const icon = (n) => {
     if (!n) return "";
-    if (hasTag(n, "test") && n.category !== "symbol") return "🧪";
-    const i = THEME.icons[n.component_type];
-    if (i) return i;
-    return hasTag(n, "entry-point") ? "🚀" : "";
+    if (hasTag(n, "test") && n.category !== "symbol") return "flask";
+    if (n.component_type === "file") {
+      if (hasTag(n, "manifest")) return "manifest";
+      if (hasTag(n, "deployment")) return "cloud";
+      if (hasTag(n, "config")) return "sliders";
+      if (/\.(md|mdx|rst|adoc|txt)$/i.test(n.path || "")) return "book";
+    }
+    if ((n.component_type === "directory" || n.component_type === "package") && hasTag(n, "docs")) return "book";
+    return TYPE_ICONS[n.component_type] || (hasTag(n, "entry-point") ? "play" : "");
   };
   function kindOf(n) {
     if (hasTag(n, "external")) return "external";
@@ -316,7 +412,7 @@
       `Changes at ${o.level} level`);
     if (hiddenNeighbors) {
       view.nodes.push({ id: "rv_more_neighbors", label: `+${hiddenNeighbors} more unchanged neighbours`, sublabel: "choose Show: Everything to list them",
-        status: "unchanged", kind: "structural", shape: "stadium", parent: null, icon: "…", reasons: [] });
+        status: "unchanged", kind: "structural", shape: "stadium", parent: null, icon: "dots", reasons: [] });
     }
     return view;
   }
@@ -332,7 +428,7 @@
       let parent = null;
       if (cluster) {
         const c = compGroup(v);
-        if (c && c !== v && idx.nodes.has(c) && !keep.has(c)) { parent = "sg_" + c; view.subgraphs.set(parent, displayName(idx.nodes.get(c))); }
+        if (c && c !== v && idx.nodes.has(c) && !keep.has(c)) { parent = "sg_" + c; view.subgraphs.set(parent, { icon: icon(idx.nodes.get(c)), label: displayName(idx.nodes.get(c)) }); }
       }
       view.nodes.push({ id: v, label: o.level === "symbol" && n.category === "symbol" ? shortSymbol(n) : displayName(n), sublabel: sublabel(n),
         status: statusOf(v), kind: kindOf(n), shape: hasTag(n, "external") ? "stadium" : n.category === "symbol" ? "round" : "box",
@@ -429,7 +525,7 @@
         const kids = childrenOf(n.id);
         if (depth < o.depth && kids.length && CONTAINERS.has(n.component_type)) {
           const sg = "sg_" + n.id;
-          view.subgraphs.set(sg, (icon(n) ? icon(n) + " " : "") + (depth === 0 ? displayName(n) : n.name));
+          view.subgraphs.set(sg, { icon: icon(n), label: depth === 0 ? displayName(n) : n.name });
           view.nested.push({ id: sg, parent });
           for (const k of kids) walk(k, depth + 1, sg);
         } else {
@@ -466,12 +562,12 @@
     const shapes = { entry: "stadium", test: "hexagon", changed: "box", caller: "round", callee: "round", path: "round" };
     for (const n of flow.nodes || []) {
       const mod = n.module_id && n.module_id !== n.id ? "sg_" + n.module_id : null;
-      if (mod) view.subgraphs.set(mod, n.module || n.module_id);
+      if (mod) view.subgraphs.set(mod, { icon: "file-code", label: n.module || n.module_id });
       const q = n.qualified_name || n.name;
       const parts = q.split(/[.:]/);
       const lbl = n.category === "symbol" ? (n.kind === "method" ? parts.slice(-2).join(".") : parts[parts.length - 1]) : q;
       view.nodes.push({ id: n.id, label: lbl, sublabel: `${n.kind || ""} · ${n.role}`, status: n.status || "unchanged", kind: n.role,
-        shape: shapes[n.role] || "box", parent: mod, icon: n.role === "test" ? "🧪" : n.role === "entry" ? "🚀" : "" });
+        shape: shapes[n.role] || "box", parent: mod, icon: n.role === "test" ? "flask" : n.role === "entry" ? "play" : n.category === "symbol" ? (n.kind === "class" ? "class" : "function") : "" });
     }
     for (const e of flow.edges || []) view.edges.push({ source: e.source, target: e.target, status: e.status || "unchanged", relationship: e.relationship || "calls", count: 1 });
     return view;
@@ -487,14 +583,14 @@
       fileIds.set(ev.path, id);
       const comp = ev.owning_component || "root";
       const sg = "sg_" + comp;
-      view.subgraphs.set(sg, ev.owning_component_name || "(repository root)");
+      view.subgraphs.set(sg, { icon: ev.owning_component_name ? "box" : "house", label: ev.owning_component_name || "(repository root)" });
       const bits = [];
       if (ev.lines_added !== null && ev.lines_added !== undefined) bits.push(`+${ev.lines_added} −${ev.lines_removed}`);
       if (ev.impact_level && ev.impact_level !== "none") bits.push(`impact ${ev.impact_level}`);
       if (ev.is_test) bits.push("test");
       if (ev.configuration_affected) bits.push("config");
-      view.nodes.push({ id, label: (ev.impact_level === "high" ? "⚠ " : "") + ev.path.split("/").pop(), sublabel: bits.join(" · "),
-        status: statusOf(ev), kind: "module", shape: "box", parent: sg, icon: ev.is_test ? "🧪" : ev.configuration_affected ? "⚙" : "📄" });
+      view.nodes.push({ id, label: (ev.impact_level === "high" ? ic("alert") : "") + ev.path.split("/").pop(), sublabel: bits.join(" · "),
+        status: statusOf(ev), kind: "module", shape: "box", parent: sg, icon: ev.is_test ? "flask" : ev.configuration_affected ? "sliders" : "file-code" });
     }
     if (di) {
       const known = new Set(view.nodes.map((n) => n.id));
@@ -535,15 +631,21 @@
       return `  classDef ${prefix}${name} ${parts.join(",")}`;
     });
   }
+  /* Escape label text for Mermaid, then turn ic() tokens into icon markup (a token cut by truncation is dropped). */
+  function mText(text, limit) {
+    return mEsc(text, limit).replace(/\u0001([\w-]+)\u0001/g, (m, name) => iconMarkup(name)).replace(/\u0001[\w-]*/g, "");
+  }
   function nodeLabel(n, mode) {
     const st = THEME.status[n.status] || {};
     const marker = (mode === "diff" || mode === "role") && n.status !== "unchanged" && st.icon ? st.icon + " " : "";
-    const first = marker + (n.icon ? n.icon + " " : "") + mEsc(n.label);
+    const first = marker + (n.icon ? iconMarkup(n.icon) + " " : "") + mText(n.label);
     let second = n.sublabel || "";
     if (mode === "diff" && n.status !== "unchanged") second = (st.word || n.status) + (second ? " · " + second : "");
     else if (mode === "role" && n.status !== "unchanged") second = second + " · " + (st.word || n.status);
-    return first + (second ? `<br/><small>${mEsc(second, 80)}</small>` : "");
+    return first + (second ? `<br/><small>${mText(second, 90)}</small>` : "");
   }
+  /* Subgraph titles are plain strings or {icon, label}. */
+  const subgraphLabel = (v) => (v && typeof v === "object" ? (v.icon ? iconMarkup(v.icon) + " " : "") + mText(v.label) : mText(v));
   function edgeStyle(e) {
     const t = THEME.edge;
     const st = t[e.status] || t.unchanged;
@@ -579,7 +681,7 @@
       const kids = new Map();
       for (const sg of view.nested) push(kids, sg.parent, sg.id);
       const emit = (sg, indent) => {
-        lines.push(`${indent}subgraph ${sg}["${mEsc(view.subgraphs.get(sg))}"]`);
+        lines.push(`${indent}subgraph ${sg}["${subgraphLabel(view.subgraphs.get(sg))}"]`);
         for (const child of kids.get(sg) || []) emit(child, indent + "  ");
         for (const n of byParent.get(sg) || []) lines.push(nodeLine(n, indent + "  "));
         lines.push(`${indent}end`);
@@ -589,7 +691,7 @@
       for (const [sg, label] of view.subgraphs) {
         const members = byParent.get(sg) || [];
         if (!members.length) continue;
-        lines.push(`  subgraph ${sg}["${mEsc(label)}"]`);
+        lines.push(`  subgraph ${sg}["${subgraphLabel(label)}"]`);
         lines.push(view.direction === "LR" || view.direction === "RL" ? "    direction TB" : "    direction LR");
         for (const n of members) lines.push(nodeLine(n, "    "));
         lines.push("  end");
@@ -768,7 +870,13 @@
     }
     downloadSvg() {
       const svg = $("svg", this.stage);
-      if (svg) download("diagram.svg", new XMLSerializer().serializeToString(svg), "image/svg+xml");
+      if (!svg) return;
+      // The icons are painted by page CSS: carry that CSS into the standalone file.
+      const copy = svg.cloneNode(true);
+      const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+      style.textContent = iconCss(true);
+      copy.insertBefore(style, copy.firstChild);
+      download("diagram.svg", new XMLSerializer().serializeToString(copy), "image/svg+xml");
     }
   }
 
@@ -782,19 +890,20 @@
     ];
   }
   function kindLegend() {
+    const item = (name, text) => h("span", { class: "item" }, iconEl(name), " " + text);
     return [
-      h("span", { class: "item" }, "🏠 repository"), h("span", { class: "item" }, "📦 project"), h("span", { class: "item" }, "📁 package / directory"),
-      h("span", { class: "item" }, "📄 module / file"), h("span", { class: "item" }, "🔗 external"), h("span", { class: "item" }, "🧪 tests"),
-      h("span", { class: "item" }, "🚀 entry point"), h("span", { class: "item" }, "🐳 container"),
+      item("house", "repository"), item("box", "project / component"), item("folder", "package / directory"), item("file-code", "module"),
+      item("file", "file"), item("class", "class"), item("function", "function / method"), item("link", "external"), item("flask", "tests"),
+      item("play", "entry point"), item("container", "container"), item("workflow", "CI pipeline"), item("sliders", "configuration"), item("book", "docs"),
       h("span", { class: "item" }, h("span", { class: "line cycle" }), "⟲ dependency cycle"),
       h("span", { class: "item muted" }, "dashed border: external or structural-only (no dependency data)"),
     ];
   }
   function roleLegend() {
-    const sw = (fill, stroke, dash, text) => h("span", { class: "item" }, h("span", { class: "swatch", style: { background: fill, borderColor: stroke, borderStyle: dash ? "dashed" : "solid" } }), text);
+    const sw = (fill, stroke, dash, ...text) => h("span", { class: "item" }, h("span", { class: "swatch", style: { background: fill, borderColor: stroke, borderStyle: dash ? "dashed" : "solid" } }), ...text);
     return [sw("#fef3c7", "#b45309", false, "✎ changed code"), sw("#dcfce7", "#15803d", false, "✚ added"), sw("#fee2e2", "#b91c1c", true, "✖ removed"),
       sw("#e0f2fe", "#0369a1", false, "caller (may be affected)"), sw("#f1f5f9", "#64748b", true, "callee"),
-      sw("#ede9fe", "#6d28d9", false, "🚀 entry point (stadium)"), sw("#ccfbf1", "#0f766e", false, "🧪 test (hexagon)")];
+      sw("#ede9fe", "#6d28d9", false, iconEl("play"), " entry point (stadium)"), sw("#ccfbf1", "#0f766e", false, iconEl("flask"), " test (hexagon)")];
   }
 
   // ------------------------------------------------------------- widgets
@@ -903,7 +1012,7 @@
       if (!n) { this.clear("Unknown node."); return; }
       const comp = meta(n).component_id ? idx.nodes.get(meta(n).component_id) : null;
       const proj = meta(n).project_id ? idx.nodes.get(meta(n).project_id) : null;
-      this.el.appendChild(h("h3", null, `${icon(n)} ${displayName(n)} `, statusPill(n.status)));
+      this.el.appendChild(h("h3", null, iconEl(icon(n)), " ", displayName(n), " ", statusPill(n.status)));
       if (n.change_reasons && n.change_reasons.length) this.el.appendChild(h("div", { class: "muted" }, "Change: " + n.change_reasons.join("; ")));
       this.el.appendChild(h("dl", { class: "kv" },
         h("dt", { text: "type" }), h("dd", { text: `${n.component_type} (${n.category})` }),
@@ -1165,7 +1274,7 @@
       while (cur) { chain.unshift(cur); cur = cur.parent_id ? si.nodes.get(cur.parent_id) : null; }
       chain.forEach((n, i) => {
         if (i) this.crumbs.appendChild(h("span", { class: "faint", text: "/" }));
-        this.crumbs.appendChild(h("button", { type: "button", onclick: () => this.setRoot(n.id) }, i === 0 ? "🏠 " + n.name : n.name));
+        this.crumbs.appendChild(h("button", { type: "button", onclick: () => this.setRoot(n.id) }, i === 0 ? [iconEl("house"), " ", n.name] : n.name));
       });
     }
     async draw() {
@@ -1312,7 +1421,7 @@
         h("h4", { text: "Detected by analysis" }),
         snapCycles.length ? h("ul", { class: "plain" }, snapCycles.map((c) => h("li", null, pill(c.level), " ",
           h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); o.level = c.level === "module" ? "module" : c.level === "project" ? "project" : "component"; o.cycleMembers = c.members; o.focus = null; this.draw(); } },
-            (c.example_path && c.example_path.length ? c.example_path : c.members).map(name).join(" → "))))) : h("div", { class: "empty", text: "No dependency cycles. 🎉" }));
+            (c.example_path && c.example_path.length ? c.example_path : c.members).map(name).join(" → "))))) : h("div", { class: "empty" }, iconEl("check"), " No dependency cycles."));
       const fan = new Map();
       for (const e of view.edges) {
         if (!fan.has(e.source)) fan.set(e.source, { id: e.source, out: 0, in: 0 });
@@ -1416,8 +1525,8 @@
         { key: "lines_added", label: "+/−", num: true, render: (r) => r.lines_added === null || r.lines_added === undefined ? "bin" : `+${r.lines_added} −${r.lines_removed}` },
         { key: "impact_level", label: "Impact", sort: (r) => ({ none: 0, low: 1, medium: 2, high: 3 })[r.impact_level] || 0,
           render: (r) => [pill(r.impact_level, r.impact_level), ...(r.architecture_impact || []).filter((i) => i.severity !== "none").slice(0, 3).map((i) => h("div", { class: "faint", text: i.kind.replace(/-/g, " ") + ": " + i.detail }))] },
-        { key: "tests_affected", label: "Tests", num: true, sort: (r) => (r.tests_affected || []).length, render: (r) => r.is_test ? "🧪 test" : String((r.tests_affected || []).length) },
-        { key: "configuration_affected", label: "Config", render: (r) => r.configuration_affected ? "⚙ " + (r.configuration_kind || "") : "" },
+        { key: "tests_affected", label: "Tests", num: true, sort: (r) => (r.tests_affected || []).length, render: (r) => r.is_test ? [iconEl("flask"), " test"] : String((r.tests_affected || []).length) },
+        { key: "configuration_affected", label: "Config", render: (r) => r.configuration_affected ? [iconEl("sliders"), " ", r.configuration_kind || ""] : "" },
         { key: "last_observed", label: "Last observed", render: (r) => fmtTime(r.last_observed) },
         { key: "first_observed", label: "First observed", render: (r) => fmtTime(r.first_observed) },
       ], d.events || [], { onRow: (r) => { this.details.showActivity(r, d); if (r.module_id) this.mapDiagram.select(r.module_id); }, sort: "impact_level", dir: -1, empty: "No files are currently modified." }));
@@ -1475,7 +1584,8 @@
     architecture: "improve", hygiene: "improve" };
   const splitGlobs = (text) => (text || "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
   function scopePill(scope) {
-    return { protected: pill("⛔ protected", "high"), "out-of-scope": pill("⚠ out of scope", "medium"), allowed: pill("✓ in scope", "added"),
+    return { protected: pill([iconEl("lock", true), " protected"], "high"), "out-of-scope": pill([iconEl("alert", true), " out of scope"], "medium"),
+      allowed: pill([iconEl("check", true), " in scope"], "added"),
       unscoped: null }[scope] || null;
   }
   function sevPill(sev) { return pill(sev, sev === "high" ? "high" : sev === "medium" ? "medium" : "low"); }
@@ -1768,8 +1878,8 @@
     legend() {
       const sw = (cls, text) => h("span", { class: "item" }, h("span", { class: "swatch " + cls }), text);
       return [sw("added", "✚ new"), sw("modified", "✎ modified"), sw("removed", "✖ removed (dashed)"),
-        h("span", { class: "item" }, h("span", { class: "swatch", style: { background: "#fecaca", borderColor: "#7f1d1d", borderWidth: "4px" } }), "⛔ touches a protected area"),
-        h("span", { class: "item" }, h("span", { class: "swatch", style: { background: "#ffedd5", borderColor: "#c2410c", borderWidth: "3px" } }), "⚠ outside the allowed scope"),
+        h("span", { class: "item" }, h("span", { class: "swatch", style: { background: "#fecaca", borderColor: "#7f1d1d", borderWidth: "4px" } }), iconEl("lock"), " touches a protected area"),
+        h("span", { class: "item" }, h("span", { class: "swatch", style: { background: "#ffedd5", borderColor: "#c2410c", borderWidth: "3px" } }), iconEl("alert"), " outside the allowed scope"),
         h("span", { class: "item" }, h("span", { class: "line added" }), "+ new dependency"), h("span", { class: "item" }, h("span", { class: "line cycle" }), "⟲ new cycle")];
     }
     draw() {
@@ -1810,9 +1920,9 @@
       const view = { title: "Where the agent went", direction: "LR", mode: "diff", nodes: [], edges: [], subgraphs: new Map(), truncated: 0 };
       const flags = (scopeCounts, findings) => {
         const out = [];
-        if (scopeCounts.protected) out.push(`⛔ ${scopeCounts.protected} protected`);
-        if (scopeCounts["out-of-scope"]) out.push(`⚠ ${scopeCounts["out-of-scope"]} out of scope`);
-        if (findings.high) out.push(`❗${findings.high} high`);
+        if (scopeCounts.protected) out.push(`${ic("lock")}${scopeCounts.protected} protected`);
+        if (scopeCounts["out-of-scope"]) out.push(`${ic("alert")}${scopeCounts["out-of-scope"]} out of scope`);
+        if (findings.high) out.push(`${ic("alert-circle")}${findings.high} high`);
         return out;
       };
       let level = this.opts.mapLevel;
@@ -1826,12 +1936,12 @@
         for (const c of r.components) {
           const extra = c.scope.protected ? "scope_protected" : c.scope["out-of-scope"] ? "scope_out" : null;
           view.nodes.push({ id: "rc_" + c.id, label: c.name, sublabel: [`${plural(c.files, "file")} · +${c.lines_added} −${c.lines_removed}`, ...flags(c.scope, c.findings)].join(" · "),
-            status: c.status === "added" || c.status === "removed" ? c.status : "modified", kind: "component", shape: "box", icon: c.type === "repository" ? "🏠" : "📦", extraClass: extra, ref: c.id });
+            status: c.status === "added" || c.status === "removed" ? c.status : "modified", kind: "component", shape: "box", icon: c.type === "repository" ? "house" : "box", extraClass: extra, ref: c.id });
         }
         const known = new Set(r.components.map((c) => c.id));
         for (const e of r.component_edges || []) {
           for (const [id, name] of [[e.source, e.source_name], [e.target, e.target_name]]) {
-            if (!known.has(id)) { known.add(id); view.nodes.push({ id: "rc_" + id, label: name, sublabel: "not changed", status: "unchanged", kind: "component", shape: "round", icon: "", ref: id }); }
+            if (!known.has(id)) { known.add(id); view.nodes.push({ id: "rc_" + id, label: name, sublabel: "not changed", status: "unchanged", kind: "component", shape: "round", icon: "box", ref: id }); }
           }
           view.edges.push({ source: "rc_" + e.source, target: "rc_" + e.target, status: e.status, cycle: e.in_cycle, cycleIntroduced: e.new_cycle, count: e.count, relationship: e.relationship });
         }
@@ -1845,18 +1955,18 @@
       shown.forEach((f, i) => ids.set(f.path, "rf_" + i));
       for (const [cid, fs] of hiddenByComp) {
         const sg = "sg_rc_" + cid;
-        view.subgraphs.set(sg, fs[0].component || "(repository root)");
-        view.nodes.push({ id: "rm_" + cid, label: `… ${plural(fs.length, "more file")}`, sublabel: "smaller changes · click to list", status: "modified", kind: "module", shape: "round", parent: sg, icon: "", ref: cid });
+        view.subgraphs.set(sg, { icon: fs[0].component ? "box" : "house", label: fs[0].component || "(repository root)" });
+        view.nodes.push({ id: "rm_" + cid, label: `… ${plural(fs.length, "more file")}`, sublabel: "smaller changes · click to list", status: "modified", kind: "module", shape: "round", parent: sg, icon: "dots", ref: cid });
       }
       view.truncated = ranked.length - shown.length;
       for (const f of shown) {
         const sg = "sg_rc_" + (f.component_id || "root");
-        view.subgraphs.set(sg, f.component || "(repository root)");
+        view.subgraphs.set(sg, { icon: f.component ? "box" : "house", label: f.component || "(repository root)" });
         const fl = this.findingsByPath.get(f.path) || [];
         const high = fl.filter((x) => x.severity === "high").length;
         const extra = f.scope === "protected" ? "scope_protected" : f.scope === "out-of-scope" ? "scope_out" : null;
-        view.nodes.push({ id: ids.get(f.path), label: f.path.split("/").pop(), sublabel: [`+${f.lines_added ?? "?"} −${f.lines_removed ?? "?"}`, f.symbols.length ? plural(f.symbols.length, "symbol") : "", high ? `❗${high} high` : "", f.scope === "protected" ? "⛔ protected" : f.scope === "out-of-scope" ? "⚠ out of scope" : ""].filter(Boolean).join(" · "),
-          status: f.status, kind: "module", shape: "box", parent: sg, icon: f.is_test ? "🧪" : "📄", extraClass: extra, ref: f.path });
+        view.nodes.push({ id: ids.get(f.path), label: f.path.split("/").pop(), sublabel: [`+${f.lines_added ?? "?"} −${f.lines_removed ?? "?"}`, f.symbols.length ? plural(f.symbols.length, "symbol") : "", high ? `${ic("alert-circle")}${high} high` : "", f.scope === "protected" ? `${ic("lock")}protected` : f.scope === "out-of-scope" ? `${ic("alert")}out of scope` : ""].filter(Boolean).join(" · "),
+          status: f.status, kind: "module", shape: "box", parent: sg, icon: f.is_test ? "flask" : "file-code", extraClass: extra, ref: f.path });
       }
       const extraNodes = new Map(), extraByLabel = new Map();
       for (const f of shown) {
@@ -1869,7 +1979,7 @@
               if (extraNodes.size >= limit) continue;
               target = "rx_" + (extraNodes.size + 1);
               extraByLabel.set(d.target, target);
-              extraNodes.set(target, { id: target, label: d.target, sublabel: d.external ? "external" : "unchanged", status: "unchanged", kind: d.external ? "external" : "module", shape: d.external ? "stadium" : "round", icon: d.external ? "🔗" : "" });
+              extraNodes.set(target, { id: target, label: d.target, sublabel: d.external ? "external" : "unchanged", status: "unchanged", kind: d.external ? "external" : "module", shape: d.external ? "stadium" : "round", icon: d.external ? "link" : "file-code" });
             }
           }
           view.edges.push({ source: ids.get(f.path), target, status: d.status, cycle: d.new_cycle, cycleIntroduced: d.new_cycle, count: 1, relationship: d.relationship });
@@ -1897,13 +2007,13 @@
       for (const g of hidden) groups.delete(g.dir);
       if (hidden.length) {
         const n = hidden.reduce((a, g) => a + g.files.length, 0);
-        view.nodes.push({ id: "rp_more", label: `… ${plural(hidden.length, "more directory")}`.replace("directorys", "directories"), sublabel: `${plural(n, "file")} with smaller changes`, status: "modified", kind: "package", shape: "round", icon: "📁", ref: null });
+        view.nodes.push({ id: "rp_more", label: `… ${plural(hidden.length, "more directory")}`.replace("directorys", "directories"), sublabel: `${plural(n, "file")} with smaller changes`, status: "modified", kind: "package", shape: "round", icon: "dots", ref: null });
         view.truncated = hidden.length;
       }
       for (const g of groups.values()) {
         const st = g.files.every((f) => f.status === "added") ? "added" : g.files.every((f) => f.status === "removed") ? "removed" : "modified";
         view.nodes.push({ id: g.id, label: g.dir || "(repository root)", sublabel: [`${plural(g.files.length, "file")} · +${g.added} −${g.removed}`, ...flags(g.scope, g.findings)].join(" · "),
-          status: st, kind: "package", shape: "box", icon: "📁", extraClass: g.scope.protected ? "scope_protected" : g.scope["out-of-scope"] ? "scope_out" : null, ref: g.dir });
+          status: st, kind: "package", shape: "box", icon: "folder", extraClass: g.scope.protected ? "scope_protected" : g.scope["out-of-scope"] ? "scope_out" : null, ref: g.dir });
       }
       const extra = new Map(), agg = new Map();
       for (const f of r.files) {
@@ -1917,7 +2027,7 @@
             const label = d.external ? d.target : (d.target_path ? dirOf(d.target_path) || "(root)" : d.target);
             if (!extra.has(label) && extra.size >= limit) continue;
             if (!extra.has(label)) extra.set(label, { id: "rx_" + extra.size, label, sublabel: d.external ? "external" : "not changed", status: "unchanged",
-              kind: d.external ? "external" : "package", shape: d.external ? "stadium" : "round", icon: d.external ? "🔗" : "📁" });
+              kind: d.external ? "external" : "package", shape: d.external ? "stadium" : "round", icon: d.external ? "link" : "folder" });
             tgt = extra.get(label).id;
           }
           if (tgt === src) continue;
@@ -1959,7 +2069,7 @@
         h("div", { class: "group", style: { margin: "6px 0" } },
           select([["all", "all severities"], ["high", "high"], ["medium", "medium"], ["low", "low"], ["info", "info"]], o.severity, (v) => { o.severity = v; this.save(); this.drawFindings(); }),
           select([["all", "all categories"], ...cats.map((c) => [c, c])], o.category, (v) => { o.category = v; this.save(); this.drawFindings(); })));
-      if (!list.length) { this.findingsEl.appendChild(h("div", { class: "empty", text: "No signals with these filters. 🎉" })); return; }
+      if (!list.length) { this.findingsEl.appendChild(h("div", { class: "empty" }, iconEl("check"), " No signals with these filters.")); return; }
       const ul = h("ul", { class: "plain findings" });
       for (const f of list.slice(0, this.findingsShown)) {
         const note = this.noteFor(f.id);
@@ -1996,7 +2106,7 @@
         scopeName ? h("button", { class: "btn small", onclick: () => { this.selectedComponent = null; this.selectedDir = null; this.drawFiles(); } }, "Show all") : null),
         this.progressEl,
         table([
-          { key: "reviewed", label: "✓", sort: (f) => (this.isReviewed(f) ? 1 : 0), render: (f) => this.isReviewed(f) ? h("span", { class: "reviewed-mark", title: "reviewed", text: "✓" })
+          { key: "reviewed", label: "✓", sort: (f) => (this.isReviewed(f) ? 1 : 0), render: (f) => this.isReviewed(f) ? h("span", { class: "reviewed-mark", title: "reviewed" }, iconEl("check"))
             : this.reviewed[f.path] ? h("span", { class: "faint", title: "changed since you reviewed it", text: "↻" }) : "" },
           { key: "path", label: "File", render: (f) => h("span", { class: "mono", text: f.path }) },
           { key: "status", label: "Change", render: (f) => statusPill(f.status) || pill("modified", "modified") },
@@ -2005,8 +2115,8 @@
           { key: "symbols", label: "Symbols", num: true, render: (f) => String(f.symbols.length), sort: (f) => f.symbols.length },
           { key: "findings", label: "Signals", sort: (f) => -(this.findingsByPath.get(f.path) || []).reduce((a, x) => a + (3 - SEV[x.severity]) * 10, 0),
             render: (f) => { const fl = this.findingsByPath.get(f.path) || []; const hi = fl.filter((x) => x.severity === "high").length; return fl.length ? [hi ? pill(`${hi} high`, "high") : null, ` ${fl.length}`] : ""; } },
-          { key: "tests", label: "Tests", num: true, render: (f) => f.is_test ? "🧪" : String((f.tests_affected || []).length), sort: (f) => (f.tests_affected || []).length },
-          { key: "notes", label: "Notes", num: true, render: (f) => { const n = this.notes.filter((x) => x.path === f.path).length; return n ? "💬 " + n : ""; } },
+          { key: "tests", label: "Tests", num: true, render: (f) => f.is_test ? h("span", { title: "test file" }, iconEl("flask")) : String((f.tests_affected || []).length), sort: (f) => (f.tests_affected || []).length },
+          { key: "notes", label: "Notes", num: true, render: (f) => { const n = this.notes.filter((x) => x.path === f.path).length; return n ? [iconEl("comment"), " " + n] : ""; } },
         ], rows, { onRow: (f) => this.selectFile(f.path, null, true), state: this.filesTable, isSelected: (f) => f.path === this.selectedFile,
           onOrder: (data) => { this.fileOrder = data.map((f) => f.path); }, empty: "No changed files." }));
       this.drawProgress();
@@ -2043,7 +2153,7 @@
       this.fileEl.append(h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
         h("div", { class: "muted", text: [f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
         h("div", { class: "group actions" },
-          h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, "⛔ Should not be touched"),
+          h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, iconEl("lock"), " Should not be touched"),
           h("button", { class: "btn small", onclick: (ev) => this.noteForm(ev.target.closest(".actions"), { path: f.path }, "improve") }, "✎ Note on this file…"),
           f.module_id && this.app.snapshotIndex.nodes.has(f.module_id) ? h("button", { class: "btn small", onclick: () => this.app.focusDependencies(f.module_id) }, "Show dependencies") : null));
       // Key changes: which functions / classes changed and how much.
@@ -2090,7 +2200,7 @@
             h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), h("td", { class: "code", text: text }));
           tr.addEventListener("click", () => this.noteForm(tr, { path: f.path, line: anchorLine, side: t === "-" ? "old" : "new", symbol: lineSymbol(anchorLine), excerpt: text.trim() }, "logic-error", true));
           tbl.appendChild(tr);
-          for (const nn of lineNotes) tbl.appendChild(h("tr", { class: "note-row" }, h("td", { colspan: 2 }), h("td", { class: "mk", text: "💬" }),
+          for (const nn of lineNotes) tbl.appendChild(h("tr", { class: "note-row" }, h("td", { colspan: 2 }), h("td", { class: "mk" }, iconEl("comment")),
             h("td", null, pill(VERDICT_LABELS[nn.verdict] || nn.verdict, nn.verdict === "ok" ? "added" : "modified"), " ", nn.comment || "")));
           if (t !== "+") o++;
           if (t !== "-") n++;
@@ -2183,10 +2293,10 @@
       $("#mode-label").textContent = " · " + (b.snapshot.repository_name || "");
       const info = $("#repo-info");
       info.innerHTML = "";
-      const chips = [p.branch ? "⎇ " + p.branch : p.is_git ? "detached HEAD" : "no Git", p.head ? "HEAD " + p.head.slice(0, 10) : null,
+      const chips = [p.branch ? [iconEl("branch", true), " " + p.branch] : p.is_git ? "detached HEAD" : "no Git", p.head ? "HEAD " + p.head.slice(0, 10) : null,
         `${b.snapshot.modules.length} modules`, `${b.snapshot.components.length} components`, `${b.snapshot.symbols.length} symbols`,
         (p.languages || []).slice(0, 3).map((l) => l.display).join(", ")];
-      for (const c of chips) if (c) info.appendChild(h("span", { class: "chip", text: c }));
+      for (const c of chips) if (c) info.appendChild(h("span", { class: "chip" }, c));
       const badge = $("#mode-badge");
       badge.textContent = this.api.live ? "● live" : `static report · ${fmtTime(b.generated_at)}`;
       badge.classList.toggle("live", this.api.live);

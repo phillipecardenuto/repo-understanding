@@ -91,6 +91,14 @@ def test_static_report_renders_every_tab(page, shop_repo, tmp_path: Path) -> Non
     # Clicking a node shows details with source evidence.
     page.click("#tab-changes g.node >> nth=0")
     assert page.inner_text("#tab-changes .split > .card").strip() != ""
+    # Kind icons are drawn with CSS masks (no emoji): a house for the repository, folders for packages.
+    page.click("#tabbtn-structure")
+    assert page.locator("#tab-structure g.node i.rvi-house").count() == 1
+    assert page.locator("#tab-structure g.node i.rvi-folder").count() >= 1
+    mask = page.evaluate("getComputedStyle(document.querySelector('#tab-structure g.node i.rvi-house')).webkitMaskImage")
+    width = page.evaluate("document.querySelector('#tab-structure g.node i.rvi-house').getBoundingClientRect().width")
+    assert mask.startswith('url("data:image/svg+xml') and width > 8
+    assert not any(e in page.inner_text("body") for e in ("🏠", "📁", "📄", "🧪", "🚀"))
 
 
 def test_live_app_and_session_controls(page, shop_repo) -> None:
