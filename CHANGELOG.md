@@ -6,6 +6,17 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Code changes of churn hotspots in the Structure tab** ([#36](https://github.com/phillipecardenuto/repo-understanding/issues/36)).
+  - Clicking a hotspot opens a drawer under the graph. It shows the file's last
+    commits and the diff of the latest one, or of its uncommitted edits, with an
+    explicit `+` / `−` on every changed line.
+  - Esc or × closes it and keeps the graph's zoom and selection.
+  - In the live app, any file offers *Show code changes*. This is backed by the
+    new endpoint `GET /api/file/changes?path=&commit=`.
+  - Static reports embed the latest change of the busiest hotspots, capped and
+    marked "truncated for report size".
+  - Only that file is read, so it stays fast on large repositories. Commit
+    subjects and diff lines are redacted.
 - **Click a node in Dependencies to spotlight it** ([#37](https://github.com/phillipecardenuto/repo-understanding/issues/37)).
   - Its direct neighbours stay:
     - modules that use it, with solid, thick links;

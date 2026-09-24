@@ -277,3 +277,56 @@ def test_diff_folds_renames_and_redirects_their_edges(make_repo) -> None:
     assert diff.new_dependencies == [] and diff.removed_dependencies == []
     assert diff.introduced_cycles == [] and diff.resolved_cycles == []
     assert any(c.previous_id for c in diff.edges.values())
+
+
+# --------------------------------------------------------------------------- code changes of one file (#36)
+
+
+def hotspot_repo(make_repo):
+    """``app/hot.py`` changed in five commits (one subject leaks a token); the other files once."""
+    repo = make_repo({"app/__init__.py": "", "app/cold.py": "def cold():\n    return 1\n",
+                      "app/hot.py": "def rate():\n    return 1\n\n\ndef other():\n    return 0\n"})
+    for i in range(2, 6):
+        repo.write({"app/hot.py": f"def rate():\n    return {i}\n\n\ndef other():\n    return 0\n"})
+        repo.commit(f"tune rate {i}" + (" token=ghp_abcdefghijklmnopqrstuvwxyz0123456789" if i == 5 else ""))
+    return repo
+
+
+def test_file_changes_lists_recent_commits_and_one_diff(make_repo) -> None:
+    import pytest
+
+    from repoviz.filechanges import file_changes, hotspots
+
+    repo = hotspot_repo(make_repo)
+    r = Repository(repo.path)
+    c = file_changes(r, "app/hot.py")
+    assert [x["subject"][:11] for x in c["commits"]] == ["tune rate 5", "tune rate 4", "tune rate 3", "tune rate 2", "initial"]
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in str(c)  # commit subjects are redacted
+    assert c["shown"] == c["commits"][0]["sha"] and not c["uncommitted"] and (c["added"], c["removed"]) == (1, 1)
+    assert [line for hk in c["hunks"] for line in hk["lines"] if line[0] in "+-"] == ["-    return 4", "+    return 5"]
+    first = file_changes(r, "app/hot.py", c["commits"][-1]["short"])  # the root commit: everything added
+    assert first["label"].endswith("initial") and (first["added"], first["removed"]) == (6, 0)
+    repo.write({"app/hot.py": "def rate():\n    return 99\n\n\ndef other():\n    return 0\n"})
+    live = file_changes(r, "app/hot.py")  # uncommitted edits come first
+    assert live["uncommitted"] and live["shown"] == "WORKTREE" and live["label"].startswith("Uncommitted")
+    capped = file_changes(r, "app/hot.py", c["commits"][-1]["sha"], max_lines=2)
+    assert capped["truncated"] and sum(len(hk["lines"]) for hk in capped["hunks"]) == 2 and capped["total_lines"] == 6
+    for bad in ("../outside.py", "/etc/passwd", ".git/config", "-p", "app/missing.py"):
+        with pytest.raises(ValueError):
+            file_changes(r, bad)
+    with pytest.raises(ValueError, match="not one of the last"):
+        file_changes(r, "app/hot.py", "0" * 40)
+    assert hotspots(r.snapshot("HEAD")) == ["app/hot.py"]
+
+
+def test_file_changes_never_follows_symlinks(make_repo, tmp_path) -> None:
+    import pytest
+
+    from repoviz.filechanges import file_changes
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("outside the repository\n")
+    repo = make_repo({"a.py": "A = 1\n"})
+    (Path(repo.path) / "link.txt").symlink_to(secret)
+    with pytest.raises(ValueError, match="unknown file"):
+        file_changes(Repository(repo.path), "link.txt")

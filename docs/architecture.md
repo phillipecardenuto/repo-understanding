@@ -188,6 +188,27 @@ app builds view graphs, serializes them to Mermaid, renders with
 `securityLevel: "strict"`, then attaches its own pan/zoom, keyboard and click
 handlers to the SVG.
 
+Two interactions work on the rendered SVG without drawing it again, so the
+layout, zoom and pan stay where they are:
+
+- **Spotlight (Dependencies).** Clicking a node adds classes to the SVG
+  elements that are already there: the node is focused, its inbound and
+  outbound neighbours and links stand out, and the rest is dimmed. Inbound
+  links are solid, outbound links dashed, and a status line gives the counts.
+- **Code changes (Structure).** Clicking a churn hotspot (a module at or above
+  the 80th percentile of recent commits, changed at least twice) opens a drawer under the diagram. The
+  drawer shows the file's last commits and the diff of one of them, with an
+  explicit `+` / `−` marker on every changed line.
+  - `filechanges.py` reads only that file: a `git log --literal-pathspecs` for
+    the file, `git cat-file` for its two versions, and the disk for the working
+    copy (never through a symbolic link).
+  - A click stays fast on large repositories.
+  - Subjects and diff lines are redacted.
+  - Static reports embed the latest change of the 25 busiest hotspots, capped
+    at 300 lines per file and 6,000 in total, with a "truncated for report
+    size" notice.
+  - Esc or × closes the drawer and puts the focus back on the selected node.
+
 Icons are defined once in `app.js` as SVG path data: 24×24, 2px round strokes,
 plus a light-background and a dark-background colour per icon. At startup they
 become a stylesheet in which each `.rvi-<name>` class paints its icon with a CSS
@@ -206,6 +227,7 @@ Server endpoints:
 | `GET /api/snapshot?rev=` | any snapshot |
 | `GET /api/activity` | activity report with diff and affected flow |
 | `GET /api/revisions`, `/api/profile`, `/api/health` | metadata |
+| `GET /api/file/changes?path=[&commit=SHA\|WORKTREE]` | one file's last commits (newest first) and the diff of one of them (by default its uncommitted edits, else its latest commit); used by the Structure tab's *Code changes* drawer |
 | `GET /api/review/targets`, `/api/review?id=\|base=&target=[&mode=merge-base\|exact][&commit=SHA\|WORKTREE]`, `/api/review/notes?key=` | AI review (`mode`: since the two diverged, or the exact difference; `commit`: one step of the range, reviewed alone) |
 | `POST /api/session/start`, `/api/session/end`, `/api/session/scope`, `/api/review/notes` | state changes |
 

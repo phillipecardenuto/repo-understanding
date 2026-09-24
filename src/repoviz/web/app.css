@@ -138,6 +138,14 @@ main { padding: 14px 16px 40px; }
 .viewport svg.rv-spotlight g.node.is-linked-outbound :is(rect, polygon, path, circle) { stroke-width: 3px !important; stroke-dasharray: 7 4 !important; }
 .viewport svg.rv-spotlight g.node.is-linked-inbound.is-linked-outbound :is(rect, polygon, path, circle) { stroke-dasharray: 2 3 !important; }
 .spot-note[hidden] { display: none; }
+.changes-drawer { margin-top: 10px; }
+.changes-drawer[hidden] { display: none; }
+.changes-drawer .drawer-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.changes-drawer .drawer-head h3 { margin: 0; font-size: 14px; }
+.changes-drawer .drawer-commits { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 8px 0; }
+.changes-drawer .drawer-commits .btn[aria-pressed="true"] { font-weight: 700; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); opacity: 1; }
+.changes-drawer table.diff tr { cursor: default; }
+.changes-drawer table.diff tr.add td.code { font-weight: 600; }
 .spot-note { padding: 5px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 2px 4px; align-items: center; }
 .spot-note .spot-in { font-weight: 600; text-decoration: underline; text-decoration-thickness: 2px; }
 .spot-note .spot-out { font-weight: 600; text-decoration: underline dashed; text-decoration-thickness: 2px; }

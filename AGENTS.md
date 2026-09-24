@@ -16,7 +16,7 @@ how to test it.
 | Read-only Git and trees | `gitutil.py`, `sources.py`, `submodules.py` | `docs/architecture.md` ("Layers", "Git hardening") |
 | Discovery and parsers | `discovery.py`, `classify.py`, `manifests.py`, `yamlish.py`, `config.py` | `docs/configuration.md` |
 | Graph building | `analyzers/*.py`, `pipeline.py`, `graph.py`, `ids.py`, `model.py` | `docs/data-model.md`, "Analyzer interface" |
-| Comparing states | `diff.py`, `flow.py`, `activity.py`, `session.py`, `repo.py` | "Caching and performance" |
+| Comparing states | `diff.py`, `flow.py`, `activity.py`, `session.py`, `repo.py`, `filechanges.py` (one file's recent changes) | "Caching and performance" |
 | Agent review | `review.py` (targets, scope, signals, feedback prompt), `risk.py` (risk score) | `docs/review.md` |
 | Front ends | `cli.py`, `server.py`, `render/html.py`, `render/views.py`, `render/mermaid.py` | "Web application" |
 | Browser app | `web/app.js` (tabs, diagrams, icons, in-app guide), `web/app.css`, `web/index.html` | the `HELP` array in `app.js` |

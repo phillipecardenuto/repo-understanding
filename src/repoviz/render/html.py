@@ -258,6 +258,7 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "comparisons": payloads,
         "activity": to_jsonable(activity) if activity is not None else None,
         "reviews": reviews,
+        "file_changes": _hotspot_changes(repo, snapshot) if mode == "static" else {},
         "review_targets": [t.to_dict() for t in targets],
         "theme": theme(),
         "session": _current_session(repo),
@@ -278,6 +279,16 @@ def _current_session(repo: Repository) -> dict[str, Any] | None:
     except Exception:
         return None
     return session.to_dict() if session else None
+
+
+def _hotspot_changes(repo: Repository, snapshot: Any) -> dict[str, Any]:
+    """The latest change of each churn hotspot, so the Structure tab's drawer works offline (capped)."""
+    from ..filechanges import report_changes
+
+    try:
+        return report_changes(repo, snapshot)
+    except Exception:  # history is optional for a report
+        return {}
 
 
 def _revisions(repo: Repository) -> dict[str, Any]:

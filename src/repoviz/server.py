@@ -211,6 +211,15 @@ class AppState:
             raise ApiError(400, str(exc)) from exc
         return _splice({"notes": self.repo.state.load_notes(target.key)}, body)
 
+    def file_changes(self, query: dict[str, str]) -> dict[str, Any]:
+        """One file's recent commits and the diff of one of them (the Structure tab's code changes drawer)."""
+        from .filechanges import file_changes
+
+        try:
+            return file_changes(self.repo, query.get("path") or "", query.get("commit") or None)
+        except (RepositoryError, GitError, ValueError) as exc:
+            raise ApiError(400, str(exc)) from exc
+
     def notes(self, query: dict[str, str]) -> dict[str, Any]:
         key = query.get("key") or ""
         if not key:
@@ -361,6 +370,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.review(self._query()))
                 elif path == "/api/review/notes":
                     self._json(200, state.notes(self._query()))
+                elif path == "/api/file/changes":
+                    self._json(200, state.file_changes(self._query()))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:

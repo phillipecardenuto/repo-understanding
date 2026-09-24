@@ -315,3 +315,34 @@ def test_review_any_two_branches_over_the_api_and_in_reports(make_repo, tmp_path
     assert main(["report", "-C", repo.path, "-o", str(out), "--no-compress", "--no-activity",
                  "--review", "main...feature"]) == 0
     assert "feature since it left main" in out.read_text(encoding="utf-8")
+
+
+def test_file_changes_over_the_api_and_in_reports(make_repo, monkeypatch) -> None:
+    from test_changes_activity import hotspot_repo
+
+    import repoviz.filechanges as fc
+
+    repo = hotspot_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, body = request(srv, "GET", "/api/file/changes?path=app/hot.py")
+        data = json.loads(body)
+        assert status == 200 and len(data["commits"]) == 5 and data["hunks"]
+        sha = data["commits"][2]["sha"]
+        status, _, body = request(srv, "GET", f"/api/file/changes?path=app/hot.py&commit={sha[:10]}")
+        assert status == 200 and json.loads(body)["shown"] == sha
+        for bad in ("path=../x", "path=app/hot.py&commit=nope", "path=app/none.py"):
+            status, _, body = request(srv, "GET", f"/api/file/changes?{bad}")
+            assert status == 400 and json.loads(body)["error"]
+        status, _, _ = request(srv, "GET", "/api/file/changes?path=app/hot.py", headers={})  # no X-Repoviz header
+        assert status == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    monkeypatch.setattr(fc, "REPORT_DIFF_LINES", 3)  # a tiny budget: the report says the diff was truncated
+    bundle = build_bundle(Repository(repo.path))
+    assert list(bundle["file_changes"]) == ["app/hot.py"]  # only the churn hotspots
+    hot = bundle["file_changes"]["app/hot.py"]
+    assert hot["truncated"] and sum(len(hk["lines"]) for hk in hot["hunks"]) == 3
+    assert build_bundle(Repository(repo.path), mode="live")["file_changes"] == {}  # the live app asks on demand

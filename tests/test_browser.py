@@ -533,3 +533,71 @@ def test_dependencies_spotlight_on_click(page, make_repo, tmp_path: Path) -> Non
     page.locator("#tab-dependencies .viewport").click(position={"x": 4, "y": 4})  # the empty background
     assert page.locator("#tab-dependencies .is-dimmed").count() == 0
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+NODE_OF = "(p) => [...repoviz.app.snapshotIndex.nodes.values()].find(n => n.path === p && n.category === 'module').id"
+
+
+def _structure_with_hotspots(page) -> None:
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    page.check("#tab-structure label.check:has-text('modules / files') input")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    page.check("#tab-structure label.check:has-text('churn hotspots') input")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+
+
+def test_structure_hotspot_opens_its_code_changes(page, make_repo, tmp_path: Path) -> None:
+    from test_changes_activity import hotspot_repo
+
+    repo = hotspot_repo(make_repo)
+    report = tmp_path / "hot.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=structure")
+    _structure_with_hotspots(page)
+    hot, cold = page.evaluate(NODE_OF, "app/hot.py"), page.evaluate(NODE_OF, "app/cold.py")
+    drawer = page.locator("#tab-structure .changes-drawer")
+    assert drawer.is_hidden()
+    page.click(f"#tab-structure g.node[data-node-id='{hot}']")
+    page.wait_for_function("() => document.querySelector('#tab-structure .changes-drawer table.diff')", timeout=10_000)
+    assert "app/hot.py" in drawer.inner_text() and "+1 −1" in drawer.inner_text() and "tune rate 5" in drawer.inner_text()
+    marks = page.evaluate("Array.from(document.querySelectorAll('#tab-structure .changes-drawer tr.add td.mk, #tab-structure .changes-drawer tr.del td.mk')).map(td => td.textContent)")
+    assert sorted(marks) == ["+", "−"]  # explicit markers, not only colour
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in drawer.inner_text()
+    assert "Other changes need the live app" in drawer.inner_text()  # a report has the latest change only
+    transform = page.evaluate("document.querySelector('#tab-structure .stage').style.transform")
+    page.keyboard.press("Escape")
+    assert drawer.is_hidden()
+    assert page.evaluate("document.querySelector('#tab-structure .stage').style.transform") == transform  # zoom kept
+    assert page.evaluate(f"document.querySelector(\"#tab-structure g.node[data-node-id='{hot}']\").classList.contains('rv-selected')")
+    assert page.evaluate("document.activeElement.dataset.nodeId") == hot  # focus back on the graph
+    page.click(f"#tab-structure g.node[data-node-id='{cold}']")  # not a hotspot: its metadata, no drawer
+    assert drawer.is_hidden() and "cold" in page.inner_text("#tab-structure .split > .card")
+    assert page.locator("#tab-structure .split > .card >> text=Show code changes").count() == 0  # not in the report
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_structure_code_changes_in_the_live_app(page, make_repo) -> None:
+    from test_changes_activity import hotspot_repo
+
+    repo = hotspot_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=structure")
+        _structure_with_hotspots(page)
+        cold = page.evaluate(NODE_OF, "app/cold.py")
+        page.click(f"#tab-structure g.node[data-node-id='{cold}']")
+        page.click("#tab-structure .split > .card >> text=Show code changes")  # any file, on request
+        page.wait_for_function("() => document.querySelector('#tab-structure .changes-drawer .drawer-commits')", timeout=10_000)
+        assert "app/cold.py" in page.inner_text("#tab-structure .changes-drawer")
+        hot = page.evaluate(NODE_OF, "app/hot.py")
+        page.click(f"#tab-structure g.node[data-node-id='{hot}']")
+        page.wait_for_function("() => document.querySelector('#tab-structure .changes-drawer').textContent.includes('tune rate 5')", timeout=10_000)
+        page.click("#tab-structure .changes-drawer .drawer-commits button >> nth=3")  # an older commit
+        page.wait_for_function("() => document.querySelector('#tab-structure .changes-drawer').textContent.includes('tune rate 2')", timeout=10_000)
+        assert page.evaluate("Array.from(document.querySelectorAll('#tab-structure .changes-drawer tr.add td.code')).map(td => td.textContent)") == ["    return 2"]
+        page.click("#tab-structure .changes-drawer button[aria-label='Close code changes (Esc)']")
+        assert page.locator("#tab-structure .changes-drawer").is_hidden()
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()

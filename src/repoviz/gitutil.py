@@ -23,7 +23,7 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # a full SHA-1 or SHA-256 object ID
@@ -401,6 +401,33 @@ class Git:
 
     def read_blob(self, sha: str) -> bytes | None:
         return self._blobs.read(sha)
+
+    def file_log(self, path: str, limit: int = 10, rev: str = "HEAD") -> list[dict[str, Any]]:
+        """The last ``limit`` non-merge commits that changed ``path`` (newest first), with lines added / removed
+        (``None`` for binary files).  The path is literal (no pathspec magic); renames are not followed."""
+        out = self.try_run("--literal-pathspecs", "log", f"-n{max(1, int(limit))}", "--no-merges",
+                           "--format=%x1e%H%x1f%ct%x1f%s", "--numstat", "--end-of-options", rev, "--", path)
+        entries: list[dict[str, Any]] = []
+        for block in (out or "").split("\x1e"):
+            head, _, rest = block.strip("\n").partition("\n")
+            parts = head.split("\x1f")
+            if len(parts) != 3 or not _SHA.match(parts[0]):
+                continue
+            added = removed = None
+            for line in rest.splitlines():
+                cols = line.split("\t")
+                if len(cols) >= 3:
+                    added = int(cols[0]) if cols[0].isdigit() else None
+                    removed = int(cols[1]) if cols[1].isdigit() else None
+                    break
+            entries.append({"sha": parts[0], "time": int(parts[1]) if parts[1].isdigit() else 0, "subject": parts[2],
+                            "added": added, "removed": removed})
+        return entries
+
+    def is_untracked_visible(self, path: str) -> bool:
+        """``path`` is an untracked file Git does not ignore."""
+        out = self.try_run("--literal-pathspecs", "ls-files", "-z", "--others", "--exclude-standard", "--", path)
+        return path in (out or "").split("\0")
 
     def show_file(self, rev_sha: str, path: str) -> bytes | None:
         try:

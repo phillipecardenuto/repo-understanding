@@ -126,7 +126,11 @@ app accepts any comparison; a static report offers the precomputed ones.
 
 **Structure.** Containment from the repository root down to modules and symbols,
 as a tree or as nested boxes, with churn hotspots from Git history. Double-click
-a node to drill down. Below it, the discovery profile lists:
+a node to drill down. Click a churn hotspot to open its **code changes** under
+the graph (its last commits and the diff of one of them, with `+` / `−` on
+every changed line); Esc closes it and the graph stays as it was. Any other file
+offers *Show code changes* in the live app. Below it, the discovery profile
+lists:
 
 - languages, with whether each is analyzed or structure-only
 - projects, workspaces, manifests and lock files

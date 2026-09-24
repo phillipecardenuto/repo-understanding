@@ -503,6 +503,9 @@
     return view;
   }
 
+  /* A churn hotspot: a module at or above the 80th percentile of recent commits, and changed at least twice
+     (a file committed once is not churn). Mirrors filechanges.hotspots. */
+  const MIN_HOT_COMMITS = 2;
   /* Structure view: containment tree or nested boxes. */
   function structureView(si, o) {
     const view = { title: "Structure", direction: o.layout === "nested" ? "TB" : "LR", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, nested: [] };
@@ -518,7 +521,7 @@
     let hot = 0;
     if (o.hotspots) {
       const counts = [...si.nodes.values()].filter((n) => n.category === "module" && meta(n).churn).map((n) => meta(n).churn.commits).sort((a, b) => a - b);
-      hot = counts.length ? counts[Math.floor(counts.length * 0.8)] : 0;
+      hot = counts.length ? Math.max(MIN_HOT_COMMITS, counts[Math.floor(counts.length * 0.8)]) : 0;
     }
     let count = 0;
     const label = (n, isRoot) => {
@@ -977,6 +980,23 @@
     for (const [v, text] of options) s.appendChild(h("option", { value: v, selected: v === value }, text));
     return s;
   }
+  /* A read-only diff: line numbers, an explicit + / − marker on every changed line (never colour alone), code. */
+  function diffTable(hunks) {
+    const tbl = h("table", { class: "diff" });
+    for (const hk of hunks) {
+      tbl.appendChild(h("tr", { class: "hunk" }, h("td", { colspan: 4, text: `@@ -${hk.old_start},${hk.old_len} +${hk.new_start},${hk.new_len} @@` })));
+      let o = hk.old_start, n = hk.new_start;
+      for (const raw of hk.lines) {
+        const t = raw[0];
+        tbl.appendChild(h("tr", { class: t === "+" ? "add" : t === "-" ? "del" : "ctx" },
+          h("td", { class: "ln", text: t === "+" ? "" : o }), h("td", { class: "ln", text: t === "-" ? "" : n }),
+          h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), h("td", { class: "code", text: raw.slice(1) })));
+        if (t !== "+") o++;
+        if (t !== "-") n++;
+      }
+    }
+    return h("div", { class: "diff-wrap" }, tbl);
+  }
   function checkbox(label, checked, onchange) {
     const c = h("input", { type: "checkbox", checked, onchange: () => onchange(c.checked) });
     return h("label", { class: "check" }, c, label);
@@ -1321,6 +1341,12 @@
       this.diagram = new Diagram({ title: "Structure", legend: kindLegend });
       this.details = new DetailsPanel(app);
       this.crumbs = h("div", { class: "crumbs" });
+      this.drawer = h("div", { class: "card changes-drawer", role: "region", "aria-label": "Code changes", hidden: true });
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape" && !this.drawer.hidden && this.app.currentTab === "structure" && !(ev.target && ev.target.closest && ev.target.closest("input, textarea, select"))) {
+          ev.preventDefault(); this.closeChanges(true);
+        }
+      });
       const redraw = () => { this.save(); this.draw(); };
       put(this.root, h("div", { class: "toolbar" },
         h("div", { class: "field" }, h("span", { text: "Root" }), this.crumbs),
@@ -1332,7 +1358,7 @@
           checkbox("symbols", o.symbols, (c) => { o.symbols = c; redraw(); }),
           checkbox("churn hotspots", o.hotspots, (c) => { o.hotspots = c; redraw(); }))),
         h("span", { class: "muted", text: "Double-click a node to drill down." })),
-        h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el),
+        h("div", { class: "split" }, h("div", null, this.diagram.el, this.drawer), this.details.el),
         profileCards(app.bundle.profile || app.bundle.snapshot.profile || {}, app.bundle.snapshot));
       this.draw();
     }
@@ -1352,14 +1378,90 @@
       this.drawCrumbs();
       const view = structureView(this.si, this.opts);
       const r = this.si.nodes.get(this.opts.root || rootOf(this.si));
+      const counts = [...this.si.nodes.values()].filter((n) => n.category === "module" && meta(n).churn).map((n) => meta(n).churn.commits).sort((a, b) => a - b);
+      this.hot = counts.length ? Math.max(MIN_HOT_COMMITS, counts[Math.floor(counts.length * 0.8)]) : 0;  // as in structureView
       this.diagram.setTitle(`Structure of ${r ? displayName(r) : "repository"}`);
       await this.diagram.render(view, {
-        onNode: (id) => this.details.showNode(this.si, id),
+        onNode: (id) => this.nodeClicked(id),
         onCluster: (id) => this.details.showNode(this.si, id),
         onNodeDouble: (id) => { if ((this.si.children.get(id) || []).length) this.setRoot(id); },
       });
     }
   }
+
+  Object.assign(StructureTab.prototype, {
+    /* Marked as a churn hotspot in the current view (the "hot" nodes). */
+    isHot(n) { return !!(this.opts.hotspots && n && n.category === "module" && meta(n).churn && this.hot > 0 && meta(n).churn.commits >= this.hot); },
+    changesAvailable(n) {
+      if (!n || !n.path || !(n.category === "module" || n.component_type === "file")) return false;
+      return this.app.api.live || !!(this.app.bundle.file_changes || {})[n.path];
+    },
+    /* A hotspot opens its code changes next to the graph; any other file offers them from the details panel. */
+    nodeClicked(id) {
+      this.details.showNode(this.si, id);
+      const n = this.si.nodes.get(id);
+      if (this.isHot(n) && n.path) { this.openChanges(n.path); return; }
+      if (!this.drawer.hidden) this.closeChanges(false);
+      if (this.changesAvailable(n)) {
+        this.details.el.appendChild(h("div", { class: "group", style: { marginTop: "6px" } },
+          h("button", { class: "btn small", onclick: () => this.openChanges(n.path) }, iconEl("diff"), " Show code changes")));
+      }
+    },
+    async openChanges(path, commit) {
+      const app = this.app;
+      this.changesPath = path;
+      this.drawer.hidden = false;
+      this.drawer.innerHTML = "";
+      put(this.drawer, h("div", { class: "muted" }, h("span", { class: "spinner" }), ` loading the changes of ${path}…`));
+      let c = null, error = null;
+      if (app.api.live) {
+        try { c = await app.api.get("/api/file/changes?" + new URLSearchParams(commit ? { path, commit } : { path }).toString()); }
+        catch (err) { error = err.message; }
+      } else c = (app.bundle.file_changes || {})[path] || null;
+      if (this.changesPath !== path) return;  // another file was opened meanwhile
+      this.drawChanges(path, c, error);
+      this.drawer.scrollIntoView({ block: "nearest" });
+    },
+    drawChanges(path, c, error) {
+      const live = this.app.api.live;
+      this.drawer.innerHTML = "";
+      put(this.drawer, h("div", { class: "drawer-head" },
+        h("h3", null, iconEl("file-code"), " Code changes: ", h("span", { class: "mono", text: path })),
+        c && c.shown ? pill(`+${c.added} −${c.removed}`, "modified") : null,
+        c && c.shown ? h("span", { class: "muted", text: c.label }) : null,
+        h("span", { style: { flex: "1" } }),
+        h("button", { class: "btn small", type: "button", title: "Close (Esc)", "aria-label": "Close code changes (Esc)", onclick: () => this.closeChanges(true) }, "×")));
+      if (error) { this.drawer.appendChild(h("div", { class: "empty", text: "Could not load the changes: " + error })); return; }
+      if (!c) {
+        this.drawer.appendChild(h("div", { class: "empty" }, "This report includes the latest change of the busiest churn hotspots only. Run ", h("code", { text: "repoviz serve" }), " to see the changes of any file."));
+        return;
+      }
+      const shownSha = c.shown;
+      const chip = (value, text, title, available) => h("button", { class: "btn small", type: "button", title, "aria-pressed": String(value === shownSha),
+        disabled: !available || value === shownSha, onclick: () => this.openChanges(path, value) }, value === shownSha ? ["▸ ", text] : text);
+      const chips = [];
+      if (c.uncommitted) chips.push(chip("WORKTREE", "uncommitted", "Uncommitted edits: working tree vs HEAD", live || shownSha === "WORKTREE"));
+      for (const x of c.commits) chips.push(chip(x.sha, `${x.short.slice(0, 7)} · ${x.added === null ? "bin" : `+${x.added} −${x.removed}`}`, `${x.subject}${x.date ? " · " + x.date.slice(0, 10) : ""}`, live || x.sha === shownSha));
+      put(this.drawer, h("div", { class: "drawer-commits" }, h("span", { class: "muted", text: chips.length ? `Recent changes (${c.commits.length} commit${c.commits.length === 1 ? "" : "s"}${c.uncommitted ? " + uncommitted" : ""}):` : "No recorded change." }), chips,
+        !live && chips.length > 1 ? h("span", { class: "faint", text: "Other changes need the live app (repoviz serve)." }) : null));
+      if (c.omitted) { this.drawer.appendChild(h("div", { class: "empty", text: `Diff not shown: ${c.omitted}.` })); return; }
+      if (!c.hunks.length) { this.drawer.appendChild(h("div", { class: "empty", text: "No textual change." })); return; }
+      if (c.truncated) {
+        const shown = c.hunks.reduce((a, hk) => a + hk.lines.length, 0);
+        this.drawer.appendChild(h("div", { class: "notice", role: "status", text: live ? `Diff truncated: showing the first ${shown} of ${c.total_lines} lines.` : `Diff truncated for report size: showing ${shown} of ${c.total_lines} lines.` }));
+      }
+      this.drawer.appendChild(diffTable(c.hunks));
+    },
+    /* Closing keeps the graph as it was (zoom, pan, selection) and gives the focus back to the selected node. */
+    closeChanges(restoreFocus) {
+      this.changesPath = null;
+      this.drawer.hidden = true;
+      this.drawer.innerHTML = "";
+      if (!restoreFocus) return;
+      const g = this.diagram.selected ? $$("g.node", this.diagram.stage).find((x) => x.dataset.nodeId === this.diagram.selected) : null;
+      (g || this.diagram.viewport).focus({ preventScroll: true });
+    },
+  });
 
   function profileCards(p, snap) {
     const list = (items, render, empty) => items && items.length ? h("ul", { class: "plain" }, items.map((x) => h("li", null, render(x)))) : h("div", { class: "empty", text: empty || "None found." });
@@ -2677,6 +2779,7 @@
         { ul: ["The diagram starts at the repository root. **Double-click** a node (or use the breadcrumbs) to drill into a directory or package. **Depth** controls how many levels are shown.",
           "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
+          "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
           "Below the diagram, **Repository discovery** lists what was detected: languages, projects and workspaces, source and test roots, entry points, containers, CI, Git submodules and the analyzers that ran."] },
         { tip: "If something looks wrong (a missing source root, tests counted as code, generated code analyzed), fix it once in `.repoviz.toml`. See `docs/configuration.md`." },
         { p: "Analysis diagnostics at the bottom explain what could not be resolved (unsupported languages, unresolved imports, dynamic calls), so you know the limits of the picture." },
