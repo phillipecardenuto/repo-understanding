@@ -30,7 +30,8 @@ Labels:
 
 ## The list
 
-**Status:** 3 items done (#2, #4, #6); #19 is not planned. The tracking issue
+**Status:** 5 items done (#2, #3, #4, #5, #6), which completes the core agent
+review group; #19 is not planned. The tracking issue
 [#1](https://github.com/phillipecardenuto/repo-understanding/issues/1) is always up to date.
 
 ### Supervising AI agents
@@ -38,9 +39,9 @@ Labels:
 | # | Item | Priority | Size |
 |---|---|---|---|
 | [#2](https://github.com/phillipecardenuto/repo-understanding/issues/2) | Review a wave commit by commit (commits panel and per-commit filter) · **✓ done** | P1 | M |
-| [#3](https://github.com/phillipecardenuto/repo-understanding/issues/3) | Detect renamed and moved symbols, files and submodules | P1 | L |
+| [#3](https://github.com/phillipecardenuto/repo-understanding/issues/3) | Detect renamed and moved symbols, files and submodules · **✓ done** | P1 | L |
 | [#4](https://github.com/phillipecardenuto/repo-understanding/issues/4) | Signal new code that is not wired in · **✓ done** | P1 | M |
-| [#5](https://github.com/phillipecardenuto/repo-understanding/issues/5) | Explainable risk score per file and per wave to order the review | P1 | M |
+| [#5](https://github.com/phillipecardenuto/repo-understanding/issues/5) | Explainable risk score per file and per wave to order the review · **✓ done** | P1 | M |
 | [#6](https://github.com/phillipecardenuto/repo-understanding/issues/6) | Change coupling from Git history, and a missed-companion signal · **✓ done** | P1 | M |
 | [#7](https://github.com/phillipecardenuto/repo-understanding/issues/7) | Checkpoints and an edit timeline inside a wave (agent-hook recipe) | P2 | M |
 | [#8](https://github.com/phillipecardenuto/repo-understanding/issues/8) | Expected changes: compare the agent's plan with what it changed | P2 | M |
@@ -96,8 +97,8 @@ Labels:
 1. **Core agent review:**
    - #2 (commits), done;
    - #4 (unwired code), done;
-   - #3 (renames);
-   - #5 (risk);
+   - #3 (renames), done;
+   - #5 (risk), done;
    - #6 (co-change), done.
 
    These change the most for someone reviewing agent waves every day, and they
