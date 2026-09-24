@@ -411,3 +411,43 @@ def test_new_express_router_that_is_never_mounted(make_repo) -> None:
     [route] = by_kind(_review_all(repo))["unwired-module"]
     assert route["path"] == "src/routes/orders.js" and "`app.use('/path', orders)` in `src/app.js`" in \
         route["suggestion"]
+
+
+# --------------------------------------------------------------------------- change coupling (missed companion)
+
+
+def test_missed_companion_signal(make_repo) -> None:
+    repo = make_repo({"app.py": "x = 0\n", "schema.sql": "-- 0\n", "other.py": "y = 0\n",
+                      ".repoviz.toml": "[history]\nmin_commits = 5\n"})
+    for i in range(1, 9):
+        repo.write({"app.py": f"x = {i}\n", "schema.sql": f"-- {i}\n"}).commit(f"feature {i}")
+    for i in range(1, 4):
+        repo.write({"other.py": f"y = {i}\n"}).commit(f"other {i}")
+    Path(repo.path, "app.py").write_text("x = 'agent'\n")
+    report = _review_all(repo)
+    [finding] = by_kind(report)["missed-companion"]
+    assert finding["path"] == "app.py" and finding["severity"] == "medium"  # 9 of 9 commits
+    assert "schema.sql in 9 of its last 9 commits" in finding["detail"]
+    entry = next(f for f in report["files"] if f["path"] == "app.py")
+    assert entry["usually_changes_with"] == [{"path": "schema.sql", "shared": 9, "revs": 9, "degree": 1.0,
+                                              "changed": False}]
+    assert report["history"]["usable"] and report["history"]["commits"] == 12
+    # Changing the companion too clears the signal.
+    Path(repo.path, "schema.sql").write_text("-- agent\n")
+    report = _review_all(repo)
+    assert "missed-companion" not in by_kind(report)
+    assert next(f for f in report["files"] if f["path"] == "app.py")["usually_changes_with"][0]["changed"] is True
+
+
+def test_missed_companion_ignores_lock_files_and_short_history(make_repo) -> None:
+    repo = make_repo({"app.py": "x = 0\n", "uv.lock": "0\n", ".repoviz.toml": "[history]\nmin_commits = 3\n"})
+    for i in range(1, 7):
+        repo.write({"app.py": f"x = {i}\n", "uv.lock": f"{i}\n"}).commit(f"c{i}")
+    Path(repo.path, "app.py").write_text("x = 'agent'\n")
+    assert "missed-companion" not in by_kind(_review_all(repo))  # a lock file follows its manifest, not code
+    short = make_repo({"a.py": "0\n", "b.py": "0\n"})
+    for i in range(1, 6):
+        short.write({"a.py": f"{i}\n", "b.py": f"{i}\n"}).commit(f"c{i}")
+    Path(short.path, "a.py").write_text("'agent'\n")
+    report = _review_all(short)
+    assert "missed-companion" not in by_kind(report) and not report["history"]["usable"]

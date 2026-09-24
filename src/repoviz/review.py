@@ -31,6 +31,7 @@ from .activity import _ImpactIndex, _tests_affected, nodes_by_path
 from .config import DependencyRule
 from .diff import symbol_changes
 from .flow import affected_flow
+from .history import skip_companion
 from .ids import content_hash as _blob_hash
 from .ids import make_id, stable_hash
 from .model import (
@@ -555,6 +556,9 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     if not {"unwired-module", "unwired-symbol", "unreachable-from-entry"} <= disabled:
         _wiring_findings(add, diff, target_snap, target_src, component_of, repo.config.review_wiring_ignore)
     _test_coverage_findings(add, files, impact)
+    coupling = _coupling_for(repo, target)
+    if coupling is not None:
+        _coupling_findings(add, files, coupling, changed_set, target_src)
 
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.category, f.path or "", f.line or 0))
     per_file: dict[str, list[str]] = {}
@@ -595,6 +599,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "flow": flow.to_dict(),
         "new_dependencies": diff.new_dependencies,
         "introduced_cycles": [c.to_dict() for c in diff.introduced_cycles],
+        "history": coupling.summary() if coupling is not None else None,
         "verdicts": VERDICTS,
     }
 
@@ -865,6 +870,64 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
             add(Finding("public-api-removed", "architecture", "medium", "Public symbol removed", n.qualified_name,
                         n.path, n.start_line, symbol=n.qualified_name,
                         component=component_of(n.path)[1] if n.path else None), key=n.qualified_name)
+
+
+def _history_rev(repo: "Repository", target: ReviewTarget) -> str | None:
+    """The commit whose history describes the code *before* the reviewed change."""
+    git = repo.git
+    if git is None:
+        return None
+    base = target.base
+    if base.startswith("SESSION"):
+        sid = target.session_id or (base.split("@", 1)[1] if "@" in base else None)
+        session = repo.state.load_session(sid) if sid else repo.current_session()
+        return (session.baseline_head if session else None) or git.head()
+    if base.startswith("merge-base:"):
+        ref = base.split(":", 2)[1]
+        try:
+            return git.merge_base(ref, "HEAD")
+        except Exception:
+            return git.head()
+    if base in ("EMPTY", "INDEX", "WORKTREE"):
+        return git.head()
+    out = git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}")
+    return out.strip() if out else git.head()
+
+
+def _coupling_for(repo: "Repository", target: ReviewTarget) -> Any:
+    if repo.git is None or repo.config.history_commits <= 0:
+        return None
+    try:
+        return repo.coupling(_history_rev(repo, target))
+    except Exception:  # history is a bonus: never fail a review because of it
+        return None
+
+
+def _coupling_findings(add: Any, files: list[dict[str, Any]], coupling: Any, changed: set[str],
+                       target_src: TreeSource) -> None:
+    """Files that usually change together with a changed file but were left untouched ("missed companion")."""
+    for entry in files:
+        path = entry["path"]
+        if entry.get("kind") == "submodule" or entry["status"] != MODIFIED:
+            continue
+        partners = coupling.of(path)
+        if not partners:
+            continue
+        entry["usually_changes_with"] = [{**p.to_dict(), "changed": p.path in changed} for p in partners]
+        missed = [p for p in partners if p.path not in changed and target_src.content_hash(p.path) is not None
+                  and not skip_companion(p.path, path)]
+        if not missed:
+            continue
+        first = missed[0]
+        others = ", ".join(f"{p.path} ({p.shared} of {p.revs})" for p in missed[1:3])
+        severity = "medium" if first.degree >= 0.8 and first.shared >= 8 else "low"
+        add(Finding("missed-companion", "correctness", severity, "Usual companion change missing",
+                    f"{path} changed together with {first.path} in {first.shared} of its last {first.revs} commits"
+                    + (f"; also often with {others}" if others else "")
+                    + f"; {'that file is' if len(missed) == 1 else 'those files are'} untouched in this change.",
+                    path, component=entry.get("component"),
+                    suggestion=f"Check whether {first.path} needs the matching change (a migration, test, client "
+                               "or configuration update, for example)."), key=path)
 
 
 _REGISTER_CALL = {"APIRouter": "app.include_router({var})", "Blueprint": "app.register_blueprint({var})",

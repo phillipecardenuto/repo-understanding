@@ -442,6 +442,14 @@ class Git:
                 entry["last_commit_ts"] = max(int(entry["last_commit_ts"]), ts)  # type: ignore[arg-type]
         return stats
 
+    def commit_file_sets(self, rev: str = "HEAD", max_commits: int = 300) -> list[list[str]]:
+        """Paths changed by each of the last ``max_commits`` non-merge commits reachable from ``rev``."""
+        if max_commits <= 0:
+            return []
+        out = self.try_run("log", f"--max-count={max_commits}", "--no-merges", "--no-renames", "--format=%x1e",
+                           "--name-only", "--end-of-options", rev)
+        return [[p for p in block.splitlines() if p.strip()] for block in (out or "").split("\x1e")[1:]]
+
     def submodules(self, sha: str | None) -> list[str]:
         if not sha:
             return []

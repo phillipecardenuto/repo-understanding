@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from . import classify
 from .diff import symbol_changes
 from .flow import affected_flow
+from .history import skip_companion
 from .ids import stable_hash
 from .model import (
     ADDED,
@@ -306,6 +307,7 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
     if record:
         live = {p: observations[p] for p in changed_paths}
         repo.state.save_observations(session, live)
+    _add_companions(repo, session, events, set(changed_paths), target_source)
 
     flow = affected_flow(diff)
     summary = {
@@ -339,6 +341,21 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
         cache.clear()
         cache.update(etag=etag, result=result)
     return result
+
+
+def _add_companions(repo: "Repository", session: Any, events: list[ActivityEvent], touched: set[str],
+                    target_source: Any) -> None:
+    """For each file being edited: files that usually change with it (Git history) and are not touched yet."""
+    if repo.git is None or repo.config.history_commits <= 0 or not events:
+        return
+    try:
+        coupling = repo.coupling(session.baseline_head if session is not None and session.baseline_head else None)
+    except Exception:  # history is a bonus: never break the activity view
+        return
+    for ev in events:
+        ev.companions = [p.to_dict() for p in coupling.of(ev.path)
+                         if p.path not in touched and target_source.content_hash(p.path) is not None
+                         and not skip_companion(p.path, ev.path)][:3]
 
 
 NON_FILE_TYPES = ("directory", "repository", "package", "namespace-package", "project", "workspace-member")

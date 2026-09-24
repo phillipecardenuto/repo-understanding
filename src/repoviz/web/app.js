@@ -1090,6 +1090,11 @@
         h("li", null, pill(i.kind, i.severity === "high" ? "high" : i.severity === "medium" ? "medium" : "low"), " ", i.detail))) : h("div", { class: "muted", text: "No architectural impact detected." }));
       this.el.appendChild(h("h4", { text: `Tests affected (${(ev.tests_affected || []).length})` }));
       this.el.appendChild(h("ul", { class: "plain" }, (ev.tests_affected || []).map((t) => h("li", { class: "mono", text: t }))));
+      if ((ev.companions || []).length) {
+        this.el.appendChild(h("h4", null, "Often changes with ", h("span", { class: "faint", text: "— not touched yet" })));
+        this.el.appendChild(h("ul", { class: "plain companions" }, ev.companions.map((p) => h("li", null, iconEl("alert"), " ",
+          h("span", { class: "mono", text: p.path }), h("span", { class: "faint", text: ` — together in ${p.shared} of this file's last ${p.revs} commits` })))));
+      }
       if (ev.changed_symbols && ev.changed_symbols.length && activity && activity.diff) {
         const di = this.app.activityIndex;
         this.el.appendChild(h("h4", { text: `Changed symbols (${ev.changed_symbols.length})` }));
@@ -1539,6 +1544,9 @@
         { key: "impact_level", label: "Impact", sort: (r) => ({ none: 0, low: 1, medium: 2, high: 3 })[r.impact_level] || 0,
           render: (r) => [pill(r.impact_level, r.impact_level), ...(r.architecture_impact || []).filter((i) => i.severity !== "none").slice(0, 3).map((i) => h("div", { class: "faint", text: i.kind.replace(/-/g, " ") + ": " + i.detail }))] },
         { key: "tests_affected", label: "Tests", num: true, sort: (r) => (r.tests_affected || []).length, render: (r) => r.is_test ? [iconEl("flask"), " test"] : String((r.tests_affected || []).length) },
+        { key: "companions", label: "Often with", sort: (r) => (r.companions || []).length,
+          render: (r) => (r.companions || []).length ? h("span", { title: "Usually changes together with these files (Git history); they are not touched yet: "
+            + r.companions.map((p) => p.path).join(", ") }, iconEl("alert"), " ", r.companions.map((p) => p.path.split("/").pop()).join(", ")) : "" },
         { key: "configuration_affected", label: "Config", render: (r) => r.configuration_affected ? [iconEl("sliders"), " ", r.configuration_kind || ""] : "" },
         { key: "last_observed", label: "Last observed", render: (r) => fmtTime(r.last_observed) },
         { key: "first_observed", label: "First observed", render: (r) => fmtTime(r.first_observed) },
@@ -2211,6 +2219,13 @@
         this.fileEl.appendChild(h("h4", { text: `Tests that exercise this module (${f.tests_affected.length})` }));
         this.fileEl.appendChild(h("div", { class: "mono faint", text: f.tests_affected.join(", ") }));
       }
+      if ((f.usually_changes_with || []).length) {
+        this.fileEl.appendChild(h("h4", null, "Usually changes with ", h("span", { class: "faint", text: "— from Git history" })));
+        this.fileEl.appendChild(h("ul", { class: "plain companions" }, f.usually_changes_with.map((p) => h("li", null,
+          p.changed ? [iconEl("check"), " "] : [iconEl("alert"), " "], h("span", { class: "mono", text: p.path }),
+          h("span", { class: "faint", text: ` — together in ${p.shared} of this file's last ${p.revs} commits · ` }),
+          h("b", { text: p.changed ? "changed in this review" : "not changed" })))));
+      }
       this.fileEl.appendChild(h("h4", null, "Diff ", h("span", { class: "faint", text: "— click a line to leave a note for the agent" })));
       if (!f.hunks || !f.hunks.length) { this.fileEl.appendChild(h("div", { class: "empty", text: f.diff_omitted ? `Diff not shown: ${f.diff_omitted}.` : "No textual diff." })); return; }
       const tbl = h("table", { class: "diff" });
@@ -2363,7 +2378,7 @@
         { h: "4. Triage signals" },
         { ul: ["Signals are **heuristics that point your attention**, not proof of a bug. Filter by severity or category and start with *high*.",
           "**✓ Not an issue** dismisses a signal. **→ Send to agent** adds it to the feedback. **✎ Note…** lets you write your own instruction.",
-          "The most valuable signals: removed functions still called, signatures changed while callers were not updated, broken imports, new code that is not wired in (a router never registered, a module nothing imports), disabled tests, secrets, and scope violations."] },
+          "The most valuable signals: removed functions still called, signatures changed while callers were not updated, broken imports, new code that is not wired in (a router never registered, a module nothing imports), a usual companion change that is missing (a file that almost always changes with this one), disabled tests, secrets, and scope violations."] },
         { h: "5. Walk the files" },
         { ul: ["The file table is sorted with signals first. Click a row or press `j` / `k` to move through files.",
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
@@ -2414,6 +2429,7 @@
         { ul: ["The **baseline** is the active work session, or `HEAD` when there is none. In the live app, **Start session** / **End session** and **auto-refresh** are here.",
           "The **activity map** groups modified files by component; colours show added, modified or removed, and edges show new dependencies.",
           "The **Modified files** table shows impact (new dependencies, cycles, public API changes), the tests that exercise each file, configuration changes and when each file was first and last seen changing.",
+          "**Often with** lists files that, according to Git history, usually change together with the edited one but are not touched yet (for example its migration, test or client). Tell the agent before it finishes.",
           "**Affected flow** follows the static call graph from the changed code to the entry points (routes, CLIs, handlers) and tests that reach it: run those tests first."] },
         { tip: "The flow is a static approximation: calls through dynamic dispatch, reflection or configuration are not resolved." },
       ] },

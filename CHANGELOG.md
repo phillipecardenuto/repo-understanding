@@ -17,6 +17,14 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
   Framework conventions, references by name or path, and plugin-style
   neighbours count as wiring. `review.wiring_ignore` adds your own exceptions.
+- **Files that usually change together** ([#6](https://github.com/phillipecardenuto/repo-understanding/issues/6)).
+  repoviz learns from recent Git history which files change together.
+  - New review signal `missed-companion`: an edited file's usual partner was left
+    untouched (a migration, a test, a client...).
+  - Review file cards list **Usually changes with**; the Activity tab shows the
+    partners not touched yet.
+  - New command `repoviz coupling` lists the strongest pairs.
+  - Thresholds go in the new `[history]` configuration table.
 
 ### Documentation
 

@@ -299,3 +299,25 @@ def test_in_app_guide(page, shop_repo, tmp_path: Path) -> None:
     page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
     assert page.locator("#tab-dependencies .tab-intro").count() == 0
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_usual_companions_in_review_and_activity(page, make_repo, tmp_path: Path) -> None:
+    repo = make_repo({"app.py": "x = 0\n", "schema.sql": "-- 0\n", ".repoviz.toml": "[history]\nmin_commits = 3\n"})
+    for i in range(1, 7):
+        repo.write({"app.py": f"x = {i}\n", "schema.sql": f"-- {i}\n"}).commit(f"feature {i}")
+    Path(repo.path, "app.py").write_text("x = 'agent'\n")
+    report = tmp_path / "coupling.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert "Usual companion change missing" in page.inner_text("#tab-review")
+    page.evaluate("repoviz.app.tabs.review.selectFile('app.py')")
+    card = page.inner_text("#tab-review .file-card")
+    assert "Usually changes with" in card and "schema.sql" in card and "not changed" in card
+    page.click("#tabbtn-activity")
+    page.wait_for_function(ALL_RENDERED, arg="activity", timeout=60_000)
+    row = page.inner_text("#tab-activity tbody tr:has-text('app.py')")
+    assert "schema.sql" in row
+    page.click("#tab-activity tbody tr:has-text('app.py')")
+    assert "Often changes with" in page.inner_text("#tab-activity")
+    assert page.errors == []  # type: ignore[attr-defined]

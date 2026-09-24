@@ -345,6 +345,35 @@ def cmd_activity(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_coupling(args: argparse.Namespace) -> int:
+    repo = _open(args)
+    if repo.git is None:
+        print("repoviz: change coupling needs a Git repository", file=sys.stderr)
+        return EXIT_ERROR
+    index = repo.coupling(args.rev)
+    path = args.path.strip("/") if args.path else None
+    rows = index.top_pairs(args.limit, path)
+    if args.json:
+        _write(json.dumps({"history": index.summary(), "pairs": rows}, indent=1), args.output)
+        return EXIT_OK
+    s = index.summary()
+    out = [f"Change coupling from the last {s['commits']} commit(s) up to {(s['rev'] or '?')[:12]}"
+           + (f" ({s['bulk_skipped']} bulk commit(s) ignored)" if s["bulk_skipped"] else "")]
+    if s["note"]:
+        out.append(f"note: {s['note']}")
+    if not index.usable:
+        _write("\n".join(out), args.output)
+        return EXIT_OK
+    if not rows:
+        out.append("No file pair changes together often enough"
+                   + (f" with {path}" if path else "") + " (see [history] in the configuration).")
+    for r in rows:
+        out.append(f"  {r['shared']:>3} commits together  {r['a']}  ({r['a_to_b']:.0%} of its {r['a_revs']} commits)")
+        out.append(f"{'':>22}{r['b']}  ({r['b_to_a']:.0%} of its {r['b_revs']} commits)")
+    _write("\n".join(out), args.output)
+    return EXIT_OK
+
+
 def cmd_session(args: argparse.Namespace) -> int:
     repo = _open(args)
     if args.action == "start":
@@ -533,6 +562,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-diff", action="store_true", help="include the full diff in --json output")
     p.add_argument("--no-session", action="store_true", help="compare with HEAD even if a session is active")
     p.set_defaults(func=cmd_activity)
+
+    p = sub.add_parser("coupling", parents=[common],
+                       help="files that usually change together, learned from Git history")
+    p.add_argument("--path", help="only pairs involving this file")
+    p.add_argument("--rev", default="HEAD", help="history up to this revision (default HEAD)")
+    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_coupling)
 
     p = sub.add_parser("session", parents=[common], help="manage work sessions (waves of agent work)")
     p.add_argument("action", choices=("start", "status", "scope", "end", "list"))

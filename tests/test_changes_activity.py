@@ -200,3 +200,58 @@ def test_work_session_tracks_only_session_changes(shop_repo) -> None:
     ended = r.state.end_session()
     assert ended is not None and r.current_session() is None
     assert observe(r)["baseline"]["kind"] == "head"
+
+
+# --------------------------------------------------------------------------- change coupling from history
+
+
+def history_repo(make_repo):
+    """app.py and schema.sql always change together; other.py changes alone."""
+    repo = make_repo({"app.py": "x = 0\n", "schema.sql": "-- 0\n", "other.py": "y = 0\n",
+                      ".repoviz.toml": "[history]\nmin_commits = 5\n"})
+    for i in range(1, 7):
+        repo.write({"app.py": f"x = {i}\n", "schema.sql": f"-- {i}\n"}).commit(f"feature {i}")
+    for i in range(1, 5):
+        repo.write({"other.py": f"y = {i}\n"}).commit(f"other {i}")
+    return repo
+
+
+def test_coupling_learns_files_that_change_together(make_repo) -> None:
+    repo = history_repo(make_repo)
+    # A bulk commit (more than 30 files) and a merge commit must not count.
+    repo.write({**{f"bulk/f{i}.txt": "x\n" for i in range(31)}, "app.py": "x = 'bulk'\n", "other.py": "y = 'b'\n"})
+    repo.commit("bulk rename")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.write({"other.py": "y = 'side'\n"}).commit("side")
+    repo.git("checkout", "-q", "main")
+    repo.git("merge", "-q", "--no-ff", "-m", "merge side", "side")
+    index = Repository(repo.path).coupling()
+    assert index.usable and index.bulk_skipped == 1
+    assert index.commits == 12  # initial + 6 features + 4 others + side (merge and bulk skipped)
+    [partner] = index.of("app.py")
+    assert (partner.path, partner.shared, partner.revs, partner.degree) == ("schema.sql", 7, 7, 1.0)
+    assert index.of("other.py") == []  # changed with app.py only once
+    assert Repository(repo.path).coupling() is not index  # a new Repository has its own cache
+    r = Repository(repo.path)
+    assert r.coupling() is r.coupling()  # cached per commit and settings
+
+
+def test_coupling_thresholds_and_short_history(make_repo) -> None:
+    repo = make_repo({"a.py": "1\n", "b.py": "1\n"})
+    for i in range(2, 4):
+        repo.write({"a.py": f"{i}\n", "b.py": f"{i}\n"}).commit(f"c{i}")
+    index = Repository(repo.path).coupling()
+    assert not index.usable and index.of("a.py") == []
+    assert "needs at least 20" in index.note
+    repo.write({".repoviz.toml": "[history]\nmin_commits = 1\nmin_shared = 4\n"}).commit("config")
+    assert Repository(repo.path).coupling().of("a.py") == []  # 3 shared commits < min_shared
+
+
+def test_activity_shows_companions_not_touched_yet(make_repo) -> None:
+    repo = history_repo(make_repo)
+    Path(repo.path, "app.py").write_text("x = 'agent'\n")
+    events = {e["path"]: e for e in observe(Repository(repo.path))["events"]}
+    assert events["app.py"]["companions"][0]["path"] == "schema.sql"
+    Path(repo.path, "schema.sql").write_text("-- agent\n")
+    events = {e["path"]: e for e in observe(Repository(repo.path))["events"]}
+    assert not events["app.py"].get("companions")

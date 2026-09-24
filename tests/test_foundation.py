@@ -162,3 +162,12 @@ def test_revspec_and_injection_guard(make_repo) -> None:
         git.resolve("does-not-exist")
     assert len(git.resolve("HEAD")) == 40
     git.close()
+
+
+def test_history_settings_are_validated_and_do_not_invalidate_snapshots() -> None:
+    cfg = apply_mapping(Config(), {"history": {"commits": 120, "min_degree": 0.7, "min_commits": 10}}, "t")
+    assert (cfg.history_commits, cfg.history_min_degree, cfg.history_min_commits) == (120, 0.7, 10)
+    assert cfg.fingerprint() == Config().fingerprint()  # thresholds never force a re-analysis
+    for bad in ({"min_degree": 1.5}, {"commits": -1}, {"min_revs": "many"}):
+        with pytest.raises(ConfigError):
+            apply_mapping(Config(), {"history": bad}, "t")

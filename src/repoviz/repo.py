@@ -88,6 +88,7 @@ class Repository:
         self.file_cache: dict[Any, Any] = {}
         self._snapshots: OrderedDict[tuple[str, ...], RepositorySnapshot] = OrderedDict()
         self._diffs: OrderedDict[tuple[str, ...], RepositoryDiff] = OrderedDict()
+        self._couplings: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
         self._lock = threading.RLock()
         self._inflight: dict[tuple[Any, ...], threading.Lock] = {}
         self.state = StateStore(self.root, self.name, self.config.state_dir)
@@ -292,6 +293,38 @@ class Repository:
                 while len(self._diffs) > 8:
                     self._diffs.popitem(last=False)
                 self._inflight.pop(("diff", *key), None)
+        return result
+
+    def coupling(self, rev: str | None = None) -> Any:
+        """Which files usually change together, learned from the history up to ``rev`` (default ``HEAD``).
+
+        Cached per commit and settings, so polling and repeated reviews cost one lookup.
+        """
+        from .history import HistorySettings, co_change
+
+        settings = HistorySettings.from_config(self.config)
+        sha: str | None = None
+        if self.git is not None:
+            if rev and len(rev) == 40 and all(c in "0123456789abcdef" for c in rev):
+                sha = rev
+            else:
+                out = self.git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options",
+                                       f"{rev or 'HEAD'}^{{commit}}")
+                sha = out.strip() if out else None
+        key = (sha, settings)
+        cached = self._cached(self._couplings, key)
+        if cached is not None:
+            return cached
+        with self._single_flight(("coupling", *key)):
+            cached = self._cached(self._couplings, key)
+            if cached is not None:
+                return cached
+            result = co_change(self.git, sha, settings)
+            with self._lock:
+                self._couplings[key] = result
+                while len(self._couplings) > 4:
+                    self._couplings.popitem(last=False)
+                self._inflight.pop(("coupling", *key), None)
         return result
 
     def compare(self, base: str | None = None, target: str | None = None, *, mode: str | None = None,

@@ -273,3 +273,15 @@ def test_analysis_is_read_only(shop_repo, tmp_path: Path) -> None:
     main(["report", "-C", repo.path, "-o", str(tmp_path / "out.html")])
     after = fingerprint_tree(Path(repo.path))
     assert before == after, sorted(set(before.items()) ^ set(after.items()))[:5]
+
+
+def test_coupling_cli(make_repo, capsys) -> None:
+    repo = make_repo({"app.py": "x = 0\n", "schema.sql": "-- 0\n", ".repoviz.toml": "[history]\nmin_commits = 3\n"})
+    for i in range(1, 6):
+        repo.write({"app.py": f"x = {i}\n", "schema.sql": f"-- {i}\n"}).commit(f"c{i}")
+    assert main(["coupling", "--repo", repo.path, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["history"]["usable"] and {data["pairs"][0]["a"], data["pairs"][0]["b"]} == {"app.py", "schema.sql"}
+    assert main(["coupling", "--repo", repo.path, "--path", "app.py"]) == 0
+    out = capsys.readouterr().out
+    assert "6 commits together  app.py  (100% of its 6 commits)" in out and "schema.sql" in out

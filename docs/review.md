@@ -109,6 +109,7 @@ Credential-like values are always redacted in excerpts and diffs.
 | `stub` | medium | correctness | `NotImplementedError`, `todo!()`, "not implemented" added |
 | `unwired-module` | medium (low in a library) | correctness | new code that nothing imports or refers to, or a new router (`APIRouter`, `Blueprint`, `express.Router`) that is never registered; see [New code that is not wired in](#new-code-that-is-not-wired-in) |
 | `unreachable-from-entry` | info | correctness | a new module imported only by tests, or by other new code that nothing uses |
+| `missed-companion` | low (medium when ≥ 80% of ≥ 8 commits) | correctness | a changed file usually changes together with another file that this change left untouched; see [Files that usually change together](#files-that-usually-change-together) |
 | `error-handling-removed` | low | correctness | more raise/except/throw/catch lines removed than added |
 | `new-cycle` / `cycle-grown` | high | architecture | a dependency cycle was introduced or extended |
 | `forbidden-dependency` | rule | architecture | a new dependency violates a `[[review.rules]]` rule |
@@ -194,6 +195,48 @@ modules that import those (packages that re-export it). This includes use as a
 value, such as `Depends(get_db)` or `callbacks=[handler]`. Methods, decorated
 functions, names in `__all__` and conventional names (`main`, `create_app`,
 `handler`, ...) are not checked.
+
+### Files that usually change together
+
+Imports miss a whole class of coupling:
+
+- a route and the frontend call that uses it;
+- a model and its migration;
+- a settings key and `.env.example`;
+- a module and its test.
+
+Git history knows these pairs. repoviz reads the file lists of the last
+`history.commits` (300) commits, with a single `git log`. It skips merge commits
+and commits that touch more than 30 files (renames, reformatting). For each file,
+it keeps the partners that changed in at least half of that file's commits:
+
+```text
+[medium] Usual companion change missing: app/tasks/panel_extraction.py changed together with
+         app/tasks/image_extraction.py in 11 of its last 13 commits; also often with
+         app/routes/images.py (10 of 13); those files are untouched in this change.
+```
+
+- **Direction.** The share is measured from the changed file's side ("when this
+  file changes, does that one change too?"). A file edited in 100 commits is not
+  tied to a partner it met 5 times.
+- **Which history.** The history is the one before the change: the session's
+  baseline commit, the base of a range, or `HEAD` for uncommitted work.
+- **Where it shows.**
+  - Each review file card lists **Usually changes with**, marking each partner as
+    changed or not changed in this review.
+  - The **Activity** tab shows the partners of the files being edited that are not
+    touched yet (column *Often with*, and the details panel). You can tell the
+    agent before it finishes.
+- **What is left out.** Generated and vendored partners are never reported, and
+  lock files are only reported for manifests.
+- **Short history.** A repository with fewer than `history.min_commits` (20)
+  usable commits, such as a shallow clone, produces no signal. The report's
+  `history` field explains why.
+- **From the CLI.** `repoviz coupling` lists the strongest pairs;
+  `repoviz coupling --path FILE` lists one file's partners.
+
+Thresholds are in [`[history]`](configuration.md). On Django, learning from 300
+commits takes about 0.05 s, and a cached lookup takes a few milliseconds.
 
 ## Working through a review
 

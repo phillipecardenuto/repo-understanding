@@ -36,6 +36,7 @@ flowchart LR
 | `flow` | Affected execution flow: changed symbols → callers → entry points and tests. |
 | `session`, `activity` | Work-session baselines and current activity with impact analysis. |
 | `review`, `wiring` | Review reports for agent work. `wiring` finds new code that nothing imports, registers or refers to. |
+| `history` | Change coupling from Git history: for each file, the files that changed in most of its commits (one `git log`, cached per commit in `Repository.coupling`). |
 | `render.views`, `render.mermaid` | View graphs and Mermaid serialization (the CLI and tests). |
 | `web/app.js` | The browser app. It mirrors `render.views`/`render.mermaid` so filters work offline. |
 | `server`, `render.html`, `cli` | The three front ends. |

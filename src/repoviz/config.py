@@ -93,6 +93,13 @@ class Config:
     review_sensitive: bool = True
     review_disabled_checks: list[str] = field(default_factory=list)
     review_wiring_ignore: list[str] = field(default_factory=list)  # new files that need no importer
+    # Change coupling from Git history ("these files usually change together").
+    history_commits: int = 300  # how many recent commits to learn from (0 disables)
+    history_min_revs: int = 5  # a file needs this many commits before its habits count
+    history_min_shared: int = 3  # commits two files must share
+    history_min_degree: float = 0.5  # share of the file's commits that also changed the partner
+    history_max_files_per_commit: int = 30  # larger commits (bulk renames, formatting) are ignored
+    history_min_commits: int = 20  # fewer usable commits (e.g. a shallow clone): no coupling signals
     # Where the values came from (for display/debugging).
     sources: list[str] = field(default_factory=list)
 
@@ -101,7 +108,7 @@ class Config:
         data.pop("sources", None)
         data.pop("poll_seconds", None)
         data.pop("max_diagram_nodes", None)
-        for key in [k for k in data if k.startswith("review_")]:
+        for key in [k for k in data if k.startswith(("review_", "history_"))]:
             data.pop(key)
         return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -209,6 +216,20 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
     if activity is not None:
         cfg.poll_seconds = float(activity.get("poll_seconds", cfg.poll_seconds))
         cfg.churn_commits = int(activity.get("churn_commits", cfg.churn_commits))
+    history = take("history")
+    if history is not None:
+        if not isinstance(history, dict):
+            raise ConfigError("'history' must be a table")
+        for key, conv in (("commits", int), ("min_revs", int), ("min_shared", int), ("min_degree", float),
+                          ("max_files_per_commit", int), ("min_commits", int)):
+            if key in history:
+                try:
+                    value = conv(history[key])
+                except (TypeError, ValueError):
+                    raise ConfigError(f"history.{key} must be a number") from None
+                if value < 0 or (key == "min_degree" and value > 1):
+                    raise ConfigError(f"history.{key} is out of range")
+                setattr(cfg, f"history_{key}", value)
     review = take("review")
     if review is not None:
         if not isinstance(review, dict):

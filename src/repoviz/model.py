@@ -565,6 +565,8 @@ class ActivityEvent:
     last_modified: str | None = None
     previous_path: str | None = None
     submodule: str | None = None  # set for a file inside a Git submodule
+    # Files that usually change together with this one (from Git history) and are not being edited yet.
+    companions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return _compact(

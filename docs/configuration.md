@@ -66,6 +66,15 @@ external_dependencies = false
 poll_seconds = 3                  # live app auto-refresh
 churn_commits = 300               # history window for hotspots (0 disables)
 
+# ----- change coupling from Git history (see review.md) --------------------------------------
+[history]
+commits = 300                     # recent commits to learn from (0 disables)
+min_revs = 5                      # a file needs this many commits before its habits count
+min_shared = 3                    # commits two files must share
+min_degree = 0.5                  # share of the file's commits that also changed the partner
+max_files_per_commit = 30         # larger commits (bulk renames, formatting) are ignored
+min_commits = 20                  # fewer usable commits (e.g. a shallow clone): no coupling signals
+
 # ----- reviewing agent work (see review.md) -----------------------------------------------
 [review]
 allowed = ["src/**", "tests/**"]  # files outside are flagged "out of scope"

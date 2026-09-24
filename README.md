@@ -67,6 +67,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz discover [--json]` | What discovery found: languages, manifests, roots, entry points, CI… |
 | `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
 | `repoviz activity [--json]` | Files being modified now, with impact, tests and config flags. |
+| `repoviz coupling [--path FILE] [--json]` | Files that usually change together, learned from Git history. |
 | `repoviz session start\|status\|scope\|end\|list [--allow G] [--protect G]` | Manage work sessions (waves) and their scope. |
 
 Every command takes `-C PATH` (repository), `--config FILE`, `--exclude GLOB`,
@@ -193,6 +194,8 @@ Review signals flag likely problems for a human to check:
 - broken imports, and calls to functions the agent removed;
 - changed signatures whose callers were not updated;
 - new code that is not wired in (a router never registered, a module nothing imports);
+- a usual companion change that is missing: a file that almost always changes
+  together with an edited one (a migration, a test, a client) was left untouched;
 - untested changes and weakened tests (skips, removed assertions);
 - swallowed exceptions, debugger statements and possible secrets.
 
