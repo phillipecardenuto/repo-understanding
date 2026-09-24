@@ -744,16 +744,23 @@
       const btn = (label, title, fn) => h("button", { class: "btn small", type: "button", title, "aria-label": title, onclick: fn }, label);
       this.sourcePre = h("pre", { class: "mono" });
       this.info = h("span", { class: "muted", style: { fontSize: "12px" } });
+      this.spotNote = h("div", { class: "spot-note", role: "status", hidden: true });
       this.el = h("div", { class: "card diagram-card" },
         h("div", { class: "diagram-head" }, this.titleEl, this.info, this.find,
           btn("＋", "Zoom in", () => this.zoom(1.25)), btn("－", "Zoom out", () => this.zoom(0.8)), btn("Fit", "Fit to view", () => this.fit()),
           btn("1:1", "Actual size", () => { this.t = { x: 10, y: 10, k: 1 }; this.apply(); }),
           btn("Copy", "Copy Mermaid source", () => this.copy()), btn("SVG", "Download SVG", () => this.downloadSvg()),
           btn(".mmd", "Download Mermaid source", () => download("diagram.mmd", this.text || "", "text/plain"))),
+        this.spotNote,
         this.viewport,
         this.opts.legend ? h("div", { class: "legend" }, this.opts.legend()) : null,
         h("details", { class: "source" }, h("summary", { class: "muted" }, "Mermaid source"), this.sourcePre));
       this.bindPanZoom();
+      if (this.opts.spotlight) {
+        // Clicking the background (not a node, edge or group: those stop the event) or Esc ends the spotlight.
+        this.viewport.addEventListener("click", () => { if (!this.suppressClick && this.spot) this.spotlight(null); });
+        this.el.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && this.spot) { ev.preventDefault(); this.spotlight(null); this.viewport.focus(); } });
+      }
     }
     setTitle(t) { this.titleEl.textContent = t; this.viewport.setAttribute("aria-label", t); }
     apply() { this.stage.style.transform = `translate(${this.t.x}px, ${this.t.y}px) scale(${this.t.k})`; }
@@ -830,16 +837,24 @@
         if (vb && vb.width) { svg.setAttribute("width", vb.width); svg.setAttribute("height", vb.height); }
       }
       const nodeIds = new Set(view.nodes.map((n) => n.id));
+      this.nodeEls = new Map();
+      this.edgeEls = [];
       for (const g of $$("g.node", this.stage)) {
         const m = /-flowchart-(.+)-\d+$/.exec(g.id);
         if (!m || !nodeIds.has(m[1])) continue;
         const nid = m[1];
         g.dataset.nodeId = nid;
+        this.nodeEls.set(nid, g);
         g.setAttribute("tabindex", "0");
         g.setAttribute("role", "button");
         const vn = view.nodes.find((n) => n.id === nid);
         g.setAttribute("aria-label", `${vn.label} (${vn.status !== "unchanged" ? vn.status + ", " : ""}${vn.sublabel || ""})`);
-        const fire = (ev) => { if (this.suppressClick) return; ev.stopPropagation(); this.select(nid); handlers.onNode && handlers.onNode(nid, ev); };
+        const fire = (ev) => {
+          if (this.suppressClick) return;
+          ev.stopPropagation(); this.select(nid);
+          if (this.opts.spotlight) this.spotlight(nid);
+          handlers.onNode && handlers.onNode(nid, ev);
+        };
         g.addEventListener("click", fire);
         g.addEventListener("dblclick", (ev) => { ev.stopPropagation(); handlers.onNodeDouble && handlers.onNodeDouble(nid); });
         g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); fire(ev); } });
@@ -855,8 +870,10 @@
         const did = el.getAttribute("data-id") || "";
         const key = did.replace(/\d+$/, "");
         const e = edgeByKey.get(key);
-        if (!e || !handlers.onEdge) continue;
+        if (!e) continue;
         const target = el.closest(".edgeLabel") || el;
+        this.edgeEls.push({ e, el: target });
+        if (!handlers.onEdge) continue;
         if (target.tagName === "path") { target.style.pointerEvents = "stroke"; target.setAttribute("stroke-linecap", "round"); }
         target.style.cursor = "pointer";
         target.addEventListener("click", (ev) => { if (this.suppressClick) return; ev.stopPropagation(); handlers.onEdge(e); });
@@ -864,6 +881,41 @@
       this.fit();
       if (this.find.value) this.highlight(this.find.value);
       if (this.selected) this.select(this.selected);
+      this.spotlight(this.spot && nodeIds.has(this.spot) ? this.spot : null);
+    }
+    /* Spotlight a node's direct neighbourhood (one hop) without touching the layout: the node, the nodes that use it
+       (inbound: solid, thick links) and the nodes it uses (outbound: dashed, thick links) stay; the rest fades.
+       Never colour alone: stroke weight and pattern differ, and a status line names both directions. */
+    spotlight(nid) {
+      this.spot = nid || null;
+      const cls = ["is-focused", "is-linked-inbound", "is-linked-outbound", "is-dimmed"];
+      for (const g of (this.nodeEls || new Map()).values()) g.classList.remove(...cls);
+      for (const { el } of this.edgeEls || []) el.classList.remove(...cls);
+      const svg = $("svg", this.stage);
+      if (svg) svg.classList.toggle("rv-spotlight", !!this.spot);
+      this.spotNote.innerHTML = "";
+      this.spotNote.hidden = !this.spot;
+      if (!this.spot) return;
+      const inbound = new Set(), outbound = new Set();
+      for (const { e, el } of this.edgeEls) {
+        if (e.target === nid && e.source !== nid) { el.classList.add("is-linked-inbound"); inbound.add(e.source); }
+        else if (e.source === nid && e.target !== nid) { el.classList.add("is-linked-outbound"); outbound.add(e.target); }
+        else el.classList.add("is-dimmed");
+      }
+      for (const [id, g] of this.nodeEls) {
+        if (id === nid) g.classList.add("is-focused");
+        else if (inbound.has(id) || outbound.has(id)) {
+          if (inbound.has(id)) g.classList.add("is-linked-inbound");
+          if (outbound.has(id)) g.classList.add("is-linked-outbound");
+        } else g.classList.add("is-dimmed");
+      }
+      const vn = (this.view.nodes || []).find((n) => n.id === nid);
+      const name = vn ? String(vn.label || nid).replace(/\u0001[^\u0001]*\u0001/g, "").trim() : nid;
+      put(this.spotNote, h("b", { text: name }), " · ",
+        h("span", { class: "spot-in", text: `← used by ${inbound.size}` }), h("span", { class: "muted", text: " (solid, thick links)" }), " · ",
+        h("span", { class: "spot-out", text: `→ depends on ${outbound.size}` }), h("span", { class: "muted", text: " (dashed, thick links)" }), " · ",
+        h("span", { class: "muted", text: "everything else is faded. " }),
+        h("button", { class: "btn small", type: "button", onclick: () => { this.spotlight(null); this.viewport.focus(); } }, "Clear (Esc)"));
     }
     select(nid) {
       this.selected = nid;
@@ -1374,7 +1426,7 @@
       const o = this.opts, app = this.app;
       this.si = app.snapshotIndex;
       if (o.focus && !this.si.nodes.has(o.focus)) o.focus = null;
-      this.diagram = new Diagram({ title: "Dependencies", legend: kindLegend });
+      this.diagram = new Diagram({ title: "Dependencies", legend: kindLegend, spotlight: true });
       this.details = new DetailsPanel(app);
       this.focusInput = h("input", { type: "search", list: "rv-nodes", placeholder: "type a name…", size: 26, "aria-label": "Focus node" });
       this.datalist = h("datalist", { id: "rv-nodes" });
@@ -1456,7 +1508,7 @@
       put(this.fanEl, h("h3", { text: "Fan-in / fan-out in this view" }), table([
         { key: "name", label: "Node", render: (r) => name(r.id), sort: (r) => name(r.id) },
         { key: "in", label: "Used by", num: true }, { key: "out", label: "Depends on", num: true }], [...fan.values()],
-      { sort: "in", dir: -1, onRow: (r) => { this.details.showNode(si, r.id); this.diagram.select(r.id); } }));
+      { sort: "in", dir: -1, onRow: (r) => { this.details.showNode(si, r.id); this.diagram.select(r.id); this.diagram.spotlight(r.id); } }));
     }
   }
 
@@ -2632,6 +2684,7 @@
     { id: "dependencies", title: "Dependencies", icon: "graph", tab: "dependencies", intro: "Explore who depends on whom, find dependency cycles, and focus on one part of the system.",
       blocks: [
         { ul: ["**Level**: project, component, package or module. Start high and go down.",
+          "**Click a node** to spotlight it: the nodes that use it are joined by **solid, thick** links, the nodes it uses by **dashed, thick** links, and everything else fades. The line above the diagram gives both counts. The layout does not move. **Esc**, **Clear** or a click on the empty background shows everything again; clicking another node moves the spotlight. The fan-in / fan-out table does the same.",
           "**Focus** on a name to see its neighbourhood; **Depth** and **Direction** control it. *Dependents* answers \"what breaks if I change this?\"; *dependencies* answers \"what does this use?\".",
           "**Include**: external packages, the standard library, tests and type-only imports can be switched on or off to reduce noise.",
           "**Highlight cycles** draws dependency cycles in purple; **cycles only** shows nothing else. The Cycles card lists every cycle; click one to focus on it.",

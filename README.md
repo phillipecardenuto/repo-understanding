@@ -141,7 +141,10 @@ a node to drill down. Below it, the discovery profile lists:
 (`imports`, `depends-on` from manifests, `calls`, `invokes`, `builds`). Options
 cover external packages, stdlib, tests and type-only imports. You can focus on a
 node, choose depth and direction (depends on / used by), and highlight or isolate
-cycles. Clicking an edge label explains *why* one thing depends on another, with
+cycles. Clicking a node spotlights its direct neighbourhood without redrawing:
+modules that use it (solid, thick links), modules it uses (dashed, thick links),
+and everything else faded; Esc or a click on the background restores the graph.
+Clicking an edge label explains *why* one thing depends on another, with
 file:line evidence and source excerpts for every underlying import.
 
 **Activity & Flow.** For each file currently being modified: Git status,

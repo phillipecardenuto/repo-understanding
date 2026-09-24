@@ -128,6 +128,19 @@ main { padding: 14px 16px 40px; }
 .viewport g.node.rv-selected rect, .viewport g.node.rv-selected polygon, .viewport g.node.rv-selected path,
 .viewport g.node.rv-selected circle { stroke: var(--accent) !important; stroke-width: 4px !important; }
 .viewport g.node.rv-dim { opacity: .25; }
+/* Spotlight (click a node in Dependencies): its direct links stand out, the rest fades. Never colour alone:
+   inbound links are solid and thick, outbound links dashed and thick, nodes follow with their borders. */
+.viewport svg.rv-spotlight .is-dimmed { opacity: .15; filter: saturate(.3); }
+.viewport svg.rv-spotlight g.node.is-focused :is(rect, polygon, path, circle) { stroke: var(--accent) !important; stroke-width: 5px !important; }
+.viewport svg.rv-spotlight path.flowchart-link.is-linked-inbound { stroke-width: 3.5px !important; stroke-dasharray: none !important; opacity: 1; }
+.viewport svg.rv-spotlight path.flowchart-link.is-linked-outbound { stroke-width: 3.5px !important; stroke-dasharray: 9 5 !important; opacity: 1; }
+.viewport svg.rv-spotlight g.node.is-linked-inbound :is(rect, polygon, path, circle) { stroke-width: 3px !important; stroke-dasharray: none !important; }
+.viewport svg.rv-spotlight g.node.is-linked-outbound :is(rect, polygon, path, circle) { stroke-width: 3px !important; stroke-dasharray: 7 4 !important; }
+.viewport svg.rv-spotlight g.node.is-linked-inbound.is-linked-outbound :is(rect, polygon, path, circle) { stroke-dasharray: 2 3 !important; }
+.spot-note[hidden] { display: none; }
+.spot-note { padding: 5px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 2px 4px; align-items: center; }
+.spot-note .spot-in { font-weight: 600; text-decoration: underline; text-decoration-thickness: 2px; }
+.spot-note .spot-out { font-weight: 600; text-decoration: underline dashed; text-decoration-thickness: 2px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 10px; border-top: 1px solid var(--border); font-size: 12.5px; }
 .legend .item { display: inline-flex; align-items: center; gap: 6px; }
 .swatch { display: inline-block; width: 22px; height: 14px; border-radius: 3px; border: 2px solid; }

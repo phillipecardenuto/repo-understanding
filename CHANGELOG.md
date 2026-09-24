@@ -6,6 +6,17 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Click a node in Dependencies to spotlight it** ([#37](https://github.com/phillipecardenuto/repo-understanding/issues/37)).
+  - Its direct neighbours stay:
+    - modules that use it, with solid, thick links;
+    - modules it uses, with dashed, thick links.
+
+    Everything else fades.
+  - A line above the diagram names both counts, so the result never relies on
+    colour alone.
+  - The layout and zoom do not change.
+  - Esc, *Clear* or a click on the background restores the graph.
+  - It works the same in static reports.
 - **Review any branch against any other branch** ([#35](https://github.com/phillipecardenuto/repo-understanding/issues/35)).
   - The AI Review tab gets a **compare any two branches** control. Base and
     target suggest local and remote branches, tags, commits and the working

@@ -492,3 +492,44 @@ def test_static_report_says_how_to_compare_branches(page, make_repo, tmp_path: P
     assert page.evaluate("repoviz.app.tabs.review.report.target.key") == "range:main...feature"  # precomputed first
     assert page.evaluate("repoviz.app.tabs.review.report.files.map(f => f.path)") == ["app/b.py"]
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_dependencies_spotlight_on_click(page, make_repo, tmp_path: Path) -> None:
+    repo = make_repo({"pkg/__init__.py": "", "pkg/a.py": "from pkg import b\n", "pkg/d.py": "from pkg import b\n",
+                      "pkg/b.py": "from pkg import c\n", "pkg/c.py": "X = 1\n", "pkg/e.py": "from pkg import c\n"})
+    report = tmp_path / "deps.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=dependencies")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    page.select_option("#tab-dependencies .toolbar select >> nth=0", "module")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    page.wait_for_function("() => document.querySelectorAll('#tab-dependencies g.node[data-node-id]').length >= 5", timeout=30_000)
+    node = lambda name: f"#tab-dependencies g.node[data-node-id]:has-text('{name}')"  # noqa: E731
+    classes = """() => Object.fromEntries(Array.from(document.querySelectorAll('#tab-dependencies g.node[data-node-id]'))
+        .map(g => [g.textContent.trim().split(/\\s+/)[0].replace(/module$/, ''), ['is-focused', 'is-linked-inbound', 'is-linked-outbound', 'is-dimmed']
+        .filter(c => g.classList.contains(c)).join(' ')]))"""
+    page.click(node("pkg.b"))
+    state = page.evaluate(classes)
+    assert state == {"pkg.a": "is-linked-inbound", "pkg.d": "is-linked-inbound", "pkg.b": "is-focused",
+                     "pkg.c": "is-linked-outbound", "pkg.e": "is-dimmed"}
+    edges = """() => Array.from(document.querySelectorAll('#tab-dependencies path.flowchart-link')).map(p => {
+        const s = getComputedStyle(p); return [['is-linked-inbound', 'is-linked-outbound', 'is-dimmed'].find(c => p.classList.contains(c)) || '',
+        s.strokeDasharray, parseFloat(s.strokeWidth), parseFloat(s.opacity)]; })"""
+    by_kind: dict = {}
+    for kind, dash, width, opacity in page.evaluate(edges):
+        by_kind.setdefault(kind, []).append((dash, width, opacity))
+    assert len(by_kind["is-linked-inbound"]) == 2 and len(by_kind["is-linked-outbound"]) == 1 and by_kind["is-dimmed"]
+    assert all(dash == "none" and width >= 3 for dash, width, _ in by_kind["is-linked-inbound"])  # solid, thick
+    assert all(dash not in ("none", "") and width >= 3 for dash, width, _ in by_kind["is-linked-outbound"])  # dashed, thick
+    assert all(opacity < 0.3 for _, _, opacity in by_kind["is-dimmed"])
+    note = page.inner_text("#tab-dependencies .spot-note")
+    assert "pkg.b" in note and "used by 2" in note and "depends on 1" in note  # said in words, not only drawn
+    transform = page.evaluate("document.querySelector('#tab-dependencies .stage').style.transform")
+    page.keyboard.press("Escape")
+    assert page.locator("#tab-dependencies svg.rv-spotlight").count() == 0 and page.locator("#tab-dependencies .spot-note").is_hidden()
+    assert page.evaluate("document.querySelector('#tab-dependencies .stage').style.transform") == transform  # layout kept
+    page.click(node("pkg.c"))  # c is used by b and e
+    assert "used by 2" in page.inner_text("#tab-dependencies .spot-note")
+    page.locator("#tab-dependencies .viewport").click(position={"x": 4, "y": 4})  # the empty background
+    assert page.locator("#tab-dependencies .is-dimmed").count() == 0
+    assert page.errors == []  # type: ignore[attr-defined]
