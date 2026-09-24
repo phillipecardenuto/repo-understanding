@@ -27,6 +27,8 @@ test_roots = ["tests"]            # everything below groups into the test-root c
 test_patterns = ["**/checks/*.py"]
 docs_roots = ["docs"]
 default_branch = "trunk"          # otherwise: remote HEAD, init.defaultBranch, main/master/...
+state_dir = "~/.cache/repoviz"    # sessions, observations and review notes (also REPOVIZ_STATE_DIR);
+                                  # created owner-only (0700), because it holds copies of source files
 
 [languages]                       # extension -> language
 ".pyi" = "python"
@@ -64,8 +66,6 @@ external_dependencies = false
 poll_seconds = 3                  # live app auto-refresh
 churn_commits = 300               # history window for hotspots (0 disables)
 
-state_dir = "~/.cache/repoviz"    # sessions, observations and review notes (also REPOVIZ_STATE_DIR)
-
 # ----- reviewing agent work (see review.md) -----------------------------------------------
 [review]
 allowed = ["src/**", "tests/**"]  # files outside are flagged "out of scope"
@@ -89,6 +89,7 @@ severity = "high"                 # high | medium | low
 - A trailing `/` restricts the pattern to directories.
 - A leading `/`, or a `/` in the middle, anchors the pattern at the repository
   root.
+- Repeated `**/` segments are collapsed, so `**/**/x` is the same as `**/x`.
 
 ## Environment variables
 

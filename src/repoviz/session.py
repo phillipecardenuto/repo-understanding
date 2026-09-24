@@ -50,9 +50,32 @@ def default_state_dir(configured: str | None = None) -> Path:
     return Path(base) / "repoviz"
 
 
+def _mkdir_private(path: Path) -> None:
+    """Create ``path`` and missing parents readable by the current user only.
+
+    The state directory holds copies of source files (session baselines) and
+    review notes, which may be as sensitive as the repository itself.
+    """
+    missing = []
+    while not path.exists():
+        missing.append(path)
+        path = path.parent
+    for d in reversed(missing):
+        try:
+            d.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
 def _atomic_write(path: Path, data: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+    _mkdir_private(path.parent)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")  # mkstemp files are 0600
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(data)
@@ -148,7 +171,7 @@ class StateStore:
     def _capture_dirty(self, git: Git, root: Path, sid: str) -> tuple[dict[str, str | None], list[str]]:
         """Copy every file that differs from HEAD (per ``git status``) into the session's file store."""
         files_dir = self._session_dir(sid) / "files"
-        files_dir.mkdir(parents=True, exist_ok=True)
+        _mkdir_private(files_dir)
         overrides: dict[str, str | None] = {}
         skipped: list[str] = []
         for entry in git.status():
@@ -168,7 +191,7 @@ class StateStore:
                     digest = content_hash(data)
                     target = files_dir / digest
                     if not target.exists():
-                        target.write_bytes(data)
+                        _write_private(target, data)
                     overrides[path] = digest
                 else:
                     overrides[path] = None
@@ -186,7 +209,7 @@ class StateStore:
                               baseline_head=git.head() if git else None,
                               baseline_branch=git.branch() if git else None, label=label,
                               allowed=list(allowed or []), protected=list(protected or []))
-            self._session_dir(sid).mkdir(parents=True, exist_ok=True)
+            _mkdir_private(self._session_dir(sid))
             if git is not None:
                 session.overrides, session.skipped = self._capture_dirty(git, root, sid)
             self.save_session(session)

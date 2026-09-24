@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from . import classify
 from .diff import symbol_changes
 from .flow import affected_flow
+from .ids import stable_hash
 from .model import (
     ADDED,
     CATEGORY_MODULE,
@@ -184,8 +185,14 @@ def _tests_affected(module_id: str | None, idx: _ImpactIndex, limit: int = 50) -
     return tests
 
 
-def observe(repo: "Repository", *, use_session: bool = True, record: bool = True) -> dict[str, Any]:
-    """Compute the current activity report (and record observation times)."""
+def observe(repo: "Repository", *, use_session: bool = True, record: bool = True,
+            cache: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Compute the current activity report (and record observation times).
+
+    With a ``cache`` dict, an unchanged repository (same baseline, same working
+    tree contents, same Git status) returns the previous report without
+    recomputing it; the report's ``etag`` identifies that state.
+    """
     now = utcnow()
     session = repo.current_session() if use_session else None
     status_by_path: dict[str, Any] = {}
@@ -207,6 +214,12 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
 
     base_source = repo.open_source(base_spec)
     target_source = repo.open_source("WORKTREE")
+    state_key = [base_spec, base_source.revision_id, target_source.revision_id, session.id if session else "",
+                 repo.git.head() or "", repo.config.fingerprint(), str(record)]
+    state_key += sorted(f"{p}\0{e.label}\0{e.staged}\0{e.unstaged}" for p, e in status_by_path.items())
+    etag = stable_hash("activity", *state_key)
+    if cache is not None and cache.get("etag") == etag:
+        return {**cache["result"], "generated_at": now}
     base_snap = repo.snapshot_of(base_source, baseline["label"])
     target_snap = repo.snapshot_of(target_source, "working tree")
     diff = repo.diff(base_snap, target_snap)
@@ -296,8 +309,9 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
         "entry_points_affected": len(flow.entry_points),
         "tests_reaching_changes": len(flow.tests),
     }
-    return {
+    result = {
         "generated_at": now,
+        "etag": etag,
         "baseline": baseline,
         "events": [e.to_dict() for e in sorted(events, key=lambda e: (e.last_observed, e.path), reverse=True)],
         "summary": summary,
@@ -306,6 +320,10 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
         "git": repo.git_info(),
         "poll_seconds": repo.config.poll_seconds,
     }
+    if cache is not None:
+        cache.clear()
+        cache.update(etag=etag, result=result)
+    return result
 
 
 def _count(values: Any) -> dict[str, int]:

@@ -159,7 +159,19 @@ edge records whether it is in a cycle in the base and in the target.
 - Python files are parsed in a process pool for large batches (disable with
   `REPOVIZ_NO_PARALLEL=1`).
 - Embedded report data is compacted and gzip-compressed above 1.5 MB. The UI
-  inflates it with the browser's `DecompressionStream`.
+  inflates it with the browser's `DecompressionStream`. Live responses use the
+  same compaction.
+- Diffs are cached by the revision IDs of both sides. Concurrent requests for the
+  same snapshot or diff compute it once ("single flight").
+- The live server serializes only writes to the state directory. Analysis
+  requests run concurrently, so a slow review does not block assets, the
+  activity poll or small API calls.
+- `observe()` returns an `etag` derived from the baseline, the working-tree
+  revision ID and `git status`. The activity poll sends `If-None-Match` and gets
+  `304 Not Modified` while nothing changes, so polling costs one status check
+  and no re-serialization or re-rendering.
+- Review reports are cached per target, revisions and scope. Notes are loaded
+  fresh and spliced into the cached JSON.
 
 For scale: Django (≈2,800 modules, 39k symbols) takes about 8 s for the first
 snapshot and 0.1 s for a cached one.
@@ -180,4 +192,18 @@ handlers to the SVG. Server endpoints:
 | `GET /api/snapshot?rev=` | any snapshot |
 | `GET /api/activity` | activity report with diff and affected flow |
 | `GET /api/revisions`, `/api/profile`, `/api/health` | metadata |
-| `POST /api/session/start`, `/api/session/end` | session control (requires `X-Repoviz: 1`) |
+| `GET /api/review/targets`, `/api/review?id=\|base=&target=`, `/api/review/notes?key=` | AI review |
+| `POST /api/session/start`, `/api/session/end`, `/api/session/scope`, `/api/review/notes` | state changes |
+
+Every `/api/*` request must carry `X-Repoviz: 1`. Browsers can't add that
+header to a cross-site request without a CORS preflight, which the server never
+grants. Other origins therefore can neither trigger side effects nor read
+responses. The Host header is checked against loopback names (DNS rebinding),
+and the CSP forbids inline and evaluated script.
+
+Git hardening: `.git/config` belongs to whoever produced the repository, so
+`gitutil.Git` passes `-c` overrides with every command. These cover
+`core.fsmonitor=false`, empty clean/smudge/process commands for every
+configured filter driver, `log.showSignature=false` and
+`core.hooksPath=/dev/null`. `git status` also runs with
+`--ignore-submodules=dirty`, so it never starts git inside submodules.

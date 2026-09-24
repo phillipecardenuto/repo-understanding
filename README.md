@@ -243,11 +243,26 @@ See [docs/configuration.md](docs/configuration.md) for every option.
   every file, including `.git`, is untouched after analysis.
 - Repository code is never imported or executed. Python is parsed with `ast`
   and `setup.py` is read, not run. The optional grimp check is static too.
+- A repository you did not create can't make the analysis run programs. Every
+  git call overrides the settings in `.git/config` that would do so:
+  `core.fsmonitor`, clean/smudge filter drivers, `log.showSignature` (GPG) and
+  submodule recursion.
+- Build files are parsed without entity expansion. Pathological inputs (huge
+  minified lines, adversarial globs) can't cause catastrophic regex
+  backtracking.
 - The server binds to 127.0.0.1 and rejects foreign `Host` headers (DNS
-  rebinding). State-changing requests need a custom header (CSRF), and revisions
-  from the UI can never be interpreted as git options.
+  rebinding).
+  - Every `/api/*` call needs a custom header, so other web pages can't trigger
+    or embed API calls (CSRF / cross-site reads).
+  - Pages carry a strict Content-Security-Policy with no inline or evaluated
+    script, plus `nosniff` and `Cross-Origin-Resource-Policy: same-origin`.
+  - Revisions from the UI can never be interpreted as git options.
 - Mermaid runs with `securityLevel: "strict"`, and labels built from file names
   are escaped.
+- Credential-like values are redacted from excerpts and diffs. Static reports
+  show your home directory as `~`.
+- The state directory (session baselines are copies of your files, plus review
+  notes) is created with owner-only permissions (`0700` / `0600`).
 - If Git refuses a repository ("dubious ownership"), the tool respects that and
   analyzes it as a plain directory, with a diagnostic explaining why.
 

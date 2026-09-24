@@ -234,7 +234,7 @@ _CLASS = re.compile(r"\b(export\s+)?(default\s+)?(?:abstract\s+)?class\s+([\w$]+
 _ARROW = re.compile(r"\b(export\s+)?(?:const|let|var)\s+([\w$]+)\s*(?::[^=\n]+)?=\s*(?:async\s+)?"
                     r"(?:function\b|(?:<[^>]*>\s*)?(?:\([^()]*(?:\([^()]*\)[^()]*)*\)|[\w$]+)\s*(?::\s*[^=\n]+?)?=>)")
 _METHOD = re.compile(r"^[ \t]*(?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*"
-                     r"\*?\s*(#?[\w$]+)\s*(?:<[^>{]*>)?\s*\([^;{]*\)\s*(?::\s*[^{;]+)?\{", re.M)
+                     r"\*?\s*(#?[\w$]+)\s*(?:<[^>{]{0,200}>)?\s*\([^;{]{0,500}\)\s*(?::\s*[^{;]{1,200})?\{", re.M)
 _CALL = re.compile(r"(?<![\w$.])(new\s+)?((?:this|[\w$]+)(?:\s*\.\s*[\w$]+)*)\s*\(")
 _EXPORT_LIST = re.compile(r"\bexport\s*\{([^}]*)\}\s*(?!\s*from)")
 _EXPORT_DEFAULT_ID = re.compile(r"\bexport\s+default\s+([\w$]+)\s*;?\s*$", re.M)

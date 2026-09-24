@@ -15,7 +15,9 @@ SECRET_PATTERNS = [
     re.compile(r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"""(?i)\b[\w-]*(?:api[_-]?key|secret|passw(?:or)?d|token|credential)[\w-]*\s*[:=]\s*(['"])([^'"\s]{8,})\1"""),
+    # Bounded repetitions keep this linear on long identifier-like lines.
+    re.compile(r"""(?i)\b[\w-]{0,40}(?:api[_-]?key|secret|passw(?:or)?d|token|credential)[\w-]{0,40}\s{0,10}[:=]\s{0,10}"""
+               r"""(['"])([^'"\s]{8,500})\1"""),
 ]
 _PLACEHOLDER = re.compile(r"(?i)(changeme|example|dummy|placeholder|xxxx|\$\{|<[^>]+>|your[_-]|redacted|test|fake|\*\*\*)")
 _QUICK = re.compile(r"(?i)(AKIA|PRIVATE KEY|ghp_|gho_|ghu_|ghs_|github_pat_|sk-|xox|key|secret|passw|token|credential)")

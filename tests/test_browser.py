@@ -153,3 +153,81 @@ def test_review_tab_triage_and_feedback(page, make_repo, tmp_path: Path) -> None
     page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
     assert "Remove the breakpoint before merging" in page.inner_text("#tab-review pre.prompt")
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_review_navigation_progress_and_scope_reset(page, make_repo, tmp_path: Path) -> None:
+    from test_review import APP, agent_wave
+
+    repo = make_repo(APP)
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave 1", protected=["src/app/auth/**"])
+    agent_wave(repo)
+    report = tmp_path / "review.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    total = page.evaluate("repoviz.app.tabs.review.report.files.length")
+    selected = "repoviz.app.tabs.review.selectedFile"
+    # j / k walk through the files in table order.
+    page.keyboard.press("j")
+    first = page.evaluate(selected)
+    page.keyboard.press("j")
+    second = page.evaluate(selected)
+    page.keyboard.press("k")
+    assert first and second and first != second and page.evaluate(selected) == first
+    assert page.locator("#tab-review .files-split tbody tr.selected").count() == 1
+    # "Reviewed & next" records progress and moves on; progress survives a reload.
+    page.click("#tab-review .file-nav >> text=Reviewed & next")
+    assert page.evaluate(selected) != first
+    assert f"1 / {total} reviewed" in page.inner_text("#tab-review .progress")
+    page.reload()
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert f"1 / {total} reviewed" in page.inner_text("#tab-review .progress")
+    # Scope edits can be reset to the session's scope.
+    protected = "repoviz.app.tabs.review.report.files.filter(f => f.scope === 'protected').length"
+    assert page.evaluate(protected) == 1
+    page.fill("#tab-review textarea >> nth=1", "src/**")
+    page.click("#tab-review >> text=Apply scope")
+    assert page.evaluate(protected) > 1
+    page.click("#tab-review .toolbar >> text=Reset")
+    assert page.evaluate(protected) == 1 and page.input_value("#tab-review textarea >> nth=1") == "src/app/auth/**"
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_review_tab_explains_how_to_start(page, make_repo, tmp_path: Path) -> None:
+    repo = make_repo({"src/app.py": "import os\n"})
+    report = tmp_path / "clean.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_selector("#tab-review .empty-state:not([hidden])", timeout=60_000)
+    text = page.inner_text("#tab-review .empty-state")
+    assert "To review what a coding agent does" in text and "repoviz session start" in text
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_live_review_refreshes_and_keeps_selection(page, make_repo) -> None:
+    from test_review import APP, agent_wave
+
+    repo = make_repo(APP)
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave 1")
+    agent_wave(repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=review")
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        files = "repoviz.app.tabs.review.report.files.length"
+        before = page.evaluate(files)
+        page.click("#tab-review .files-split tbody tr >> text=src/app/billing/invoice.py")
+        # The agent keeps working; coming back to the tab picks the change up and keeps the open file.
+        repo.write({"src/app/billing/late.py": "def late():\n    return 1\n"})
+        page.click("#tabbtn-structure")
+        page.wait_for_timeout(2100)
+        page.click("#tabbtn-review")
+        page.wait_for_function(f"() => {files} === {before + 1}", timeout=60_000)
+        assert page.evaluate("repoviz.app.tabs.review.selectedFile") == "src/app/billing/invoice.py"
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()

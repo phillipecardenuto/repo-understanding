@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -88,6 +89,7 @@ class Repository:
         self._snapshots: OrderedDict[tuple[str, ...], RepositorySnapshot] = OrderedDict()
         self._diffs: OrderedDict[tuple[str, ...], RepositoryDiff] = OrderedDict()
         self._lock = threading.RLock()
+        self._inflight: dict[tuple[Any, ...], threading.Lock] = {}
         self.state = StateStore(self.root, self.name, self.config.state_dir)
 
     # -- identity -------------------------------------------------------------
@@ -202,24 +204,49 @@ class Repository:
         source = self.open_source(spec)
         return self.snapshot_of(source, label or source.label)
 
+    def _cached(self, cache: OrderedDict, key: tuple[Any, ...]) -> Any:
+        with self._lock:
+            hit = cache.get(key)
+            if hit is not None:
+                cache.move_to_end(key)
+            return hit
+
+    def _single_flight(self, key: tuple[Any, ...]) -> threading.Lock:
+        """One lock per cache key, so concurrent requests for the same result compute it once."""
+        with self._lock:
+            return self._inflight.setdefault(key, threading.Lock())
+
     def snapshot_of(self, source: TreeSource, label: str) -> RepositorySnapshot:
-        key = (source.kind, source.revision_id, self.config.fingerprint(), label)
-        with self._lock:
-            cached = self._snapshots.get(key)
+        # The label is cosmetic ("HEAD" vs "HEAD (1a2b3c)"): one analysis serves every label.
+        key = (source.kind, source.revision_id, self.config.fingerprint())
+        cached = self._cached(self._snapshots, key)
+        if cached is not None:
+            return self._relabel(cached, label)
+        with self._single_flight(("snapshot", *key)):
+            cached = self._cached(self._snapshots, key)
             if cached is not None:
-                self._snapshots.move_to_end(key)
-                return cached
-        profile = self.discover(source)
-        snap = build_snapshot(source, profile, self.config, repository_id=self.repository_id,
-                              repository_name=self.name, root=str(self.root), label=label, git=self.git,
-                              file_cache=self.file_cache)
-        with self._lock:
-            self._snapshots[key] = snap
-            while len(self._snapshots) > self.SNAPSHOT_CACHE_SIZE:
-                self._snapshots.popitem(last=False)
-            if len(self.file_cache) > 200_000:
-                self.file_cache.clear()
+                return self._relabel(cached, label)
+            profile = self.discover(source)
+            snap = build_snapshot(source, profile, self.config, repository_id=self.repository_id,
+                                  repository_name=self.name, root=str(self.root), label=label, git=self.git,
+                                  file_cache=self.file_cache)
+            with self._lock:
+                self._snapshots[key] = snap
+                while len(self._snapshots) > self.SNAPSHOT_CACHE_SIZE:
+                    self._snapshots.popitem(last=False)
+                if len(self.file_cache) > 200_000:
+                    self.file_cache.clear()
+                self._inflight.pop(("snapshot", *key), None)
         return snap
+
+    @staticmethod
+    def _relabel(snap: RepositorySnapshot, label: str) -> RepositorySnapshot:
+        if snap.label == label:
+            return snap
+        copy = dataclasses.replace(snap, label=label, revision=label)  # shares the (read-only) graph
+        if "_node_index" in snap.__dict__:
+            copy.__dict__["_node_index"] = snap.__dict__["_node_index"]
+        return copy
 
     # -- comparisons ---------------------------------------------------------------------
 
@@ -250,17 +277,21 @@ class Repository:
         """Diff two snapshots (cached: snapshots with the same revision IDs give the same diff)."""
         from .diff import diff_snapshots
 
-        key = (base.kind, base.revision_id, base.label, target.kind, target.revision_id, target.label)
-        with self._lock:
-            cached = self._diffs.get(key)
+        key = (base.kind, base.revision_id, base.label, target.kind, target.revision_id, target.label,
+               base.metadata.get("config_fingerprint"), target.metadata.get("config_fingerprint"))
+        cached = self._cached(self._diffs, key)
+        if cached is not None:
+            return cached
+        with self._single_flight(("diff", *key)):
+            cached = self._cached(self._diffs, key)
             if cached is not None:
-                self._diffs.move_to_end(key)
                 return cached
-        result = diff_snapshots(base, target)
-        with self._lock:
-            self._diffs[key] = result
-            while len(self._diffs) > 8:
-                self._diffs.popitem(last=False)
+            result = diff_snapshots(base, target)
+            with self._lock:
+                self._diffs[key] = result
+                while len(self._diffs) > 8:
+                    self._diffs.popitem(last=False)
+                self._inflight.pop(("diff", *key), None)
         return result
 
     def compare(self, base: str | None = None, target: str | None = None, *, mode: str | None = None,

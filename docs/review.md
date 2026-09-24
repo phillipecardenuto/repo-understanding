@@ -112,6 +112,28 @@ Credential-like values are always redacted in excerpts and diffs.
 | `commented-code` | low | hygiene | three or more commented-out code lines |
 | `large-change` | info | hygiene | more than 400 lines added to one file |
 
+## Working through a review
+
+- **Files are ranked for attention.** The file table sorts files with signals
+  first. The map shows the most relevant files or directories (scope
+  violations, high-severity signals, then the largest changes). The rest are
+  folded into a "… N more" node, which lists them when clicked.
+- **Keyboard:** `j` / `k` open the next / previous file in table order, and `m`
+  marks the open file reviewed and moves to the next unreviewed one. The file
+  card also has *‹ Prev*, *Next ›* and *✓ Reviewed & next* buttons.
+- **Progress:** reviewed files get a ✓ and count towards "N / M reviewed".
+  A mark belongs to the file's content: if the agent changes the file again,
+  it shows ↻ ("changed since you reviewed it") and must be reviewed again.
+  Marks are kept in the browser.
+- **Scope edits** apply instantly. *Reset* returns to the configured / session
+  scope. *Save to session* (live app) stores your edits with the wave.
+  Ctrl+Enter in a scope box applies it.
+- **Live app:** coming back to the AI Review tab re-checks the repository
+  (instant when nothing changed) and keeps the open file. *↻ Refresh* does the
+  same on demand.
+- **Nothing to review?** The tab explains how to start a session or which
+  target to pick, instead of showing empty diagrams.
+
 ## Notes and verdicts
 
 | Verdict | Use it when… | Prompt section |

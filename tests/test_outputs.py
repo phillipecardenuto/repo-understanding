@@ -133,12 +133,16 @@ def server(shop_repo):
     srv.server_close()
 
 
-def request(srv, method, path, body=None, headers=None):
+def request(srv, method, path, body=None, headers=None, full=False):
+    """Call the server like the web app does (with X-Repoviz) unless ``headers`` is given."""
     conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=30)
-    conn.request(method, path, body=json.dumps(body) if body is not None else None, headers=headers or {})
+    conn.request(method, path, body=json.dumps(body) if body is not None else None,
+                 headers={"X-Repoviz": "1"} if headers is None else headers)
     resp = conn.getresponse()
     data = resp.read()
     conn.close()
+    if full:
+        return resp.status, dict(resp.getheaders()), data
     return resp.status, resp.getheader("Content-Type"), data
 
 
@@ -155,8 +159,14 @@ def test_server_endpoints(server) -> None:
     status, _, body = request(srv, "GET", "/api/diff?mode=all")
     diff = json.loads(body)
     assert status == 200 and diff["diff"]["summary"]["cycles"]["introduced"] == 1
-    status, _, body = request(srv, "GET", "/api/activity")
+    status, headers, body = request(srv, "GET", "/api/activity", full=True)
     assert status == 200 and json.loads(body)["summary"]["files"] == 2
+    # Polling an unchanged repository is answered with 304 Not Modified.
+    status, _, body = request(srv, "GET", "/api/activity", headers={"X-Repoviz": "1", "If-None-Match": headers["ETag"]})
+    assert status == 304 and body == b""
+    Path(repo.path, "src/shop/api/brand_new.py").write_text("import os\n")
+    status, _, body = request(srv, "GET", "/api/activity", headers={"X-Repoviz": "1", "If-None-Match": headers["ETag"]})
+    assert status == 200 and json.loads(body)["summary"]["files"] == 3
     status, _, body = request(srv, "GET", "/api/diff?base=--output=/tmp/x&target=HEAD")
     assert status == 400 and b"invalid revision" in body
     status, _, _ = request(srv, "GET", "/api/diff?mode=bogus")
@@ -165,10 +175,18 @@ def test_server_endpoints(server) -> None:
 
 def test_server_security_checks(server) -> None:
     srv, _repo = server
-    status, _, _ = request(srv, "GET", "/api/health", headers={"Host": "evil.example:80"})
+    status, _, _ = request(srv, "GET", "/api/health", headers={"Host": "evil.example:80", "X-Repoviz": "1"})
     assert status == 403  # DNS rebinding protection
-    status, _, _ = request(srv, "POST", "/api/session/start", body={})
+    status, _, _ = request(srv, "POST", "/api/session/start", body={}, headers={})
     assert status == 403  # cross-site request without the custom header
+    for path in ("/api/activity", "/api/bundle", "/api/review?id=all"):
+        assert request(srv, "GET", path, headers={})[0] == 403  # cross-site pages cannot trigger or embed API calls
+    status, headers, _ = request(srv, "GET", "/", headers={}, full=True)
+    assert status == 200 and "script-src 'self';" in headers["Content-Security-Policy"]
+    assert "unsafe-eval" not in headers["Content-Security-Policy"]
+    assert headers["Cross-Origin-Resource-Policy"] == "same-origin" and headers["X-Content-Type-Options"] == "nosniff"
+    status, _, _ = request(srv, "POST", "/api/session/start", headers={"X-Repoviz": "1", "Content-Length": "-5"})
+    assert status == 400
     status, _, body = request(srv, "POST", "/api/session/start", body={"label": "t"},
                               headers={"X-Repoviz": "1", "Content-Type": "application/json"})
     assert status == 200 and json.loads(body)["label"] == "t"

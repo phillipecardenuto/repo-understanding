@@ -226,3 +226,13 @@ table.diff tr.flash td.code { outline: 2px solid var(--accent); }
 pre.prompt { max-height: 360px; overflow: auto; background: var(--code-bg); padding: 10px; border-radius: 6px; white-space: pre-wrap; }
 del { color: var(--removed); }
 ins { color: var(--added); text-decoration: none; }
+
+/* review workflow */
+.empty-state { max-width: 900px; }
+.empty-state ol { line-height: 1.8; }
+.empty-state code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+.file-nav { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+.progress { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 12px; }
+.progress progress { width: 160px; height: 8px; accent-color: #16a34a; }
+.reviewed-mark { color: #16a34a; font-weight: 700; }
+.btn:disabled { opacity: .45; cursor: default; }

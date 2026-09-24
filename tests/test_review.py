@@ -10,7 +10,7 @@ from pathlib import Path
 from repoviz.cli import main
 from repoviz.render.html import build_bundle, render_static_html
 from repoviz.repo import Repository
-from repoviz.review import ScopePolicy, build_review, feedback_markdown, resolve_target, review_targets, scope_for
+from repoviz.review import ScopePolicy, build_review, feedback_markdown, resolve_target, review_targets
 from repoviz.server import create_server
 
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz123456"
@@ -227,7 +227,7 @@ def test_review_server_endpoints(make_repo) -> None:
 
     def call(method, path, body=None):
         conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=60)
-        headers = {"X-Repoviz": "1", "Content-Type": "application/json"} if method == "POST" else {}
+        headers = {"X-Repoviz": "1", "Content-Type": "application/json"} if method == "POST" else {"X-Repoviz": "1"}
         conn.request(method, path, json.dumps(body) if body is not None else None, headers)
         resp = conn.getresponse()
         return resp.status, json.loads(resp.read())

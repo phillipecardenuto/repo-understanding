@@ -12,9 +12,11 @@ The same page and script serve both output modes:
 from __future__ import annotations
 
 import base64
+import dataclasses
 import gzip
 import html
 import json
+import os
 import re
 from importlib import resources
 from typing import Any
@@ -53,27 +55,66 @@ def dumps(data: Any) -> str:
     return json.dumps(to_jsonable(data), separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-KEEP_SYMBOL_META = ("kind", "public", "exported", "component_id", "project_id")
+#: Node fields the web UI never reads (identity keys and change fingerprints are for diffing only).
+_NODE_INTERNAL = ("key", "fingerprint")
+_META_INTERNAL = ("semantic_fingerprint", "qualified_name_authoritative")
+_UNCHANGED_SYMBOL_FIELDS = ("id", "name", "qualified_name", "component_type", "category", "parent_id", "path", "status",
+                            "tags", "start_line", "language")
+
+
+def _trim_node(n: dict[str, Any]) -> dict[str, Any]:
+    for k in _NODE_INTERNAL:
+        n.pop(k, None)
+    if n.get("analyzers") == [n.get("analyzer")]:
+        n.pop("analyzers")
+    md = n.get("metadata")
+    if md:
+        for k in _META_INTERNAL:
+            md.pop(k, None)
+    return n
 
 
 def compact_snapshot(data: dict[str, Any]) -> dict[str, Any]:
-    """Shrink a serialized snapshot for embedding: call evidence keeps locations, not excerpts."""
+    """Shrink a serialized snapshot for the web UI (live responses and embedded reports).
+
+    Containment edges duplicate ``parent_id`` and are replaced by a count;
+    internal identity fields are dropped; call evidence keeps its first
+    location (no excerpt) and dependency evidence at most 20 sites.
+    """
+    data["containment_edge_count"] = len(data.pop("containment_edges", []) or [])
+    for key in ("components", "modules", "symbols"):
+        for n in data.get(key, []):
+            _trim_node(n)
     for e in data.get("call_edges", []):
         evs = e.get("evidence") or []
-        e["evidence"] = [{k: v for k, v in ev.items() if k != "excerpt"} for ev in evs[:3]]
+        e["evidence"] = [{k: v for k, v in ev.items() if k != "excerpt"} for ev in evs[:1]]
     for e in data.get("dependency_edges", []):
         if len(e.get("evidence") or []) > 20:
             e["evidence"] = e["evidence"][:20]
     return data
 
 
-def compact_diff(data: dict[str, Any]) -> dict[str, Any]:
-    """Shrink a serialized diff for embedding.
+def flow_node_ids(flow: dict[str, Any] | None) -> set[str]:
+    """Node IDs an affected-flow result refers to (they must survive diff compaction)."""
+    if not flow:
+        return set()
+    ids = {n.get("id") for n in flow.get("nodes", [])}
+    for group in ("entry_points", "tests"):
+        for item in flow.get(group, []) or []:
+            ids.update(item.get("path") or [])
+            ids.add(item.get("id"))
+    ids.discard(None)
+    return ids  # type: ignore[return-value]
 
-    Unchanged call edges are dropped, unchanged edges lose their evidence (the UI
-    falls back to the working-tree snapshot, which carries the same edge IDs),
-    unchanged symbols keep only structural fields, and the long lists of
-    unchanged IDs are replaced by counts.
+
+def compact_diff(data: dict[str, Any], keep: set[str] | None = None) -> dict[str, Any]:
+    """Shrink a serialized diff for the web UI.
+
+    Unchanged call edges are dropped, and unchanged edges lose their evidence
+    (the UI falls back to the working-tree snapshot, which carries the same edge
+    IDs). Unchanged symbols are kept only when something still refers to them:
+    a remaining edge, a changed or kept descendant, or ``keep`` (e.g. the
+    affected-flow nodes). The long lists of unchanged IDs become counts.
     """
     edges = []
     for e in data.get("edges", []):
@@ -83,58 +124,103 @@ def compact_diff(data: dict[str, Any]) -> dict[str, Any]:
             e = {k: v for k, v in e.items() if k not in ("evidence", "base_evidence")}
         edges.append(e)
     data["edges"] = edges
-    nodes = []
+    by_id = {n["id"]: n for n in data.get("nodes", [])}
+    needed = set(keep or ())
+    for e in edges:
+        needed.add(e.get("source_id"))
+        needed.add(e.get("target_id"))
+    needed.update(nid for nid, n in by_id.items() if n.get("status") != "unchanged")
+    stack = list(needed)
+    while stack:  # ancestors of everything kept (methods need their class and module)
+        n = by_id.get(stack.pop())
+        parent = n.get("parent_id") if n else None
+        if parent and parent not in needed:
+            needed.add(parent)
+            stack.append(parent)
+    nodes, omitted = [], 0
     for n in data.get("nodes", []):
         if n.get("status") == "unchanged" and n.get("category") == "symbol":
-            n = {k: v for k, v in n.items() if k in ("id", "name", "qualified_name", "component_type", "category",
-                                                     "parent_id", "path", "status", "tags", "start_line", "language")}
-        nodes.append(n)
+            if n["id"] not in needed:
+                omitted += 1
+                continue
+            n = {k: v for k, v in n.items() if k in _UNCHANGED_SYMBOL_FIELDS}
+        nodes.append(_trim_node(n))
     data["nodes"] = nodes
+    data["omitted_unchanged_symbols"] = omitted
     data["unchanged_nodes"] = len(data.get("unchanged_nodes", []))
     data["unchanged_edges"] = len(data.get("unchanged_edges", []))
     data["compact"] = True
     return data
 
 
-def comparison_payload(repo: Repository, comp: Comparison, index: int = 0, compact: bool = False) -> dict[str, Any]:
+def compact_diff_of(diff: RepositoryDiff, keep: set[str] | None = None) -> dict[str, Any]:
+    """:func:`compact_diff` of a diff object, without serializing what compaction would drop anyway."""
+    edges = {eid: c for eid, c in diff.edges.items() if not (c.status == "unchanged" and c.edge.relationship == "calls")}
+    needed = set(keep or ())
+    for c in edges.values():
+        needed.add(c.edge.source_id)
+        needed.add(c.edge.target_id)
+    needed.update(nid for nid, c in diff.nodes.items() if c.status != "unchanged")
+    stack = list(needed)
+    while stack:
+        c = diff.nodes.get(stack.pop())
+        parent = c.node.parent_id if c else None
+        if parent and parent not in needed:
+            needed.add(parent)
+            stack.append(parent)
+    nodes = {nid: c for nid, c in diff.nodes.items()
+             if c.status != "unchanged" or c.node.category != "symbol" or nid in needed}
+    slim = dataclasses.replace(diff, nodes=nodes, edges=edges)
+    data = compact_diff(slim.to_dict(), needed)
+    data["omitted_unchanged_symbols"] = len(diff.nodes) - len(nodes)
+    return data
+
+
+def comparison_payload(repo: Repository, comp: Comparison, index: int = 0, compact: bool = False,
+                       keep: set[str] | None = None) -> dict[str, Any]:
     base = repo.snapshot(comp.base, comp.base_label)
     target = repo.snapshot(comp.target, comp.target_label)
-    from ..diff import diff_snapshots
-
-    diff = diff_snapshots(base, target)
-    data = diff.to_dict()
+    diff = repo.diff(base, target)
     return {"id": f"c{index}", "label": comp.label, "mode": comp.mode, "base": comp.base, "target": comp.target,
             "base_label": comp.base_label, "target_label": comp.target_label,
-            "diff": compact_diff(data) if compact else data, "_revisions": (base.revision_id, target.revision_id)}
+            "diff": compact_diff_of(diff, keep) if compact else diff.to_dict(),
+            "_revisions": (base.revision_id, target.revision_id)}
 
 
 def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = None, include_activity: bool = True,
-                 mode: str = "static", include_reviews: bool | None = None, max_reviews: int = 6) -> dict[str, Any]:
+                 mode: str = "static", include_reviews: bool | None = None, max_reviews: int = 6,
+                 embed_snapshot: bool = True) -> dict[str, Any]:
+    """Everything the web UI needs.  With ``embed_snapshot=False`` the (large) snapshot is left out, for callers
+    that serialize and cache it separately."""
     snapshot = repo.snapshot("WORKTREE", "working tree")
     if include_reviews is None:
         include_reviews = mode == "static"  # the live app fetches reviews on demand
     comps = comparisons if comparisons is not None else repo.default_comparisons()
-    payloads = []
     errors = []
-    for i, comp in enumerate(comps):
-        try:
-            payloads.append(comparison_payload(repo, comp, i, compact=mode == "static"))
-        except Exception as exc:  # a bad revision must not prevent the report
-            errors.append({"severity": "error", "code": "comparison-failed", "message": f"{comp.label}: {exc}",
-                           "analyzer": "report"})
     activity = None
     if include_activity:
         try:
             activity = observe(repo, record=False)
-            diff = activity.get("diff")
-            if isinstance(diff, RepositoryDiff):
-                for p in payloads:
-                    if p["_revisions"] == (diff.base.revision_id, diff.target.revision_id):
-                        activity["diff_ref"] = p["id"]
-                        activity.pop("diff")
-                        break
         except Exception as exc:
             errors.append({"severity": "error", "code": "activity-failed", "message": str(exc), "analyzer": "report"})
+    keep = flow_node_ids(activity.get("flow")) if activity else set()
+    payloads = []
+    for i, comp in enumerate(comps):
+        try:
+            payloads.append(comparison_payload(repo, comp, i, compact=mode == "static", keep=keep))
+        except Exception as exc:  # a bad revision must not prevent the report
+            errors.append({"severity": "error", "code": "comparison-failed", "message": f"{comp.label}: {exc}",
+                           "analyzer": "report"})
+    if activity is not None:
+        diff = activity.get("diff")
+        if isinstance(diff, RepositoryDiff):
+            for p in payloads:
+                if p["_revisions"] == (diff.base.revision_id, diff.target.revision_id):
+                    activity["diff_ref"] = p["id"]
+                    activity.pop("diff")
+                    break
+            else:
+                activity["diff"] = compact_diff_of(diff, keep) if mode == "static" else diff.to_dict()
     for p in payloads:
         p.pop("_revisions", None)
     reviews = []
@@ -154,20 +240,13 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
             except Exception as exc:  # a broken target must not prevent the report
                 errors.append({"severity": "error", "code": "review-failed", "message": f"{t.label}: {exc}",
                                "analyzer": "report"})
-    snap = snapshot.to_dict()
-    if mode == "static":
-        compact_snapshot(snap)
-        if activity is not None and isinstance(activity.get("diff"), RepositoryDiff):
-            activity["diff"] = compact_diff(activity["diff"].to_dict())
-    snap["diagnostics"] = snap["diagnostics"] + errors
-    return {
+    bundle: dict[str, Any] = {
         "schema_version": snapshot.schema_version,
         "mode": mode,
         "tool_version": __version__,
         "generated_at": utcnow(),
         "profile": snapshot.profile,
         "revisions": _revisions(repo),
-        "snapshot": snap,
         "comparisons": payloads,
         "activity": to_jsonable(activity) if activity is not None else None,
         "reviews": reviews,
@@ -175,7 +254,13 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "theme": theme(),
         "config": {"sources": repo.config.sources, "max_diagram_nodes": repo.config.max_diagram_nodes,
                    "external_dependencies": repo.config.external_dependencies},
+        "errors": errors,
     }
+    if embed_snapshot:
+        snap = compact_snapshot(snapshot.to_dict())
+        snap["diagnostics"] = snap["diagnostics"] + errors
+        bundle["snapshot"] = snap
+    return bundle
 
 
 def _revisions(repo: Repository) -> dict[str, Any]:
@@ -190,8 +275,17 @@ def _inline_script(js: str) -> str:
     return re.sub(r"</(script)", r"<\\/\1", js, flags=re.IGNORECASE)
 
 
+def _home_to_tilde(text: str) -> str:
+    """Shareable reports should not disclose the author's home directory (user name, layout)."""
+    home = os.path.expanduser("~").rstrip("/\\")
+    if len(home) < 2:
+        return text
+    needle = json.dumps(home, ensure_ascii=False)[1:-1]
+    return re.sub(re.escape(needle) + r"(?=[\\/\"])", "~", text)
+
+
 def encode_data(bundle: dict[str, Any], compress: bool | None = None) -> tuple[str, str]:
-    text = dumps(bundle)
+    text = _home_to_tilde(dumps(bundle))
     if compress is None:
         compress = len(text) > COMPRESS_THRESHOLD
     if compress:

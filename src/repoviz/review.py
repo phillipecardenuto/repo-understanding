@@ -234,6 +234,8 @@ class Finding:
         return {k: v for k, v in asdict(self).items() if v not in (None, "", [])}
 
 
+MAX_CHECKED_LINE = 1000
+
 # (kind, category, severity, title, pattern, scope) where scope is "any" | "code" (non-test) | "test"
 _LINE_CHECKS: list[tuple[str, str, str, str, re.Pattern[str], str]] = [
     ("debugger", "hygiene", "medium", "Debugger statement left in code",
@@ -317,10 +319,10 @@ def _text(source: TreeSource, path: str, limit: int = 2_000_000) -> tuple[str | 
 
 
 def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy | None = None,
-                 max_file_diff_lines: int = 800, max_total_diff_lines: int = 40000) -> dict[str, Any]:
+                 max_file_diff_lines: int = 800, max_total_diff_lines: int = 40000,
+                 sources: tuple[Any, Any] | None = None) -> dict[str, Any]:
     scope = scope or scope_for(repo, target)
-    base_src = repo.open_source(target.base)
-    target_src = repo.open_source(target.target)
+    base_src, target_src = sources or (repo.open_source(target.base), repo.open_source(target.target))
     base_snap = repo.snapshot_of(base_src, repo._label(target.base))
     target_snap = repo.snapshot_of(target_src, repo._label(target.target))
     diff = repo.diff(base_snap, target_snap)
@@ -388,7 +390,9 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         scope_status = scope.classify(path)
         entry: dict[str, Any] = {"path": path, "status": status, "language": lang, "component_id": cid,
                                  "component": cname, "module_id": node.id if node else None, "is_test": is_test,
-                                 "scope": scope_status, "binary": b_bin or a_bin, "config_kind": classify.config_kind(path)}
+                                 "scope": scope_status, "binary": b_bin or a_bin, "config_kind": classify.config_kind(path),
+                                 # identifies this state of the file, so "reviewed" marks expire when it changes again
+                                 "version": (target_src.content_hash(path) or f"-{base_src.content_hash(path)}")[:16]}
         added_lines: list[tuple[int, str]] = []
         removed_lines: list[tuple[int, str]] = []
         if before is None or after is None:
@@ -552,6 +556,10 @@ def _line_findings(add: Any, path: str, component: str | None, is_test: bool, ad
         s = _symbol_at(symbols, line)
         return s.qualified_name if s else None
 
+    # Heuristics look at the start of each line only: minified or generated lines can
+    # be megabytes long, and backtracking patterns must stay linear on them.
+    added = [(n, t[:MAX_CHECKED_LINE]) for n, t in added]
+    removed = [(n, t[:MAX_CHECKED_LINE]) for n, t in removed]
     for kind, category, severity, title, pattern, where in _LINE_CHECKS:
         if (where == "test" and not is_test) or (where == "code" and is_test):
             continue

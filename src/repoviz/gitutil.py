@@ -5,11 +5,19 @@ status`` does not refresh (i.e. rewrite) the index, and user-supplied revisions
 are validated with ``--end-of-options`` so they can never be interpreted as
 options.  No command used here writes to the repository, the index, or the
 object database.
+
+A repository's own ``.git/config`` can make read-only commands run programs:
+``core.fsmonitor`` (``status``, ``ls-files``), clean/smudge filter drivers
+(``status`` re-reads files whose stat data changed), GPG for
+``log.showSignature`` and submodule recursion.  An archive of someone else's
+repository therefore must not be trusted, so every command overrides these
+settings (see :meth:`Git.safe_config`).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -125,18 +133,50 @@ class CommitInfo:
                 "date": self.date, "refs": self.refs}
 
 
+#: Settings that make otherwise read-only commands execute programs, and their safe values.
+SAFE_CONFIG = (
+    "core.fsmonitor=false",
+    "core.quotepath=off",
+    "color.ui=false",
+    "log.showSignature=false",
+    "core.hooksPath=/dev/null",
+)
+_FILTER_KEYS = re.compile(r"^filter\.(.+)\.(clean|smudge|process|required)$", re.IGNORECASE)
+
+
+def _filter_overrides(root: Path) -> list[str]:
+    """``-c`` arguments that disable every filter driver configured for ``root``."""
+    try:
+        out = subprocess.run(["git", "-c", "core.fsmonitor=false", "config", "-z", "--get-regexp", r"^filter\."],
+                             cwd=root, env=_env(), capture_output=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    names = set()
+    for record in out.split(b"\0"):
+        key = record.split(b"\n", 1)[0].decode("utf-8", errors="replace")
+        m = _FILTER_KEYS.match(key)
+        if m and "=" not in m.group(1):
+            names.add(m.group(1))
+    args: list[str] = []
+    for name in sorted(names):
+        args += ["-c", f"filter.{name}.clean=", "-c", f"filter.{name}.smudge=", "-c", f"filter.{name}.process=",
+                 "-c", f"filter.{name}.required=false"]
+    return args
+
+
 class BlobReader:
     """Reads blobs through one long-lived ``git cat-file --batch`` process."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, config: list[str] | None = None) -> None:
         self._root = root
+        self._config = config or []
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
 
     def _ensure(self) -> subprocess.Popen[bytes]:
         if self._proc is None or self._proc.poll() is not None:
             self._proc = subprocess.Popen(
-                ["git", "cat-file", "--batch"], cwd=self._root, env=_env(),
+                ["git", *self._config, "cat-file", "--batch"], cwd=self._root, env=_env(),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
         return self._proc
@@ -178,12 +218,13 @@ class Git:
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
-        self._blobs = BlobReader(self.root)
+        self.safe_config = [a for kv in SAFE_CONFIG for a in ("-c", kv)] + _filter_overrides(self.root)
+        self._blobs = BlobReader(self.root, self.safe_config)
 
     # -- low level ---------------------------------------------------------
 
     def run_bytes(self, *args: str, check: bool = True, input: bytes | None = None, timeout: float = 120) -> bytes:
-        cmd = ["git", "-c", "core.quotepath=off", "-c", "color.ui=false", *args]
+        cmd = ["git", *self.safe_config, *args]
         try:
             proc = subprocess.run(cmd, cwd=self.root, env=_env(), input=input, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
@@ -346,7 +387,9 @@ class Git:
     # -- status / diff ---------------------------------------------------------------
 
     def status(self) -> list[StatusEntry]:
-        out = self.run_bytes("status", "--porcelain=v2", "-z", "--untracked-files=all", "--renames")
+        # Submodules are compared by commit only: "dirty" never runs git inside them.
+        out = self.run_bytes("status", "--porcelain=v2", "-z", "--untracked-files=all", "--renames",
+                             "--ignore-submodules=dirty")
         records = out.split(b"\0")
         entries: list[StatusEntry] = []
         i = 0
@@ -372,7 +415,7 @@ class Git:
         return entries
 
     def changed_paths(self, a: str, b: str | None = None) -> list[str]:
-        args = ["diff", "--name-only", "-z", "--no-renames", a]
+        args = ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", a]
         if b:
             args.append(b)
         out = self.run_bytes(*args, check=False)

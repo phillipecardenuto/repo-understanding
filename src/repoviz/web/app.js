@@ -48,8 +48,10 @@
   };
   function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
   function download(name, text, type) {
-    const a = h("a", { href: URL.createObjectURL(new Blob([text], { type })), download: name });
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = h("a", { href: url, download: name });
     document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
   // ------------------------------------------------------------- data layer
@@ -86,11 +88,18 @@
   }
 
   class LiveApi {
-    constructor() { this.live = true; }
-    async get(path) {
-      const r = await fetch(path, { headers: { Accept: "application/json" } });
+    constructor() { this.live = true; this.etags = new Map(); }
+    /* Every API call carries X-Repoviz (the server rejects requests without it: cross-site pages cannot add it).
+       With `cached`, the last response is reused when the server answers 304 Not Modified. */
+    async get(path, cached) {
+      const headers = { Accept: "application/json", "X-Repoviz": "1" };
+      const prev = cached && this.etags.get(path);
+      if (prev) headers["If-None-Match"] = prev.etag;
+      const r = await fetch(path, { headers, cache: "no-store" });
+      if (r.status === 304 && prev) return Object.assign({}, prev.body, { unchanged: true, generated_at: new Date().toISOString() });
       const body = await r.json().catch(() => ({ error: r.statusText }));
       if (!r.ok) throw new Error(body.error || r.statusText);
+      if (cached && r.headers.get("ETag")) this.etags.set(path, { etag: r.headers.get("ETag"), body });
       return body;
     }
     async post(path, payload) {
@@ -101,7 +110,7 @@
     }
     bundle() { return this.get("/api/bundle"); }
     comparison(params) { return this.get("/api/diff?" + new URLSearchParams(params).toString()); }
-    activity() { return this.get("/api/activity"); }
+    activity() { return this.get("/api/activity", true); }
     snapshot(rev) { return this.get("/api/snapshot?" + new URLSearchParams({ rev }).toString()); }
     sessionStart(label) { return this.post("/api/session/start", { label }); }
     sessionEnd() { return this.post("/api/session/end", {}); }
@@ -810,12 +819,16 @@
     return st && st !== "unchanged" ? pill(`${w.icon || ""} ${st}`.trim(), st) : null;
   }
 
+  /* Sortable table.  opts: sort/dir (initial order), state (object that keeps the user's sort across redraws),
+     onRow, isSelected(row), onOrder(sortedRows), limit (rows rendered before a "show more" row), empty, scroll. */
   function table(columns, rows, opts) {
     opts = opts || {};
-    let sortKey = opts.sort || null, dir = opts.dir || 1;
+    const st = opts.state || {};
+    let sortKey = st.sort !== undefined ? st.sort : opts.sort || null, dir = st.dir || opts.dir || 1;
+    let limit = opts.limit || 300;
     const tbody = h("tbody");
     const heads = columns.map((c) => {
-      const th = h("th", { scope: "col", tabindex: "0", text: c.label, onclick: () => { dir = sortKey === c.key ? -dir : 1; sortKey = c.key; draw(); } });
+      const th = h("th", { scope: "col", tabindex: "0", text: c.label, onclick: () => { dir = sortKey === c.key ? -dir : 1; sortKey = c.key; st.sort = sortKey; st.dir = dir; draw(); } });
       th.addEventListener("keydown", (ev) => { if (ev.key === "Enter") th.click(); });
       return th;
     });
@@ -828,9 +841,12 @@
         data.sort((a, b) => { const x = val(a), y = val(b); return (x > y ? 1 : x < y ? -1 : 0) * dir; });
       }
       heads.forEach((th, i) => th.setAttribute("aria-sort", columns[i].key === sortKey ? (dir > 0 ? "ascending" : "descending") : "none"));
+      if (opts.onOrder) opts.onOrder(data);
       if (!data.length) tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "empty", text: opts.empty || "Nothing here." })));
-      for (const r of data.slice(0, opts.limit || 2000)) {
-        const tr = h("tr", { tabindex: opts.onRow ? "0" : null }, columns.map((c) => {
+      let selected = null;
+      for (const r of data.slice(0, limit)) {
+        const isSel = opts.isSelected && opts.isSelected(r);
+        const tr = h("tr", { tabindex: opts.onRow ? "0" : null, class: isSel ? "selected" : null }, columns.map((c) => {
           const v = c.render ? c.render(r) : r[c.key];
           return h("td", { class: c.num ? "num" : null }, v === undefined || v === null ? "" : v);
         }));
@@ -839,11 +855,21 @@
           tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter") tr.click(); });
         }
         tbody.appendChild(tr);
+        if (isSel) selected = tr;
       }
-      if (data.length > (opts.limit || 2000)) tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "muted", text: `${data.length - opts.limit} more rows not shown` })));
+      if (data.length > limit) {
+        tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "muted" }, `${data.length - limit} more rows `,
+          h("button", { class: "btn small", onclick: () => { limit += 500; draw(); } }, "Show more"))));
+      }
+      // Keep the selected row visible inside the scrolling table without moving the page.
+      if (selected && wrap.classList.contains("scroll")) requestAnimationFrame(() => {
+        const top = selected.offsetTop, bottom = top + selected.offsetHeight;
+        if (top < wrap.scrollTop + 30 || bottom > wrap.scrollTop + wrap.clientHeight) wrap.scrollTop = Math.max(0, top - wrap.clientHeight / 3);
+      });
     };
+    const wrap = h("div", { class: "table-wrap " + (opts.scroll === false ? "" : "scroll") }, h("table", null, h("thead", null, h("tr", null, heads)), tbody));
     draw();
-    return h("div", { class: "table-wrap " + (opts.scroll === false ? "" : "scroll") }, h("table", null, h("thead", null, h("tr", null, heads)), tbody));
+    return wrap;
   }
 
   // --------------------------------------------------------- details panel
@@ -1332,6 +1358,11 @@
       const app = this.app;
       let data;
       try { data = await app.api.activity(); } catch (err) { this.headEl.innerHTML = ""; this.headEl.appendChild(h("div", { class: "notice error", text: "Activity unavailable: " + err.message })); return; }
+      if (data.unchanged && this.data && quiet) {  // 304: nothing changed on disk, only refresh the timestamp
+        this.data.generated_at = data.generated_at;
+        if (this.updatedEl) this.updatedEl.textContent = `updated ${fmtTime(data.generated_at)}`;
+        return;
+      }
       const signature = JSON.stringify((data.events || []).map((e) => [e.path, e.last_observed, e.git_status])) + (data.baseline && data.baseline.label);
       const changed = signature !== this.signature;
       this.signature = signature;
@@ -1340,6 +1371,11 @@
       this.drawHead();
       if (!quiet || changed) await this.draw();
     }
+    /* Run a session action, then reload; errors are shown instead of being lost. */
+    async act(fn) {
+      try { await fn(); } catch (err) { this.headEl.prepend(h("div", { class: "notice error", text: err.message })); return; }
+      await this.load();
+    }
     drawHead() {
       const app = this.app, d = this.data, b = d.baseline || {};
       this.headEl.innerHTML = "";
@@ -1347,17 +1383,18 @@
         b.kind === "session" ? pill("work session", "cycle") : pill(b.kind || ""), " ",
         h("span", { class: "muted", text: b.kind === "session" ? `baseline commit ${(b.session.baseline_head || "").slice(0, 10)} · ${b.session.dirty_files_at_start} file(s) were already dirty` : "uncommitted changes relative to HEAD" }))));
       if (app.api.live) {
-        const label = h("input", { placeholder: "session label (optional)", size: 18, "aria-label": "Session label" });
+        // Kept across redraws so a label being typed survives the auto-refresh.
+        const label = this.labelInput || (this.labelInput = h("input", { placeholder: "session label (optional)", size: 18, "aria-label": "Session label" }));
         this.headEl.append(h("div", { class: "field" }, h("span", { text: "Work session" }), h("div", { class: "group" }, label,
           h("button", { class: "btn", title: "Record the current working tree as the baseline; everything changed afterwards (including commits) is attributed to the session.",
-            onclick: async () => { await app.api.sessionStart(label.value); await this.load(); } }, b.kind === "session" ? "Restart session" : "Start session"),
-          b.kind === "session" ? h("button", { class: "btn", onclick: async () => { await app.api.sessionEnd(); await this.load(); } }, "End session") : null)),
+            onclick: () => this.act(async () => { await app.api.sessionStart(label.value); label.value = ""; }) }, b.kind === "session" ? "Restart session" : "Start session"),
+          b.kind === "session" ? h("button", { class: "btn", onclick: () => this.act(() => app.api.sessionEnd()) }, "End session") : null)),
         h("div", { class: "field" }, h("span", { text: "Live" }), h("div", { class: "group" },
           checkbox(`auto-refresh (${d.poll_seconds || 3}s)`, this.opts.auto, (c) => { this.opts.auto = c; this.save(); if (c) this.schedule(); else clearTimeout(this.timer); }),
           h("button", { class: "btn small", onclick: () => this.load() }, "Refresh now"))));
       }
-      this.headEl.append(h("button", { class: "btn small", onclick: () => this.app.show("review") }, "Review this work →"),
-        h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` }));
+      this.updatedEl = h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` });
+      this.headEl.append(h("button", { class: "btn small", onclick: () => this.app.show("review") }, "Review this work →"), this.updatedEl);
     }
     async draw() {
       const d = this.data, s = d.summary || {};
@@ -1404,7 +1441,8 @@
   function globRegex(pattern, subtree) {
     const key = pattern + (subtree ? "\u0001" : "");
     if (globCache.has(key)) return globCache.get(key);
-    let pat = pattern.trim();
+    // "**/**/x" means "**/x"; collapsing keeps the regex linear (mirror of globs.py).
+    let pat = pattern.trim().slice(0, 1000).replace(/(?:\*\*\/)+(?:\*\*(?=\/|$))?/g, (m) => (m.endsWith("/") ? "**/" : "**"));
     const dirOnly = pat.endsWith("/");
     pat = pat.startsWith("/") ? pat.replace(/^\/+|\/+$/g, "") : pat.replace(/\/+$/, "");
     const anchored = pattern.trim().startsWith("/") || pat.includes("/");
@@ -1491,12 +1529,17 @@
     return L.join("\n") + "\n";
   }
 
+  const fileByPathOf = (report, path) => report.files.find((x) => x.path === path);
+
   class ReviewTab {
     constructor(app, root) {
       this.app = app; this.root = root;
       this.opts = Object.assign({ targetId: null, severity: "all", category: "all", mapLevel: "auto", minSeverity: "medium", includeFindings: true },
         storage.get("rv.review", {}));
       this.selectedComponent = null; this.selectedFile = null;
+      this.filesTable = { sort: "findings", dir: 1 };
+      this.findingsShown = 200;
+      this.reviewed = {};
     }
     save() { storage.set("rv.review", this.opts); }
     get repoKey() { return this.app.bundle.snapshot.repository_id; }
@@ -1505,7 +1548,10 @@
       this.targetSelect = h("select", { "aria-label": "Review target", onchange: () => { this.opts.targetId = this.targetSelect.value; this.save(); this.load(); } });
       this.allowedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/billing/**, tests/billing/**", "aria-label": "Allowed paths" });
       this.protectedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/auth/**, migrations/**", "aria-label": "Protected paths" });
-      this.statusEl = h("span", { class: "muted" });
+      for (const input of [this.allowedInput, this.protectedInput]) {
+        input.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); this.applyScopeFromInputs(); } });
+      }
+      this.statusEl = h("span", { class: "muted", role: "status" });
       const bar = h("div", { class: "toolbar" },
         field("Review (feature / wave)", this.targetSelect));
       if (app.api.live) {
@@ -1513,15 +1559,20 @@
         const head = h("input", { size: 12, placeholder: "target e.g. WORKTREE", list: "rv-revs-review", "aria-label": "Target revision" });
         const rev = app.bundle.revisions || {};
         const dl = h("datalist", { id: "rv-revs-review" }, ["WORKTREE", "INDEX", "HEAD", ...(rev.branches || []), ...(rev.tags || [])].map((v) => h("option", { value: v })));
+        const go = () => { if (!base.value && !head.value) return; this.custom = { base: base.value.trim() || "HEAD", target: head.value.trim() || "WORKTREE" }; this.load(); };
+        for (const input of [base, head]) input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
         bar.append(h("div", { class: "field" }, h("span", { text: "…or any range" }), h("div", { class: "group" }, base, head, dl,
-          h("button", { class: "btn", onclick: () => { if (!base.value && !head.value) return; this.custom = { base: base.value.trim() || "HEAD", target: head.value.trim() || "WORKTREE" }; this.load(); } }, "Review"))));
+          h("button", { class: "btn", onclick: go }, "Review"),
+          h("button", { class: "btn", title: "Re-analyze the repository and keep your place (also happens when you come back to this tab)", onclick: () => this.refresh() }, "↻ Refresh"))));
       }
-      this.saveScopeBtn = h("button", { class: "btn small", hidden: true, onclick: () => this.saveScopeToSession() }, "Save to session");
+      this.saveScopeBtn = h("button", { class: "btn small", hidden: true, title: "Store this scope with the work session (used by the CLI too)", onclick: () => this.saveScopeToSession() }, "Save to session");
+      this.resetScopeBtn = h("button", { class: "btn small", title: "Discard your edits and use the scope from the configuration / session", onclick: () => this.resetScope() }, "Reset");
       bar.append(
         field("Allowed to change (globs)", this.allowedInput),
         field("Must not touch (globs)", this.protectedInput),
         h("div", { class: "field" }, h("span", { text: "Scope" }), h("div", { class: "group" },
-          h("button", { class: "btn small primary", onclick: () => this.applyScopeFromInputs() }, "Apply scope"), this.saveScopeBtn)),
+          h("button", { class: "btn small primary", title: "Re-evaluate every file against these patterns (Ctrl+Enter)", onclick: () => this.applyScopeFromInputs() }, "Apply scope"),
+          this.resetScopeBtn, this.saveScopeBtn)),
         this.statusEl);
       this.statsEl = h("div", { class: "stats" });
       this.map = new Diagram({ title: "Where the agent went", legend: () => this.legend(), emptyText: "Nothing was changed." });
@@ -1529,69 +1580,123 @@
       this.filesEl = h("div", { class: "card" });
       this.fileEl = h("div", { class: "card file-card" }, h("div", { class: "details-empty", text: "Select a file to see its key changes and diff." }));
       this.feedbackEl = h("div", { class: "card" });
+      this.emptyEl = h("div", { class: "card empty-state", hidden: true });
       this.mapToggle = h("label", { class: "check" }, "Map by ", select([["auto", "auto"], ["components", "components"], ["packages", "packages / directories"], ["files", "files"]],
         this.opts.mapLevel, (v) => { this.opts.mapLevel = v; this.save(); this.drawMap(); }));
-      this.root.append(bar, this.statsEl,
+      this.bodyEl = h("div", null, this.statsEl,
         h("div", { class: "split review-split" }, h("div", null, this.map.el, h("div", { class: "group", style: { margin: "6px 2px 12px" } }, this.mapToggle,
           h("span", { class: "muted", text: "Click a component to list its files; click a file to open its change card." }))), this.findingsEl),
-        h("h2", { class: "section-title", text: "Changed modules" }),
+        h("h2", { class: "section-title" }, "Changed modules ", h("span", { class: "faint small", text: "keys: j / k next / previous file · m mark reviewed" })),
         h("div", { class: "split files-split" }, this.filesEl, this.fileEl),
         h("h2", { class: "section-title", text: "Feedback for the agent" }), this.feedbackEl);
+      this.root.append(bar, this.emptyEl, this.bodyEl);
+      document.addEventListener("keydown", (ev) => this.onKey(ev));
       await this.loadTargets();
       await this.load();
     }
+    /* In the live app, coming back to this tab picks up new work (the server answers from cache when nothing changed). */
+    activate() { if (this.app.api.live && this.report && !this.loading && Date.now() - (this.loadedAt || 0) > 2000) this.refresh(true); }
+    async refresh(quiet) { await this.loadTargets(); await this.load(true, !quiet); }
     async loadTargets() {
       const app = this.app;
       try { this.targets = app.api.live ? await app.api.get("/api/review/targets") : (app.bundle.review_targets || []); }
       catch (err) { this.targets = []; this.statusEl.textContent = "Could not list review targets: " + err.message; }
       this.targetSelect.innerHTML = "";
-      for (const t of this.targets) this.targetSelect.appendChild(h("option", { value: t.id }, t.label));
+      for (const t of this.targets) this.targetSelect.appendChild(h("option", { value: t.id, title: t.description || "" }, t.label));
       if (!this.targets.some((t) => t.id === this.opts.targetId)) this.opts.targetId = this.targets.length ? this.targets[0].id : null;
       if (this.opts.targetId) this.targetSelect.value = this.opts.targetId;
     }
-    async load() {
+    /* `keep` reloads the same review and keeps the selection; `announce` reports "up to date" when nothing changed. */
+    async load(keep, announce) {
       const app = this.app;
-      this.statusEl.innerHTML = ""; this.statusEl.append(h("span", { class: "spinner" }), " reviewing…");
+      const prev = keep && this.report ? { file: this.selectedFile, comp: this.selectedComponent, dir: this.selectedDir, sig: this.signature } : null;
+      if (!prev) { this.statusEl.innerHTML = ""; this.statusEl.append(h("span", { class: "spinner" }), " reviewing…"); }
+      this.loading = true;
+      let r;
       try {
         if (app.api.live) {
-          const params = this.custom ? { base: this.custom.base, target: this.custom.target } : { id: this.opts.targetId || "" };
+          const params = prev && this.lastParams ? this.lastParams
+            : this.custom ? { base: this.custom.base, target: this.custom.target } : { id: this.opts.targetId || "" };
           this.custom = null;
-          this.report = await app.api.get("/api/review?" + new URLSearchParams(params).toString());
+          r = await app.api.get("/api/review?" + new URLSearchParams(params).toString());
+          this.lastParams = params;
         } else {
-          this.report = (app.bundle.reviews || []).find((r) => r.target.id === this.opts.targetId) || (app.bundle.reviews || [])[0];
-          if (!this.report) throw new Error("this report contains no review (there were no changes to review)");
+          r = (app.bundle.reviews || []).find((x) => x.target.id === this.opts.targetId) || (app.bundle.reviews || [])[0];
         }
       } catch (err) {
+        this.loading = false;
+        if (prev) { this.statusEl.textContent = "Refresh failed: " + err.message; return; }
         this.statusEl.textContent = "";
-        this.statsEl.innerHTML = "";
-        this.findingsEl.innerHTML = ""; this.findingsEl.appendChild(h("div", { class: "notice error", text: "Review failed: " + err.message }));
+        this.showEmpty("Review failed", err.message, true);
         return;
       }
-      const r = this.report;
+      this.loading = false;
+      this.loadedAt = Date.now();
+      if (!r) { this.statusEl.textContent = ""; this.showEmpty("No review in this report", "There were no changes to review when this report was generated."); return; }
+      const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope)].join("|");
+      if (prev && prev.sig === sig) { if (announce) this.statusEl.textContent = `${r.base.label} → ${r.head.label} · up to date`; return; }
+      this.report = r;
+      this.signature = sig;
       this.key = r.target.key;
+      this.serverScope = { allowed: r.scope.allowed || [], protected: r.scope.protected || [] };
       this.serverFindings = r.findings.filter((f) => f.kind !== "protected-touched" && f.kind !== "out-of-scope");
       const local = storage.get(`rv.notes.${this.repoKey}.${this.key}`, null);
       this.notes = app.api.live ? (r.notes || []) : (local || r.notes || []);
-      const scope = storage.get(`rv.scope.${this.repoKey}.${this.key}`, null) || { allowed: r.scope.allowed || [], protected: r.scope.protected || [] };
+      this.reviewed = storage.get(`rv.reviewed.${this.repoKey}.${this.key}`, {}) || {};
+      const scope = storage.get(`rv.scope.${this.repoKey}.${this.key}`, null) || this.serverScope;
       this.allowedInput.value = scope.allowed.join(", ");
       this.protectedInput.value = scope.protected.join(", ");
       this.saveScopeBtn.hidden = !(app.api.live && r.target.session_id);
-      this.statusEl.textContent = `${r.base.label} → ${r.head.label}`;
-      this.selectedComponent = null;
-      this.selectedDir = null;
-      this.selectedFile = null;
+      this.statusEl.textContent = `${r.base.label} → ${r.head.label}` + (prev ? " · updated" : "");
+      const paths = new Set(r.files.map((f) => f.path));
+      this.selectedComponent = prev && r.components.some((c) => c.id === prev.comp) ? prev.comp : null;
+      this.selectedDir = prev ? prev.dir : null;
+      this.selectedFile = prev && paths.has(prev.file) ? prev.file : null;
+      this.findingsShown = 200;
       this.applyScope(scope, false);
+      if (!r.files.length) {
+        this.showEmpty(`Nothing to review in “${r.target.label}”`, `No file differs between ${r.base.label} and ${r.head.label}.`);
+        return;
+      }
+      this.emptyEl.hidden = true; this.bodyEl.hidden = false;
       this.draw();
+    }
+    /* A friendly explanation instead of empty diagrams. */
+    showEmpty(title, detail, isError) {
+      this.bodyEl.hidden = true;
+      this.emptyEl.hidden = false;
+      this.emptyEl.innerHTML = "";
+      const cmd = (text) => h("code", { class: "mono", text });
+      this.emptyEl.append(h("h3", { text: title }), h("div", { class: isError ? "notice error" : "muted", text: detail }),
+        h("h4", { text: "To review what a coding agent does" }),
+        h("ol", null,
+          h("li", null, "Before the agent starts, record a baseline: ", cmd('repoviz session start --label "wave 1" --allow "src/feature/**" --protect "src/auth/**"'),
+            this.app.api.live ? " (or “Start session” in the Activity tab)." : "."),
+          h("li", null, "Let the agent work (committing or not), then come back here: the current session is reviewed by default."),
+          h("li", null, "Without a session, pick “uncommitted changes”, “branch” or “last commit” above", this.app.api.live ? ", or type any range (e.g. main … WORKTREE)." : ".")),
+        this.app.api.live ? h("button", { class: "btn", onclick: () => this.app.show("activity") }, "Open the Activity tab") : null);
     }
     applyScopeFromInputs() {
       const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value) };
       storage.set(`rv.scope.${this.repoKey}.${this.key}`, scope);
       this.applyScope(scope, true);
+      this.statusEl.textContent = `Scope applied: ${this.report.files.filter((f) => f.scope === "protected").length} protected, ${this.report.files.filter((f) => f.scope === "out-of-scope").length} out of scope.`;
+    }
+    resetScope() {
+      if (!this.report) return;
+      try { localStorage.removeItem(`rv.scope.${this.repoKey}.${this.key}`); } catch (e) { /* ignore */ }
+      this.allowedInput.value = this.serverScope.allowed.join(", ");
+      this.protectedInput.value = this.serverScope.protected.join(", ");
+      this.applyScope(this.serverScope, true);
+      this.statusEl.textContent = "Scope reset to the configured / session scope.";
     }
     async saveScopeToSession() {
       const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value) };
-      try { await this.app.api.post("/api/session/scope", Object.assign({ session_id: this.report.target.session_id }, scope)); this.statusEl.textContent = "Scope saved to the session."; }
-      catch (err) { this.statusEl.textContent = "Could not save scope: " + err.message; }
+      try {
+        await this.app.api.post("/api/session/scope", Object.assign({ session_id: this.report.target.session_id }, scope));
+        this.serverScope = scope;
+        this.statusEl.textContent = "Scope saved to the session.";
+      } catch (err) { this.statusEl.textContent = "Could not save scope: " + err.message; }
     }
     /* Re-evaluate scope for every file and regenerate the scope findings (the rest come from the server). */
     applyScope(scope, redraw) {
@@ -1612,16 +1717,53 @@
       r.findings = findings;
       this.findingsByPath = new Map();
       for (const f of findings) if (f.path) push(this.findingsByPath, f.path, f);
+      const fileByPath = new Map(r.files.map((f) => [f.path, f]));
       for (const c of r.components) {
         c.scope = {};
         c.findings = { high: 0, medium: 0, low: 0, info: 0 };
         for (const path of c.paths) {
-          const file = r.files.find((x) => x.path === path);
+          const file = fileByPath.get(path);
           if (file) c.scope[file.scope] = (c.scope[file.scope] || 0) + 1;
           for (const f of this.findingsByPath.get(path) || []) c.findings[f.severity]++;
         }
       }
       if (redraw) this.draw();
+    }
+    // -- reviewed files & keyboard navigation ------------------------------------------------
+    isReviewed(f) { return !!f && this.reviewed[f.path] === (f.version || "1"); }
+    setReviewed(path, on, advance) {
+      const f = this.report.files.find((x) => x.path === path);
+      if (!f) return;
+      if (on) this.reviewed[path] = f.version || "1"; else delete this.reviewed[path];
+      storage.set(`rv.reviewed.${this.repoKey}.${this.key}`, this.reviewed);
+      if (advance) {
+        const order = this.navOrder();
+        const next = order.slice(order.indexOf(path) + 1).concat(order).find((p) => !this.isReviewed(fileByPathOf(this.report, p)));
+        if (next && next !== path) { this.selectFile(next); this.drawProgress(); return; }
+      }
+      this.drawFiles(); this.drawFile(path); this.drawProgress();
+    }
+    navOrder() { return this.fileOrder && this.fileOrder.length ? this.fileOrder : this.report.files.map((f) => f.path); }
+    stepFile(delta) {
+      const order = this.navOrder();
+      if (!order.length) return;
+      let i = order.indexOf(this.selectedFile);
+      i = i < 0 ? (delta > 0 ? 0 : order.length - 1) : Math.min(order.length - 1, Math.max(0, i + delta));
+      this.selectFile(order[i]);
+    }
+    onKey(ev) {
+      if (this.app.currentTab !== "review" || !this.report || !this.bodyEl || this.bodyEl.hidden) return;
+      if (ev.ctrlKey || ev.metaKey || ev.altKey || (ev.target && ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable], .viewport"))) return;
+      if (ev.key === "j") { ev.preventDefault(); this.stepFile(1); }
+      else if (ev.key === "k") { ev.preventDefault(); this.stepFile(-1); }
+      else if (ev.key === "m" && this.selectedFile) { ev.preventDefault(); const f = this.report.files.find((x) => x.path === this.selectedFile); this.setReviewed(this.selectedFile, !this.isReviewed(f), !this.isReviewed(f)); }
+    }
+    drawProgress() {
+      if (!this.progressEl) return;
+      const total = this.report.files.length, done = this.report.files.filter((f) => this.isReviewed(f)).length;
+      this.progressEl.innerHTML = "";
+      this.progressEl.append(h("progress", { max: total, value: done, "aria-label": "Files reviewed" }), ` ${done} / ${total} reviewed`);
+      if (this.reviewedStat) this.reviewedStat.querySelector(".value").textContent = `${done} / ${total}`;
     }
     legend() {
       const sw = (cls, text) => h("span", { class: "item" }, h("span", { class: "swatch " + cls }), text);
@@ -1631,6 +1773,11 @@
         h("span", { class: "item" }, h("span", { class: "line added" }), "+ new dependency"), h("span", { class: "item" }, h("span", { class: "line cycle" }), "⟲ new cycle")];
     }
     draw() {
+      this.drawStats();
+      this.drawMap();
+      this.drawPanels();
+    }
+    drawStats() {
       const r = this.report, s = r.summary;
       const counts = { high: 0, medium: 0, low: 0 };
       for (const f of r.findings) if (counts[f.severity] !== undefined) counts[f.severity]++;
@@ -1640,13 +1787,23 @@
         stat(`+${s.lines_added} / −${s.lines_removed}`, "lines"), stat(s.symbols_changed, "functions / classes changed"),
         stat(prot, "protected files touched", prot ? "removed" : ""), stat(out, "files outside scope", out ? "modified" : ""),
         stat(counts.high, "high-severity signals", counts.high ? "removed" : ""), stat(counts.medium, "medium signals", counts.medium ? "modified" : ""),
-        stat(s.tests_changed, "test files changed"), stat(this.notes.length, "review notes"));
-      this.drawMap();
+        stat(s.tests_changed, "test files changed"), stat(this.notes.length, "review notes"),
+        this.reviewedStat = stat("", "files reviewed"));
+    }
+    /* Everything except the map (which does not depend on notes), so triage does not re-layout the diagram. */
+    drawPanels(focusLine) {
       this.drawFindings();
       this.drawFiles();
-      if (this.selectedFile) this.drawFile(this.selectedFile);
-      else { this.fileEl.innerHTML = ""; this.fileEl.appendChild(h("div", { class: "details-empty", text: "Select a file to see its key changes and diff." })); }
+      if (this.selectedFile) this.drawFile(this.selectedFile, focusLine);
+      else { this.fileEl.innerHTML = ""; this.fileEl.appendChild(h("div", { class: "details-empty", text: "Select a file to see its key changes and diff (or press j)." })); }
       this.drawFeedback();
+      this.drawProgress();
+    }
+    /* Most relevant first: scope violations, then high-severity signals, then size of the change. */
+    fileRank(f) {
+      const fl = this.findingsByPath.get(f.path) || [];
+      return (f.scope === "protected" ? 1e9 : f.scope === "out-of-scope" ? 1e8 : 0) + fl.filter((x) => x.severity === "high").length * 1e6
+        + fl.length * 1e4 + (f.lines_added || 0) + (f.lines_removed || 0);
     }
     mapView() {
       const r = this.report;
@@ -1680,9 +1837,19 @@
         }
         return view;
       }
+      const limit = this.mapLimit();
+      const ranked = r.files.slice().sort((a, b) => this.fileRank(b) - this.fileRank(a));
+      const shown = ranked.slice(0, limit), hiddenByComp = new Map();
+      for (const f of ranked.slice(limit)) push(hiddenByComp, f.component_id || "root", f);
       const ids = new Map();
-      r.files.forEach((f, i) => ids.set(f.path, "rf_" + i));
-      for (const f of r.files) {
+      shown.forEach((f, i) => ids.set(f.path, "rf_" + i));
+      for (const [cid, fs] of hiddenByComp) {
+        const sg = "sg_rc_" + cid;
+        view.subgraphs.set(sg, fs[0].component || "(repository root)");
+        view.nodes.push({ id: "rm_" + cid, label: `… ${plural(fs.length, "more file")}`, sublabel: "smaller changes · click to list", status: "modified", kind: "module", shape: "round", parent: sg, icon: "", ref: cid });
+      }
+      view.truncated = ranked.length - shown.length;
+      for (const f of shown) {
         const sg = "sg_rc_" + (f.component_id || "root");
         view.subgraphs.set(sg, f.component || "(repository root)");
         const fl = this.findingsByPath.get(f.path) || [];
@@ -1691,16 +1858,19 @@
         view.nodes.push({ id: ids.get(f.path), label: f.path.split("/").pop(), sublabel: [`+${f.lines_added ?? "?"} −${f.lines_removed ?? "?"}`, f.symbols.length ? plural(f.symbols.length, "symbol") : "", high ? `❗${high} high` : "", f.scope === "protected" ? "⛔ protected" : f.scope === "out-of-scope" ? "⚠ out of scope" : ""].filter(Boolean).join(" · "),
           status: f.status, kind: "module", shape: "box", parent: sg, icon: f.is_test ? "🧪" : "📄", extraClass: extra, ref: f.path });
       }
-      const extraNodes = new Map();
-      for (const f of r.files) {
+      const extraNodes = new Map(), extraByLabel = new Map();
+      for (const f of shown) {
         for (const d of f.dependencies || []) {
           if (d.stdlib || d.status === "unchanged") continue;
           let target = d.target_path && ids.get(d.target_path);
           if (!target) {
-            target = "rx_" + (extraNodes.size + 1);
-            const existing = [...extraNodes.entries()].find(([, v]) => v.label === d.target);
-            if (existing) target = existing[0];
-            else extraNodes.set(target, { id: target, label: d.target, sublabel: d.external ? "external" : "unchanged", status: "unchanged", kind: d.external ? "external" : "module", shape: d.external ? "stadium" : "round", icon: d.external ? "🔗" : "" });
+            target = extraByLabel.get(d.target);
+            if (!target) {
+              if (extraNodes.size >= limit) continue;
+              target = "rx_" + (extraNodes.size + 1);
+              extraByLabel.set(d.target, target);
+              extraNodes.set(target, { id: target, label: d.target, sublabel: d.external ? "external" : "unchanged", status: "unchanged", kind: d.external ? "external" : "module", shape: d.external ? "stadium" : "round", icon: d.external ? "🔗" : "" });
+            }
           }
           view.edges.push({ source: ids.get(f.path), target, status: d.status, cycle: d.new_cycle, cycleIntroduced: d.new_cycle, count: 1, relationship: d.relationship });
         }
@@ -1721,6 +1891,15 @@
         g.added += f.lines_added || 0; g.removed += f.lines_removed || 0;
         for (const x of this.findingsByPath.get(f.path) || []) g.findings[x.severity]++;
       }
+      const limit = this.mapLimit();
+      const rankedGroups = [...groups.values()].sort((a, b) => Math.max(...b.files.map((f) => this.fileRank(f))) - Math.max(...a.files.map((f) => this.fileRank(f))));
+      const hidden = rankedGroups.slice(limit);
+      for (const g of hidden) groups.delete(g.dir);
+      if (hidden.length) {
+        const n = hidden.reduce((a, g) => a + g.files.length, 0);
+        view.nodes.push({ id: "rp_more", label: `… ${plural(hidden.length, "more directory")}`.replace("directorys", "directories"), sublabel: `${plural(n, "file")} with smaller changes`, status: "modified", kind: "package", shape: "round", icon: "📁", ref: null });
+        view.truncated = hidden.length;
+      }
       for (const g of groups.values()) {
         const st = g.files.every((f) => f.status === "added") ? "added" : g.files.every((f) => f.status === "removed") ? "removed" : "modified";
         view.nodes.push({ id: g.id, label: g.dir || "(repository root)", sublabel: [`${plural(g.files.length, "file")} · +${g.added} −${g.removed}`, ...flags(g.scope, g.findings)].join(" · "),
@@ -1728,6 +1907,7 @@
       }
       const extra = new Map(), agg = new Map();
       for (const f of r.files) {
+        if (!groups.has(dirOf(f.path))) continue;
         const src = groups.get(dirOf(f.path)).id;
         for (const d of f.dependencies || []) {
           if (d.stdlib || d.status === "unchanged") continue;
@@ -1735,6 +1915,7 @@
           if (d.target_path && groups.has(dirOf(d.target_path))) tgt = groups.get(dirOf(d.target_path)).id;
           else {
             const label = d.external ? d.target : (d.target_path ? dirOf(d.target_path) || "(root)" : d.target);
+            if (!extra.has(label) && extra.size >= limit) continue;
             if (!extra.has(label)) extra.set(label, { id: "rx_" + extra.size, label, sublabel: d.external ? "external" : "not changed", status: "unchanged",
               kind: d.external ? "external" : "package", shape: d.external ? "stadium" : "round", icon: d.external ? "🔗" : "📁" });
             tgt = extra.get(label).id;
@@ -1758,12 +1939,15 @@
           const n = view.nodes.find((x) => x.id === id);
           if (!n) return;
           if (id.startsWith("rf_")) this.selectFile(n.ref);
+          else if (id.startsWith("rm_")) { this.selectedComponent = n.ref; this.selectedDir = null; this.drawFiles(); this.filesEl.scrollIntoView({ behavior: "smooth", block: "start" }); }
+          else if (id === "rp_more") return;
           else if (id.startsWith("rc_")) { this.selectedComponent = this.report.components.some((c) => c.id === n.ref) ? n.ref : null; this.selectedDir = null; this.drawFiles(); }
           else if (id.startsWith("rp_")) { this.selectedDir = n.ref; this.selectedComponent = null; this.drawFiles(); }
         },
         onCluster: (id) => { this.selectedComponent = id.replace(/^rc_/, ""); this.drawFiles(); },
       });
     }
+    mapLimit() { return Math.max(20, Math.min(((this.app.bundle.config || {}).max_diagram_nodes) || 120, 150)); }
     noteFor(findingId) { return this.notes.find((n) => n.finding_id === findingId); }
     drawFindings() {
       const r = this.report, o = this.opts;
@@ -1777,7 +1961,7 @@
           select([["all", "all categories"], ...cats.map((c) => [c, c])], o.category, (v) => { o.category = v; this.save(); this.drawFindings(); })));
       if (!list.length) { this.findingsEl.appendChild(h("div", { class: "empty", text: "No signals with these filters. 🎉" })); return; }
       const ul = h("ul", { class: "plain findings" });
-      for (const f of list) {
+      for (const f of list.slice(0, this.findingsShown)) {
         const note = this.noteFor(f.id);
         const li = h("li", { class: "finding" + (note ? " triaged" : "") },
           h("div", { class: "finding-head" }, sevPill(f.severity), pill(f.category), " ", h("b", { text: f.title }),
@@ -1794,6 +1978,10 @@
         ul.appendChild(li);
       }
       this.findingsEl.appendChild(ul);
+      if (list.length > this.findingsShown) {
+        this.findingsEl.appendChild(h("div", { class: "group" }, h("span", { class: "muted", text: `${list.length - this.findingsShown} more signals` }),
+          h("button", { class: "btn small", onclick: () => { this.findingsShown += 200; this.drawFindings(); } }, "Show more")));
+      }
     }
     drawFiles() {
       const r = this.report;
@@ -1803,9 +1991,13 @@
       const comp = this.selectedComponent ? r.components.find((c) => c.id === this.selectedComponent) : null;
       const scopeName = comp ? comp.name : (this.selectedDir !== null && this.selectedDir !== undefined ? (this.selectedDir || "(repository root)") : null);
       this.filesEl.innerHTML = "";
+      this.progressEl = h("div", { class: "progress muted" });
       this.filesEl.append(h("h3", null, scopeName ? `Files in ${scopeName} (${rows.length})` : `All changed files (${rows.length})`, " ",
         scopeName ? h("button", { class: "btn small", onclick: () => { this.selectedComponent = null; this.selectedDir = null; this.drawFiles(); } }, "Show all") : null),
+        this.progressEl,
         table([
+          { key: "reviewed", label: "✓", sort: (f) => (this.isReviewed(f) ? 1 : 0), render: (f) => this.isReviewed(f) ? h("span", { class: "reviewed-mark", title: "reviewed", text: "✓" })
+            : this.reviewed[f.path] ? h("span", { class: "faint", title: "changed since you reviewed it", text: "↻" }) : "" },
           { key: "path", label: "File", render: (f) => h("span", { class: "mono", text: f.path }) },
           { key: "status", label: "Change", render: (f) => statusPill(f.status) || pill("modified", "modified") },
           { key: "scope", label: "Scope", render: (f) => scopePill(f.scope) || h("span", { class: "faint", text: "–" }), sort: (f) => ({ protected: 0, "out-of-scope": 1, unscoped: 2, allowed: 3 })[f.scope] },
@@ -1815,12 +2007,22 @@
             render: (f) => { const fl = this.findingsByPath.get(f.path) || []; const hi = fl.filter((x) => x.severity === "high").length; return fl.length ? [hi ? pill(`${hi} high`, "high") : null, ` ${fl.length}`] : ""; } },
           { key: "tests", label: "Tests", num: true, render: (f) => f.is_test ? "🧪" : String((f.tests_affected || []).length), sort: (f) => (f.tests_affected || []).length },
           { key: "notes", label: "Notes", num: true, render: (f) => { const n = this.notes.filter((x) => x.path === f.path).length; return n ? "💬 " + n : ""; } },
-        ], rows, { onRow: (f) => this.selectFile(f.path), sort: "findings", empty: "No changed files." }));
+        ], rows, { onRow: (f) => this.selectFile(f.path, null, true), state: this.filesTable, isSelected: (f) => f.path === this.selectedFile,
+          onOrder: (data) => { this.fileOrder = data.map((f) => f.path); }, empty: "No changed files." }));
+      this.drawProgress();
     }
-    selectFile(path, line) {
+    selectFile(path, line, fromTable) {
       this.selectedFile = path;
+      const f = this.report.files.find((x) => x.path === path);
+      // Selecting a file outside the current component / directory filter shows all files again.
+      if (f && ((this.selectedComponent && (f.component_id || "root") !== this.selectedComponent) ||
+          (this.selectedDir !== null && this.selectedDir !== undefined && f.path.split("/").slice(0, -1).join("/") !== this.selectedDir))) {
+        this.selectedComponent = null; this.selectedDir = null;
+      }
+      if (!fromTable) this.drawFiles();
       this.drawFile(path, line);
-      this.fileEl.scrollIntoView({ behavior: "smooth", block: "start" });
+      const rect = this.fileEl.getBoundingClientRect();
+      if (rect.top < 0 || rect.top > window.innerHeight * 0.6) this.fileEl.scrollIntoView({ behavior: "smooth", block: "start" });
     }
     drawFile(path, focusLine) {
       const r = this.report, f = r.files.find((x) => x.path === path);
@@ -1829,6 +2031,15 @@
       const fileNotes = this.notes.filter((n) => n.path === f.path);
       const notesByLine = new Map();
       for (const n of fileNotes) if (n.line) push(notesByLine, n.line, n);
+      const order = this.navOrder(), pos = order.indexOf(f.path), done = this.isReviewed(f);
+      this.fileEl.append(h("div", { class: "file-nav group" },
+        h("button", { class: "btn small", disabled: pos <= 0, title: "Previous file (k)", onclick: () => this.stepFile(-1) }, "‹ Prev"),
+        h("span", { class: "muted", text: pos >= 0 ? `${pos + 1} / ${order.length}` : "" }),
+        h("button", { class: "btn small", disabled: pos < 0 || pos >= order.length - 1, title: "Next file (j)", onclick: () => this.stepFile(1) }, "Next ›"),
+        h("span", { style: { flex: "1" } }),
+        done ? h("button", { class: "btn small", title: "Mark as not reviewed (m)", onclick: () => this.setReviewed(f.path, false) }, "✓ Reviewed — undo")
+          : [h("button", { class: "btn small", onclick: () => this.setReviewed(f.path, true) }, "✓ Mark reviewed"),
+            h("button", { class: "btn small primary", title: "Mark reviewed and open the next unreviewed file (m)", onclick: () => this.setReviewed(f.path, true, true) }, "✓ Reviewed & next ›")]));
       this.fileEl.append(h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
         h("div", { class: "muted", text: [f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
         h("div", { class: "group actions" },
@@ -1916,9 +2127,10 @@
       if (note.finding_id) this.notes = this.notes.filter((n) => n.finding_id !== note.finding_id);
       this.notes.push(note);
       this.persistNotes();
-      this.draw();
+      this.drawStats();
+      this.drawPanels(note.path === this.selectedFile ? note.line : null);
     }
-    removeNote(id) { this.notes = this.notes.filter((n) => n.id !== id); this.persistNotes(); this.draw(); }
+    removeNote(id) { this.notes = this.notes.filter((n) => n.id !== id); this.persistNotes(); this.drawStats(); this.drawPanels(); }
     persistNotes() {
       storage.set(`rv.notes.${this.repoKey}.${this.key}`, this.notes);
       if (this.app.api.live) {
@@ -1953,7 +2165,7 @@
           h("span", { class: "muted", text: "at or above" }),
           select([["high", "high"], ["medium", "medium"], ["low", "low"], ["info", "info"]], o.minSeverity, (v) => { o.minSeverity = v; this.save(); this.drawFeedback(); }),
           copyBtn, h("button", { class: "btn", onclick: () => download("review-feedback.md", prompt, "text/markdown") }, "Download .md"),
-          this.notes.length ? h("button", { class: "btn", onclick: () => { if (confirm("Remove all notes for this review?")) { this.notes = []; this.persistNotes(); this.draw(); } } }, "Clear notes") : null),
+          this.notes.length ? h("button", { class: "btn", onclick: () => { if (confirm("Remove all notes for this review?")) { this.notes = []; this.persistNotes(); this.drawStats(); this.drawPanels(); } } }, "Clear notes") : null),
         h("details", { open: true }, h("summary", { class: "muted" }, "Prompt preview"), preview));
       general.appendChild(h("button", { class: "btn small", onclick: (ev) => this.noteForm(general, {}, "missed") }, "✎ General note (e.g. a missed requirement)…"));
     }

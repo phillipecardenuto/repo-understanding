@@ -763,6 +763,13 @@ def parse_go_work(path: str, text: str, exists: Callable[[str], bool]) -> Manife
 # --------------------------------------------------------------------------
 
 
+def _parse_xml(text: str) -> ET.Element:
+    """Parse a build file; entity declarations (entity-expansion bombs, external entities) are refused."""
+    if "<!ENTITY" in text.upper():
+        raise ET.ParseError("XML entity declarations are not supported")
+    return _strip_ns(ET.fromstring(text.encode("utf-8")))
+
+
 def _strip_ns(root: ET.Element) -> ET.Element:
     for el in root.iter():
         if isinstance(el.tag, str) and "}" in el.tag:
@@ -773,7 +780,7 @@ def _strip_ns(root: ET.Element) -> ET.Element:
 def parse_pom(path: str, text: str, exists: Callable[[str], bool]) -> ManifestData:
     md = ManifestData(path=path, kind="maven", ecosystem="maven")
     try:
-        root = _strip_ns(ET.fromstring(text.encode("utf-8")))
+        root = _parse_xml(text)
     except ET.ParseError as exc:
         md.errors.append(f"invalid XML: {exc}")
         return md
@@ -875,7 +882,7 @@ def parse_sln(path: str, text: str, exists: Callable[[str], bool]) -> ManifestDa
 def parse_msbuild_project(path: str, text: str, exists: Callable[[str], bool]) -> ManifestData:
     md = ManifestData(path=path, kind="msbuild-project", ecosystem="dotnet")
     try:
-        root = _strip_ns(ET.fromstring(text.encode("utf-8")))
+        root = _parse_xml(text)
     except ET.ParseError as exc:
         md.errors.append(f"invalid XML: {exc}")
         return md

@@ -17,9 +17,20 @@ import functools
 import re
 
 
+_REPEATED_GLOBSTAR = re.compile(r"(?:\*\*/)+(?:\*\*(?=/|$))?")
+
+
 @functools.lru_cache(maxsize=4096)
 def _compile(pattern: str, subtree: bool = True) -> re.Pattern[str]:
-    pat = pattern.strip()
+    try:
+        return _compile_unsafe(pattern, subtree)
+    except re.error:  # e.g. a malformed character class: match the pattern literally
+        return re.compile("^" + re.escape(pattern.strip().strip("/")) + ("(?:/.*)?" if subtree else "") + "$")
+
+
+def _compile_unsafe(pattern: str, subtree: bool) -> re.Pattern[str]:
+    # "**/**/x" means the same as "**/x"; collapsing it keeps matching linear.
+    pat = _REPEATED_GLOBSTAR.sub(lambda m: "**/" if m.group(0).endswith("/") else "**", pattern.strip()[:1000])
     dir_only = pat.endswith("/")
     pat = pat.strip("/") if pat.startswith("/") else pat.rstrip("/")
     anchored = pattern.strip().startswith("/") or "/" in pat
