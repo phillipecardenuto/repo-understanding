@@ -321,3 +321,59 @@ def test_usual_companions_in_review_and_activity(page, make_repo, tmp_path: Path
     page.click("#tab-activity tbody tr:has-text('app.py')")
     assert "Often changes with" in page.inner_text("#tab-activity")
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def _wave_with_commits(make_repo):
+    repo = make_repo({"app/__init__.py": "", "app/a.py": "A = 0\n", "app/b.py": "B = 0\n", "app/c.py": "C = 0\n"})
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave")
+    repo.write({"app/a.py": "A = 1\n"}).commit("agent: a")
+    repo.write({"app/b.py": "B = 1\nprint('debug')\n"}).commit("agent: b")
+    Path(repo.path, "app/c.py").write_text("C = 1\n")  # uncommitted
+    return repo
+
+
+def test_review_commit_by_commit_in_a_static_report(page, make_repo, tmp_path: Path) -> None:
+    repo = _wave_with_commits(make_repo)
+    report = tmp_path / "commits.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    rows = page.locator("#tab-review .commits-card tbody tr")
+    assert rows.count() == 3 and "Uncommitted changes" in rows.nth(2).inner_text()
+    files = lambda: page.evaluate("repoviz.app.tabs.review.report.files.map(f => f.path).sort()")  # noqa: E731
+    assert files() == ["app/a.py", "app/b.py", "app/c.py"]
+    rows.nth(1).click()
+    assert files() == ["app/b.py"]
+    banner = page.inner_text("#tab-review .commit-banner")
+    assert "Showing commit 2 of 3" in banner and "agent: b" in banner and "repoviz serve" in banner
+    page.keyboard.press("]")  # next: the uncommitted work
+    assert files() == ["app/c.py"]
+    page.click("#tab-review .commit-banner >> text=Show all")
+    assert files() == ["app/a.py", "app/b.py", "app/c.py"] and page.locator("#tab-review .commit-banner").is_hidden()
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_review_commit_by_commit_in_the_live_app(page, make_repo) -> None:
+    repo = _wave_with_commits(make_repo)
+    Path(repo.path, "app/b.py").write_text("B = 1\n")  # the debug print is gone by the end of the wave
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/")
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        kinds = lambda: page.evaluate("repoviz.app.tabs.review.report.findings.map(f => f.kind)")  # noqa: E731
+        assert "debug-output" not in kinds()
+        page.click("#tab-review .commits-card tbody tr >> nth=1")
+        page.wait_for_function("() => repoviz.app.tabs.review.report.commit && repoviz.app.tabs.review.report.commit.subject === 'agent: b'", timeout=30_000)
+        assert page.evaluate("repoviz.app.tabs.review.report.files.map(f => f.path)") == ["app/b.py"]
+        assert "debug-output" in kinds()  # this step added a print that a later edit removed
+        assert "alone" in page.inner_text("#tab-review .commit-banner")
+        # A note taken on the commit belongs to the wave's feedback.
+        page.click("#tab-review .findings-card li.finding:has-text('Debug output added') >> text=→ Send to agent")
+        page.click("#tab-review .commit-banner >> text=Show all")
+        page.wait_for_function("() => !repoviz.app.tabs.review.commit", timeout=30_000)
+        assert "Debug output added" in page.inner_text("#tab-review pre.prompt")
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()

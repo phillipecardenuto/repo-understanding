@@ -206,7 +206,7 @@ Server endpoints:
 | `GET /api/snapshot?rev=` | any snapshot |
 | `GET /api/activity` | activity report with diff and affected flow |
 | `GET /api/revisions`, `/api/profile`, `/api/health` | metadata |
-| `GET /api/review/targets`, `/api/review?id=\|base=&target=`, `/api/review/notes?key=` | AI review |
+| `GET /api/review/targets`, `/api/review?id=\|base=&target=[&commit=SHA\|WORKTREE]`, `/api/review/notes?key=` | AI review (`commit`: one step of the range, reviewed alone) |
 | `POST /api/session/start`, `/api/session/end`, `/api/session/scope`, `/api/review/notes` | state changes |
 
 Every `/api/*` request must carry `X-Repoviz: 1`. Browsers can't add that

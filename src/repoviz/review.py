@@ -378,18 +378,26 @@ def _submodule_entry(ch: Any, files: list[dict[str, Any]], scope: ScopePolicy, c
 
 def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy | None = None,
                  max_file_diff_lines: int = 800, max_total_diff_lines: int = 40000,
-                 sources: tuple[Any, Any] | None = None) -> dict[str, Any]:
+                 sources: tuple[Any, Any] | None = None, commit: str | None = None) -> dict[str, Any]:
+    """Review ``target``; with ``commit`` (a commit of the target's range, or ``"WORKTREE"`` for its uncommitted
+    work), review that step alone while keeping the target's scope and notes."""
     scope = scope or scope_for(repo, target)
-    base_src, target_src = sources or (repo.open_source(target.base), repo.open_source(target.target))
-    base_snap = repo.snapshot_of(base_src, repo._label(target.base))
-    target_snap = repo.snapshot_of(target_src, repo._label(target.target))
+    crange = _commit_range(repo, target)
+    exclude: set[str] = set()
+    if commit:
+        base_src, target_src, base_label, target_label, exclude, commit = _commit_sources(repo, target, commit, crange)
+    else:
+        base_src, target_src = sources or (repo.open_source(target.base), repo.open_source(target.target))
+        base_label, target_label = repo._label(target.base), repo._label(target.target)
+    base_snap = repo.snapshot_of(base_src, base_label)
+    target_snap = repo.snapshot_of(target_src, target_label)
     diff = repo.diff(base_snap, target_snap)
     disabled = set(repo.config.review_disabled_checks)
     b_idx, t_idx = base_snap.node_index(), target_snap.node_index()
     nodes = diff.nodes
 
     changed_paths = sorted(p for p in set(base_src.files()) | set(target_src.files())
-                           if base_src.content_hash(p) != target_src.content_hash(p))
+                           if p not in exclude and base_src.content_hash(p) != target_src.content_hash(p))
     # Work inside submodules: pointer moves, and files changed inside them (committed or not).
     sub_changes = (submodule_changes(repo.root, base_src, target_src)
                    if base_src.submodules or target_src.submodules else [])
@@ -559,6 +567,11 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     coupling = _coupling_for(repo, target)
     if coupling is not None:
         _coupling_findings(add, files, coupling, changed_set, target_src)
+    session = repo.state.load_session(target.session_id) if target.session_id else None
+    commits = _attach_commits(repo, target, crange, files, sub_changes, target_src, changed_set, session,
+                              add if not commit else None, commit)
+    if exclude:  # e.g. files already modified when the session started: not this step's work
+        findings = [f for f in findings if f.path not in exclude]
 
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.category, f.path or "", f.line or 0))
     per_file: dict[str, list[str]] = {}
@@ -567,6 +580,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             per_file.setdefault(f.path, []).append(f.id)
     for entry in files:
         entry["findings"] = per_file.get(entry["path"], [])
+    for item in commits["items"]:
+        item["signals"] = sum(len(per_file.get(f["path"], [])) for f in item["files"])
 
     components = _component_summary(files, findings, nodes, t_idx, b_idx)
     comp_edges = _component_edges(diff, {c["id"] for c in components})
@@ -584,7 +599,6 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "findings": severity_counts,
         "new_dependencies": len(diff.new_dependencies), "cycles_introduced": len(diff.introduced_cycles),
     }
-    session = repo.state.load_session(target.session_id) if target.session_id else None
     return {
         "target": target.to_dict(),
         "session": session.to_dict() if session else None,
@@ -600,8 +614,178 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "new_dependencies": diff.new_dependencies,
         "introduced_cycles": [c.to_dict() for c in diff.introduced_cycles],
         "history": coupling.summary() if coupling is not None else None,
+        "commits": commits,
+        "commit": next((c for c in commits["items"] if c["sha"] == commit), None) if commit else None,
         "verdicts": VERDICTS,
     }
+
+
+# --------------------------------------------------------------------------- commits of a review
+
+#: The pseudo-commit that stands for uncommitted work at the end of a review range.
+UNCOMMITTED = "WORKTREE"
+MAX_COMMITS = 200
+
+
+@dataclass
+class _CommitRange:
+    base: str | None = None  # commit sha, or None for "all history up to head"
+    head: str | None = None
+    uncommitted: str | None = None  # label of the uncommitted pseudo-commit when the target includes such work
+    listing: dict[str, Any] | None = None  # from Git.commits_in_range
+    note: str | None = None
+    session: Any = None
+
+
+def _commit_range(repo: "Repository", target: ReviewTarget) -> _CommitRange:
+    """The commits between the two ends of a review target, and whether uncommitted work follows them."""
+    cr = _CommitRange()
+    git = repo.git
+    if git is None or git.head() is None:
+        return cr
+
+    def sha_of(rev: str) -> str | None:
+        out = git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}")
+        return out.strip() if out else None
+
+    session = repo.state.load_session(target.session_id) if target.session_id else None
+    cr.session = session
+    base = target.base
+    if base.startswith("SESSION"):
+        cr.base = session.baseline_head if session else None
+        if cr.base is None:
+            return cr
+    elif base.startswith("merge-base:"):
+        try:
+            cr.base = git.merge_base(base.split(":", 2)[1], "HEAD")
+        except Exception:
+            return cr
+    elif base in ("INDEX", "WORKTREE", "WORKTREE-TRACKED"):
+        return cr
+    elif base != "EMPTY":
+        cr.base = sha_of(base)
+        if cr.base is None:
+            return cr
+    tgt = target.target
+    if tgt in ("WORKTREE", "WORKTREE-TRACKED", "INDEX"):
+        cr.head = git.head()
+        cr.uncommitted = "Staged changes" if tgt == "INDEX" else "Uncommitted changes"
+    elif tgt.startswith("SESSION-END"):
+        cr.head = session.end_head if session else None
+        if session is not None and (session.end_overrides or session.end_submodule_overrides):
+            cr.uncommitted = "Uncommitted at the end of the session"
+    else:
+        cr.head = sha_of(tgt)
+    if cr.head and cr.head != cr.base:
+        cr.listing = git.commits_in_range(cr.base, cr.head, MAX_COMMITS)
+        if cr.listing is None:
+            cr.note = "The commits of this range are not available (shallow clone or missing objects)."
+    return cr
+
+
+def _commit_sources(repo: "Repository", target: ReviewTarget, commit: str,
+                    cr: _CommitRange) -> tuple[Any, Any, str, str, set[str], str]:
+    """Sources for reviewing one commit of the range (or its uncommitted work) on its own."""
+    git = repo.git
+    if git is None:
+        raise ValueError("commits need a Git repository")
+    if commit == UNCOMMITTED:
+        if not cr.head or not cr.uncommitted:
+            raise ValueError("this review has no uncommitted work")
+        exclude: set[str] = set()
+        session = cr.session
+        if session is not None and session.overrides and target.base.startswith("SESSION"):
+            # Files already modified when the session started, and not changed since, are not the agent's work.
+            start, now = repo.open_source(target.base), repo.open_source(target.target)
+            exclude = {p for p in session.overrides if start.content_hash(p) == now.content_hash(p)}
+        return (repo.open_source(cr.head), repo.open_source(target.target), f"HEAD ({cr.head[:8]})",
+                repo._label(target.target), exclude, UNCOMMITTED)
+    if not re.fullmatch(r"[0-9a-fA-F]{4,40}", commit):
+        raise ValueError("commit must be a commit id")
+    out = git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{commit}^{{commit}}")
+    sha = out.strip() if out else None
+    listed = {c["sha"] for c in (cr.listing or {}).get("commits", [])}
+    if sha is None or (listed and sha not in listed):
+        raise ValueError(f"commit {commit} is not part of this review")
+    parent = git.try_run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{sha}^1^{{commit}}")
+    base = repo.open_source(parent.strip()) if parent else repo.open_source("EMPTY")
+    return base, repo.open_source(sha), f"{sha[:8]}^", sha[:8], set(), sha
+
+
+def _attach_commits(repo: "Repository", target: ReviewTarget, cr: _CommitRange, files: list[dict[str, Any]],
+                    sub_changes: list[Any], target_src: Any, changed: set[str], session: Any, add: Any,
+                    commit: str | None) -> dict[str, Any]:
+    """The review's commits (oldest first, then uncommitted work), and which commits touched each file.
+
+    With ``add`` (whole-range reviews), files that commits changed and later changed back are signalled."""
+    import datetime as _dt
+
+    from .activity import _count_lines
+
+    items: list[dict[str, Any]] = []
+    for c in (cr.listing or {}).get("commits", []):
+        items.append({"sha": c["sha"], "short": c["sha"][:8], "subject": c["subject"][:200], "author": c["author"],
+                      "time": _dt.datetime.fromtimestamp(c["time"], _dt.timezone.utc).isoformat(timespec="seconds"),
+                      "parents": c["parents"], "files": c["files"]})
+    touched: dict[str, list[str]] = {}
+    for c in items:
+        for f in c["files"]:
+            touched.setdefault(f["path"], []).append(c["sha"])
+    sub_of = {p: ch for ch in sub_changes for p, _b, _a in ch.files}
+    uncommitted: list[dict[str, Any]] = []
+    # Reviewing one commit: its files say nothing about the range's uncommitted work, so that entry is left out.
+    if cr.uncommitted and cr.head and commit in (None, UNCOMMITTED):
+        head_src = repo.open_source(cr.head)
+        head_subs = head_src.submodule_commits()
+        target_subs = target_src.submodule_commits()
+        for entry in files:
+            path = entry["path"]
+            ch = sub_of.get(path)
+            if entry.get("kind") == "submodule":
+                dirty = head_subs.get(path) != target_subs.get(path) or bool((entry.get("submodule") or {}).get("dirty"))
+                before = after = None
+            elif ch is not None:
+                dirty = path[len(ch.path) + 1:] in set(ch.dirty)
+                before = after = None
+            else:
+                dirty = head_src.content_hash(path) != target_src.content_hash(path)
+                before, after = (head_src.read_bytes(path), target_src.read_bytes(path)) if dirty else (None, None)
+            if dirty:
+                added, removed = _count_lines(before, after) if (before is not None or after is not None) \
+                    else (entry.get("lines_added"), entry.get("lines_removed"))
+                status = "A" if before is None and after is not None else "D" if after is None and before is not None \
+                    else "M"
+                uncommitted.append({"path": path, "status": status, "added": added, "removed": removed})
+    for entry in files:
+        path = entry["path"]
+        ch = sub_of.get(path)
+        shas = list(touched.get(path, [])) or (list(touched.get(ch.path, [])) if ch is not None else [])
+        if any(u["path"] == path for u in uncommitted):
+            shas.append(UNCOMMITTED)
+        entry["commits"] = [commit] if commit else shas
+    if uncommitted:
+        items.append({"sha": UNCOMMITTED, "short": "", "subject": cr.uncommitted, "author": "", "time": None,
+                      "parents": [cr.head], "files": uncommitted, "uncommitted": True})
+    in_review = {e["path"] for e in files}
+    for c in items:
+        for f in c["files"]:
+            f["in_review"] = f["path"] in in_review
+    # Changed by the range's commits, yet identical at both ends: the agent went back and forth.
+    if add is not None and cr.base is not None:
+        skip = set(session.overrides) if session is not None else set()
+        subjects = {c["sha"]: c["subject"] for c in items}
+        for path, shas in sorted(touched.items()):
+            if path in changed or path in skip or any(path.startswith(p + "/") for p in (target_src.submodules or ())):
+                continue
+            listed = "; ".join(f"{sha[:8]} {subjects[sha][:60]}" for sha in shas[:3])
+            add(Finding("reverted-within-wave", "hygiene", "info", "Changed, then changed back",
+                        f"{path} was changed by {len(shas)} commit(s) ({listed}) but ends up as it started.", path,
+                        suggestion="Check the back-and-forth was intended (for example an experiment the agent "
+                                   "undid)."), key=path)
+    listing = cr.listing or {}
+    return {"items": items, "total": int(listing.get("total", 0)), "shown": len(listing.get("commits", [])),
+            "merges": int(listing.get("merges", 0)), "note": cr.note,
+            "base": cr.base, "head": cr.head}
 
 
 def _python_params(source: Any, path: str | None, name: str, line: int | None) -> list[str] | None:
@@ -1136,10 +1320,16 @@ def _note_lines(n: int, note: dict[str, Any], finding: dict[str, Any] | None) ->
     return out
 
 
-def format_review_text(report: dict[str, Any]) -> str:
+def _commit_title(c: dict[str, Any]) -> str:
+    return c["subject"] if c.get("uncommitted") else f"{c['short']} {c['subject']}"
+
+
+def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
     s = report["summary"]
     t = report["target"]
-    out = [f"Review: {t['label']}", f"  {report['base']['label']} → {report['head']['label']}",
+    one = report.get("commit")
+    out = [f"Review: {t['label']}" + (f" · commit {_commit_title(one)}" if one else ""),
+           f"  {report['base']['label']} → {report['head']['label']}",
            f"  {s['files']} file(s) in {s['components']} component(s), +{s['lines_added']} −{s['lines_removed']} lines, "
            f"{s['symbols_changed']} symbol(s) changed",
            "  findings: " + ", ".join(f"{v} {k}" for k, v in s["findings"].items() if v) if any(s["findings"].values())
@@ -1159,6 +1349,30 @@ def format_review_text(report: dict[str, Any]) -> str:
             flags.append(f"{c['findings']['high']} high")
         out.append(f"  {c['name']:<40} {c['files']:>3} files  +{c['lines_added']} −{c['lines_removed']}"
                    + (f"  [{', '.join(flags)}]" if flags else ""))
+    commits = report.get("commits") or {}
+    items = commits.get("items") or []
+    if items and not one and (len(items) > 1 or not items[0].get("uncommitted")):
+        hidden = commits.get("total", 0) - commits.get("shown", 0)
+        out.append(f"\nCommits ({len(items)}, oldest first"
+                   + (f"; {hidden} earlier not shown" if hidden > 0 else "")
+                   + (f"; {commits['merges']} merge commit(s) not listed" if commits.get("merges") else "") + "):")
+        by_path: dict[str, list[dict[str, Any]]] = {}
+        for f in report["findings"]:
+            if f.get("path"):
+                by_path.setdefault(f["path"], []).append(f)
+        for c in items:
+            added = sum(f.get("added") or 0 for f in c["files"])
+            removed = sum(f.get("removed") or 0 for f in c["files"])
+            out.append(f"  {_commit_title(c)[:60]:<60} {len(c['files']):>3} file(s) +{added} −{removed}"
+                       + (f"  {c.get('signals', 0)} signal(s)" if c.get("signals") else ""))
+            if by_commit:
+                for f in c["files"]:
+                    out.append(f"      {f['status']} {f['path']}" + ("" if f.get("in_review", True) else
+                                                                     "  (unchanged overall)"))
+                    for x in by_path.get(f["path"], []):
+                        out.append(f"          [{x['severity']:<6}] {x['title']}")
+    if commits.get("note"):
+        out.append(f"\nnote: {commits['note']}")
     if report["findings"]:
         out.append("\nFindings:")
         for f in report["findings"]:

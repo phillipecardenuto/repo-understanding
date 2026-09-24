@@ -193,13 +193,15 @@ class AppState:
             target = resolve_target(self.repo, query.get("id") or None, query.get("base") or None,
                                     query.get("target") or None)
             scope = scope_for(self.repo, target)
+            commit = (query.get("commit") or "").strip() or None  # one step of the range, reviewed on its own
             sources = (self.repo.open_source(target.base), self.repo.open_source(target.target))
             key = (target.key, target.base, target.target, sources[0].revision_id, sources[1].revision_id,
-                   tuple(scope.allowed), tuple(scope.protected), self.repo.config.fingerprint())
+                   tuple(scope.allowed), tuple(scope.protected), self.repo.config.fingerprint(), commit)
             with self.cache_lock:
                 body = self._reviews.get(key)
             if body is None:
-                report = build_review(self.repo, target, scope=scope, sources=sources)
+                report = (build_review(self.repo, target, scope=scope, commit=commit) if commit
+                          else build_review(self.repo, target, scope=scope, sources=sources))
                 report.pop("notes", None)
                 body = dumps(report).encode("utf-8")
                 with self.cache_lock:

@@ -59,7 +59,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 
 | Command | Purpose |
 |---|---|
-| `repoviz review [TARGET] [--format text\|markdown\|prompt\|json] [--fail-on …]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. |
+| `repoviz review [TARGET] [--format text\|markdown\|prompt\|json] [--fail-on …] [--commit SHA] [--by-commit]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
@@ -183,6 +183,7 @@ repoviz session start --label "wave 3: billing" --allow "src/billing/**" --prote
 # ... the agent works (and maybe commits) ...
 repoviz review                          # where it went, scope violations, review signals
 repoviz review --format prompt          # numbered file:line feedback to paste back to the agent
+repoviz review --by-commit              # the same, step by step (the UI's Commits panel)
 repoviz review --fail-on protected --fail-on high   # guardrail for scripted loops (exit 3)
 repoviz session end                     # freezes the wave; later: repoviz review session:<id>
 ```

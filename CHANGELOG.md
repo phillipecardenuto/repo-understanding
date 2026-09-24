@@ -6,6 +6,16 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Review a wave commit by commit** ([#2](https://github.com/phillipecardenuto/repo-understanding/issues/2)).
+  - The AI Review tab gets a **Commits** panel: the range's commits, oldest
+    first, then uncommitted work, each with files, lines and signals.
+  - Selecting one (or pressing `[` / `]`) reviews that step alone. The live app
+    shows its own diff and signals; a static report filters to the files it
+    touched. Notes still go to the wave's feedback.
+  - New info signal `reverted-within-wave` for files changed and later
+    restored.
+  - CLI: `repoviz review --commit SHA` and `--by-commit`.
+  - API: `GET /api/review?...&commit=SHA`.
 - **New code that is not wired in** ([#4](https://github.com/phillipecardenuto/repo-understanding/issues/4)).
   Three new review signals:
   - `unwired-module`: a new module nothing imports or refers to, or a new

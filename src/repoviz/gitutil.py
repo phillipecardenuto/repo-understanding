@@ -442,6 +442,45 @@ class Git:
                 entry["last_commit_ts"] = max(int(entry["last_commit_ts"]), ts)  # type: ignore[arg-type]
         return stats
 
+    def commits_in_range(self, base: str | None, head: str, limit: int = 200) -> dict[str, object] | None:
+        """Non-merge commits in ``base..head`` (all ancestors of ``head`` when ``base`` is None), oldest first.
+
+        Each commit carries its files with status (A/M/D) and lines added / removed.  At most ``limit`` commits
+        (the most recent) are returned; ``total`` counts all of them.  ``None`` when history is unavailable
+        (e.g. objects missing from a shallow clone).
+        """
+        rng = [f"{base}..{head}"] if base else [head]
+        count = self.try_run("rev-list", "--count", "--no-merges", "--end-of-options", *rng)
+        merges = self.try_run("rev-list", "--count", "--merges", "--end-of-options", *rng)
+        out = self.try_run("log", "--no-merges", f"--max-count={max(0, limit)}", "--no-renames", "--no-ext-diff",
+                           "--no-textconv", "--raw", "--numstat", "--format=%x1e%H%x1f%P%x1f%an%x1f%at%x1f%s",
+                           "--end-of-options", *rng)
+        if count is None or out is None:
+            return None
+        commits: list[dict[str, object]] = []
+        for block in out.split("\x1e")[1:]:
+            lines = block.split("\n")
+            head_fields = lines[0].split("\x1f")
+            if len(head_fields) < 5:
+                continue
+            sha, parents, author, ts, subject = head_fields[:5]
+            files: dict[str, dict[str, object]] = {}
+            for line in lines[1:]:
+                if line.startswith(":"):  # raw: ":100644 100644 abc def M\tpath"
+                    meta, _, path = line.partition("\t")
+                    status = meta.split()[-1][:1] if meta.split() else "M"
+                    files.setdefault(path, {"path": path, "status": status, "added": None, "removed": None})
+                    files[path]["status"] = status
+                elif "\t" in line:  # numstat: "added\tremoved\tpath" ("-" for binary files)
+                    added, removed, path = line.split("\t", 2)
+                    entry = files.setdefault(path, {"path": path, "status": "M", "added": None, "removed": None})
+                    entry["added"] = int(added) if added.isdigit() else None
+                    entry["removed"] = int(removed) if removed.isdigit() else None
+            commits.append({"sha": sha, "parents": parents.split(), "author": author, "time": int(ts or 0),
+                            "subject": subject, "files": list(files.values())})
+        commits.reverse()
+        return {"commits": commits, "total": int(count.strip() or 0), "merges": int((merges or "0").strip() or 0)}
+
     def commit_file_sets(self, rev: str = "HEAD", max_commits: int = 300) -> list[list[str]]:
         """Paths changed by each of the last ``max_commits`` non-merge commits reachable from ``rev``."""
         if max_commits <= 0:

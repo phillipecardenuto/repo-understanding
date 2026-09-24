@@ -132,6 +132,7 @@ Credential-like values are always redacted in excerpts and diffs.
 | `commented-code` | low | hygiene | three or more commented-out code lines |
 | `unwired-symbol` | low | hygiene | a new top-level function or class whose name appears nowhere outside its definition |
 | `large-change` | info | hygiene | more than 400 lines added to one file |
+| `reverted-within-wave` | info | hygiene | commits in the range changed a file that ends up as it started (see [Commit by commit](#commit-by-commit)) |
 | `submodule-added` / `submodule-removed` | medium | architecture | a Git submodule was added or removed |
 | `submodule-updated` | medium | architecture | a submodule now points to another commit (commits listed when available) |
 | `submodule-uncommitted` | medium | correctness | files changed inside a submodule are not committed there, so the superproject cannot record them |
@@ -259,6 +260,45 @@ commits takes about 0.05 s, and a cached lookup takes a few milliseconds.
   same on demand.
 - **Nothing to review?** The tab explains how to start a session or which
   target to pick, instead of showing empty diagrams.
+
+### Commit by commit
+
+A wave is often several commits, and a merge can bring in many. When the
+reviewed range contains commits, the **Commits** panel lists them oldest first.
+Uncommitted work comes last, as "Uncommitted changes" (or "Uncommitted at the
+end of the session" for a past wave). Each row shows its files, lines and signals.
+
+- **Review one step.** Click a commit, or use `[` / `]` to step through them.
+  Stepping past either end shows the whole wave again, and **Show all** does
+  the same.
+  - In the live app, the server reviews that commit alone (`parent → commit`):
+    its own diff, key changes and signals. This catches a problem that a later
+    commit hid, such as a debug `print` added and then removed.
+  - In a static report, the wave's files and signals are filtered to the files
+    the commit touched. The page says that per-commit diffs need
+    `repoviz serve`.
+- **Notes stay with the wave.** A note taken while looking at one commit goes
+  to the wave's feedback prompt. Scope and reviewed marks are the wave's too.
+- **Which commits.**
+  - A session lists the commits since its baseline.
+  - A range lists `base..target`.
+  - `last-commit` on a merge lists the merged commits.
+
+  Merge commits themselves are not listed (a note counts them), and neither are
+  commits beyond the 200 most recent ("N earlier commits not shown").
+  Each file entry in the JSON report lists the commits that touched it
+  (`commits`).
+- **Changed, then changed back** (`reverted-within-wave`, info). A file that
+  commits changed but that ends up as it started. The agent went back and
+  forth: check that the undone work was meant to go.
+- **Missing history.** In a shallow clone or with missing objects, the panel
+  explains why commits are missing, and the review still works.
+
+```bash
+repoviz review last-commit --by-commit       # text output: files and signals grouped by commit
+repoviz review session --commit 1a2b3c4d     # one commit of the session on its own
+repoviz review session --commit WORKTREE     # only its uncommitted work
+```
 
 ## Notes and verdicts
 

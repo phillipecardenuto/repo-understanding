@@ -451,3 +451,117 @@ def test_missed_companion_ignores_lock_files_and_short_history(make_repo) -> Non
     Path(short.path, "a.py").write_text("'agent'\n")
     report = _review_all(short)
     assert "missed-companion" not in by_kind(report) and not report["history"]["usable"]
+
+
+# --------------------------------------------------------------------------- commit by commit
+
+import pytest  # noqa: E402
+
+from repoviz import review as review_mod  # noqa: E402
+
+
+def _commits_repo(make_repo):
+    repo = make_repo({"a.py": "A = 0\n", "b.py": "B = 0\n", "c.py": "C = 0\n"})
+    shas = [repo.write({"a.py": "A = 1\n"}).commit("change a"),
+            repo.write({"b.py": "B = 1\n", "c.py": "C = 1\nC2 = 2\n"}).commit("change b and c"),
+            repo.write({"d.py": "D = 1\n"}).commit("add d")]
+    return repo, shas
+
+
+def test_review_lists_the_commits_of_a_range(make_repo) -> None:
+    repo, shas = _commits_repo(make_repo)
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, base="HEAD~3", target="HEAD"))
+    items = report["commits"]["items"]
+    assert [c["sha"] for c in items] == shas and [c["subject"] for c in items][0] == "change a"
+    assert report["commits"]["total"] == 3 and report["commits"]["shown"] == 3
+    second = {f["path"]: f for f in items[1]["files"]}
+    assert second["c.py"] == {"path": "c.py", "status": "M", "added": 2, "removed": 1, "in_review": True}
+    assert items[2]["files"][0]["status"] == "A"
+    files = {f["path"]: f for f in report["files"]}
+    assert files["b.py"]["commits"] == [shas[1]] and files["d.py"]["commits"] == [shas[2]]
+
+
+def test_review_of_one_commit_keeps_the_wave(make_repo) -> None:
+    repo, shas = _commits_repo(make_repo)
+    r = Repository(repo.path)
+    target = resolve_target(r, base="HEAD~3", target="HEAD")
+    one = build_review(r, target, commit=shas[1][:10])
+    assert sorted(f["path"] for f in one["files"]) == ["b.py", "c.py"]
+    assert one["commit"]["sha"] == shas[1] and one["target"]["key"] == target.key
+    assert len(one["commits"]["items"]) == 3  # the wave's list stays available
+    with pytest.raises(ValueError):
+        build_review(r, target, commit="not-a-sha")
+    with pytest.raises(ValueError):  # a real commit, but outside the range
+        build_review(r, resolve_target(r, base="HEAD~1", target="HEAD"), commit=shas[0])
+
+
+def test_session_commits_end_with_uncommitted_work(make_repo) -> None:
+    repo = make_repo({"a.py": "A = 0\n", "b.py": "B = 0\n", "notes.txt": "draft\n"})
+    Path(repo.path, "notes.txt").write_text("already being edited\n")  # dirty before the agent starts
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave")
+    repo.write({"a.py": "A = 1\n"}).stage("a.py").git("commit", "-qm", "agent: a")
+    repo.write({"b.py": "B = 1\n"}).stage("b.py").git("commit", "-qm", "agent: b")
+    Path(repo.path, "a.py").write_text("A = 2\n")  # uncommitted
+    r = Repository(repo.path)
+    target = resolve_target(r, "session")
+    report = build_review(r, target)
+    items = report["commits"]["items"]
+    assert [c["subject"] for c in items] == ["agent: a", "agent: b", "Uncommitted changes"]
+    assert items[-1]["sha"] == "WORKTREE" and [f["path"] for f in items[-1]["files"]] == ["a.py"]
+    files = {f["path"]: f for f in report["files"]}
+    assert files["a.py"]["commits"] == [items[0]["sha"], "WORKTREE"] and "notes.txt" not in files
+    # The uncommitted step on its own: the file edited before the session started is not blamed on it.
+    step = build_review(r, target, commit="WORKTREE")
+    assert [f["path"] for f in step["files"]] == ["a.py"]
+
+
+def test_last_commit_of_a_merge_lists_the_merged_commits(make_repo) -> None:
+    repo = make_repo({"a.py": "A = 0\n", "b.py": "B = 0\n"})
+    repo.git("checkout", "-q", "-b", "feature")
+    one = repo.write({"a.py": "A = 1\n"}).commit("feature 1")
+    two = repo.write({"b.py": "B = 1\n"}).commit("feature 2")
+    repo.git("checkout", "-q", "main")
+    repo.git("merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+    report = build_review(Repository(repo.path), resolve_target(Repository(repo.path), "last-commit"))
+    assert [c["sha"] for c in report["commits"]["items"]] == [one, two]
+    assert report["commits"]["merges"] == 1
+
+
+def test_changed_then_changed_back_and_the_commit_cap(make_repo, monkeypatch) -> None:
+    repo = make_repo({"a.py": "A = 0\n", "b.py": "B = 0\n"})
+    repo.write({"a.py": "A = 'experiment'\n"}).commit("try something")
+    repo.write({"a.py": "A = 0\n", "b.py": "B = 1\n"}).commit("undo it, change b")
+    repo.write({"b.py": "B = 2\n"}).commit("b again")
+    r = Repository(repo.path)
+    kinds = by_kind(build_review(r, resolve_target(r, base="HEAD~3", target="HEAD")))
+    [back] = kinds["reverted-within-wave"]
+    assert back["path"] == "a.py" and back["severity"] == "info" and "try something" in back["detail"]
+    monkeypatch.setattr(review_mod, "MAX_COMMITS", 2)
+    commits = build_review(r, resolve_target(r, base="HEAD~3", target="HEAD"))["commits"]
+    assert commits["total"] == 3 and commits["shown"] == 2 and commits["items"][0]["subject"] == "undo it, change b"
+
+
+def test_commit_review_api_and_cli(make_repo, capsys) -> None:
+    repo, shas = _commits_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=30)
+        for commit, status in ((shas[1], 200), ("zzz", 400)):
+            conn.request("GET", f"/api/review?base=HEAD~3&target=HEAD&commit={commit}", headers={"X-Repoviz": "1"})
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            assert resp.status == status
+        conn.request("GET", f"/api/review?base=HEAD~3&target=HEAD&commit={shas[1]}", headers={"X-Repoviz": "1"})
+        one = json.loads(conn.getresponse().read())
+        assert one["commit"]["subject"] == "change b and c" and "notes" in one and body.get("error")
+    finally:
+        srv.shutdown()
+    assert main(["review", "-C", repo.path, "--base", "HEAD~3", "--head", "HEAD", "--by-commit"]) == 0
+    out = capsys.readouterr().out
+    assert "Commits (3, oldest first):" in out and "M c.py" in out and out.index("change a") < out.index("add d")
+    assert main(["review", "-C", repo.path, "--base", "HEAD~3", "--head", "HEAD", "--commit", shas[2][:8]]) == 0
+    assert "commit " + shas[2][:8] + " add d" in capsys.readouterr().out
+    assert main(["review", "-C", repo.path, "--base", "HEAD~1", "--head", "HEAD", "--commit", shas[0][:8]]) == 1

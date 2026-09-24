@@ -424,7 +424,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"repoviz: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect))
+    try:
+        report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect),
+                              commit=args.commit)
+    except ValueError as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_ERROR
     notes = repo.state.load_notes(target.key)
     if args.format == "json":
         report["notes"] = notes
@@ -434,7 +439,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     elif args.format == "markdown":
         _write(format_review_markdown(report), args.output)
     else:
-        _write(format_review_text(report), args.output)
+        _write(format_review_text(report, by_commit=args.by_commit), args.output)
     failed = []
     for cond in args.fail_on:
         if cond in SEVERITY_ORDER:
@@ -594,6 +599,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-severity", choices=("high", "medium", "low", "info"), default="medium",
                    help="lowest severity of automated signals included in --format prompt")
     p.add_argument("--list", action="store_true", help="list reviewable targets (sessions, waves, presets)")
+    p.add_argument("--commit", metavar="SHA",
+                   help="review one commit of the target's range on its own (WORKTREE = its uncommitted work)")
+    p.add_argument("--by-commit", action="store_true", help="text output: files and signals grouped by commit")
     p.add_argument("--fail-on", action="append", default=[], metavar="CONDITION",
                    help="exit 3 when: high | medium | low (findings at or above), protected, out-of-scope, "
                    "or a finding kind such as new-cycle; repeatable")

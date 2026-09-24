@@ -1662,6 +1662,25 @@
 
   const fileByPathOf = (report, path) => report.files.find((x) => x.path === path);
 
+  /* The wave's review restricted to the files one commit touched (static reports cannot re-review a commit). */
+  function filterByCommit(wave, item) {
+    const files = wave.files.filter((f) => (f.commits || []).includes(item.sha));
+    const paths = new Set(files.map((f) => f.path));
+    const byPath = new Map(files.map((f) => [f.path, f]));
+    const components = wave.components.filter((c) => c.paths.some((p) => paths.has(p))).map((c) => {
+      const ps = c.paths.filter((p) => paths.has(p));
+      return Object.assign({}, c, { paths: ps, files: ps.length, lines_added: ps.reduce((a, p) => a + (byPath.get(p).lines_added || 0), 0),
+        lines_removed: ps.reduce((a, p) => a + (byPath.get(p).lines_removed || 0), 0) });
+    });
+    const ids = new Set(components.map((c) => c.id));
+    const summary = Object.assign({}, wave.summary, { files: files.length, components: components.length,
+      lines_added: files.reduce((a, f) => a + (f.lines_added || 0), 0), lines_removed: files.reduce((a, f) => a + (f.lines_removed || 0), 0),
+      symbols_changed: files.reduce((a, f) => a + f.symbols.length, 0), tests_changed: files.filter((f) => f.is_test).length });
+    return Object.assign({}, wave, { files, components, summary, commit: item, filtered: true,
+      findings: wave.findings.filter((f) => f.path && paths.has(f.path)),
+      component_edges: (wave.component_edges || []).filter((e) => ids.has(e.source) && ids.has(e.target)) });
+  }
+
   class ReviewTab {
     constructor(app, root) {
       this.app = app; this.root = root;
@@ -1712,12 +1731,15 @@
       this.fileEl = h("div", { class: "card file-card" }, h("div", { class: "details-empty", text: "Select a file to see its key changes and diff." }));
       this.feedbackEl = h("div", { class: "card" });
       this.emptyEl = h("div", { class: "card empty-state", hidden: true });
+      this.commitsEl = h("div", { class: "card commits-card", hidden: true });
+      this.commitBanner = h("div", { class: "notice commit-banner", role: "status", hidden: true });
       this.mapToggle = h("label", { class: "check" }, "Map by ", select([["auto", "auto"], ["components", "components"], ["packages", "packages / directories"], ["files", "files"]],
         this.opts.mapLevel, (v) => { this.opts.mapLevel = v; this.save(); this.drawMap(); }));
-      this.bodyEl = h("div", null, this.statsEl,
+      this.bodyEl = h("div", null, this.commitBanner, this.statsEl,
         h("div", { class: "split review-split" }, h("div", null, this.map.el, h("div", { class: "group", style: { margin: "6px 2px 12px" } }, this.mapToggle,
           h("span", { class: "muted", text: "Click a component to list its files; click a file to open its change card." }))), this.findingsEl),
-        h("h2", { class: "section-title" }, "Changed modules ", h("span", { class: "faint small", text: "keys: j / k next / previous file · m mark reviewed" })),
+        this.commitsEl,
+        h("h2", { class: "section-title" }, "Changed modules ", h("span", { class: "faint small", text: "keys: j / k next / previous file · m mark reviewed · [ / ] previous / next commit" })),
         h("div", { class: "split files-split" }, this.filesEl, this.fileEl),
         h("h2", { class: "section-title", text: "Feedback for the agent" }), this.feedbackEl);
       put(this.root, bar, this.emptyEl, this.bodyEl);
@@ -1745,7 +1767,7 @@
     /* `keep` reloads the same review and keeps the selection; `announce` reports "up to date" when nothing changed. */
     async load(keep, announce) {
       const app = this.app;
-      const prev = keep && this.report ? { file: this.selectedFile, comp: this.selectedComponent, dir: this.selectedDir, sig: this.signature } : null;
+      const prev = keep && this.report ? { file: this.selectedFile, comp: this.selectedComponent, dir: this.selectedDir, sig: this.signature, commit: this.commit } : null;
       if (!prev) { this.statusEl.innerHTML = ""; put(this.statusEl, h("span", { class: "spinner" }), " reviewing…"); }
       this.loading = true;
       let r;
@@ -1772,6 +1794,8 @@
       const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope)].join("|");
       if (prev && prev.sig === sig) { if (announce) this.statusEl.textContent = `${r.base.label} → ${r.head.label} · up to date`; return; }
       this.report = r;
+      this.waveReport = r;
+      this.commit = null;
       this.signature = sig;
       this.key = r.target.key;
       this.serverScope = { allowed: r.scope.allowed || [], protected: r.scope.protected || [] };
@@ -1803,6 +1827,75 @@
       }
       this.emptyEl.hidden = true; this.bodyEl.hidden = false;
       this.draw();
+      if (prev && prev.commit && ((r.commits || {}).items || []).some((c) => c.sha === prev.commit)) await this.selectCommit(prev.commit);
+    }
+    // -- commit by commit ----------------------------------------------------------------------
+    commitItems() { return (((this.waveReport || this.report) || {}).commits || {}).items || []; }
+    /* Review one commit of the wave (null: the whole wave). Live: the server reviews that commit alone;
+       static report: the wave's files and signals are filtered to the files the commit touched. */
+    async selectCommit(sha) {
+      const wave = this.waveReport;
+      if (!wave) return;
+      const item = this.commitItems().find((c) => c.sha === sha);
+      if (!sha || !item) { this.commit = null; this.useReport(wave); return; }
+      this.commit = sha;
+      let r;
+      if (this.app.api.live) {
+        this.statusEl.innerHTML = ""; put(this.statusEl, h("span", { class: "spinner" }), ` reviewing ${item.short || "uncommitted work"}…`);
+        try { r = await this.app.api.get("/api/review?" + new URLSearchParams(Object.assign({}, this.lastParams, { commit: sha })).toString()); }
+        catch (err) { this.statusEl.textContent = "Could not review this commit: " + err.message; this.commit = null; this.drawCommits(); return; }
+        if (this.commit !== sha) return;  // another commit was chosen meanwhile
+        this.statusEl.textContent = `${r.base.label} → ${r.head.label}`;
+      } else r = filterByCommit(wave, item);
+      this.useReport(r);
+    }
+    useReport(r) {
+      this.report = r;
+      this.serverFindings = r.findings.filter((f) => f.kind !== "protected-touched" && f.kind !== "out-of-scope");
+      if (!r.files.some((f) => f.path === this.selectedFile)) this.selectedFile = null;
+      this.selectedComponent = null; this.selectedDir = null; this.fileOrder = null;
+      this.findingsShown = 200;
+      this.applyScope(this.scope, false);
+      this.draw();
+    }
+    stepCommit(delta) {
+      const items = this.commitItems();
+      if (items.length < 2) return;
+      let i = items.findIndex((c) => c.sha === this.commit);
+      i = i < 0 ? (delta > 0 ? 0 : items.length - 1) : i + delta;
+      this.selectCommit(i < 0 || i >= items.length ? null : items[i].sha);  // past either end: the whole wave again
+    }
+    drawCommits() {
+      const c = (this.waveReport || this.report).commits || {}, items = c.items || [];
+      this.commitsEl.innerHTML = "";
+      this.commitsEl.hidden = !items.some((x) => !x.uncommitted);
+      const i = items.findIndex((x) => x.sha === this.commit), item = items[i];
+      this.commitBanner.hidden = !item;
+      this.commitBanner.innerHTML = "";
+      if (item) {
+        put(this.commitBanner, iconEl("branch"), " ", h("b", { text: `Showing ${item.uncommitted ? "the uncommitted work" : "commit " + (i + 1) + " of " + items.length}` }), ": ",
+          item.uncommitted ? h("span", { text: item.subject }) : [h("span", { class: "mono", text: item.short }), " ", h("span", { text: item.subject })], " ",
+          h("button", { class: "btn small", title: "Previous commit ([)", disabled: i <= 0, onclick: () => this.stepCommit(-1) }, "‹"),
+          h("button", { class: "btn small", title: "Next commit (])", disabled: i >= items.length - 1, onclick: () => this.stepCommit(1) }, "›"),
+          h("button", { class: "btn small primary", onclick: () => this.selectCommit(null) }, "Show all"),
+          h("div", { class: "faint small", text: this.app.api.live ? "Diff, key changes and signals of this step alone. Notes still go to the wave's feedback."
+            : "Files this commit touched; diffs and signals cover the whole review. Open the repository with repoviz serve to review the commit on its own." }));
+      }
+      if (this.commitsEl.hidden) return;
+      const hidden = (c.total || 0) - (c.shown || 0);
+      put(this.commitsEl, h("h3", null, `Commits (${items.length})`, " ", h("span", { class: "faint small", text: "oldest first · click one to review it alone · keys [ / ]" }),
+          this.commit ? [" ", h("button", { class: "btn small", onclick: () => this.selectCommit(null) }, "Show all")] : null),
+        hidden > 0 ? h("div", { class: "muted small", text: `${hidden} earlier commit(s) not shown.` }) : null,
+        c.merges ? h("div", { class: "muted small", text: `${plural(c.merges, "merge commit")} not listed (their changes appear in the merged commits).` }) : null,
+        c.note ? h("div", { class: "notice", text: c.note }) : null,
+        table([
+          { key: "n", label: "#", num: true, render: (x) => x.uncommitted ? "" : String(items.indexOf(x) + 1), sort: (x) => items.indexOf(x) },
+          { key: "subject", label: "Commit", render: (x) => x.uncommitted ? [iconEl("diff"), " ", h("i", { text: x.subject })] : [h("span", { class: "mono", text: x.short }), " ", h("span", { text: x.subject })] },
+          { key: "time", label: "When", render: (x) => x.time ? fmtTime(x.time) : h("span", { class: "faint", text: "not committed" }) },
+          { key: "files", label: "Files", num: true, render: (x) => String(x.files.length), sort: (x) => x.files.length },
+          { key: "lines", label: "+/−", num: true, render: (x) => `+${x.files.reduce((a, f) => a + (f.added || 0), 0)} −${x.files.reduce((a, f) => a + (f.removed || 0), 0)}` },
+          { key: "signals", label: "Signals", num: true, render: (x) => x.signals ? [iconEl("alert"), " " + x.signals] : "", sort: (x) => x.signals || 0 },
+        ], items, { onRow: (x) => this.selectCommit(x.sha === this.commit ? null : x.sha), isSelected: (x) => x.sha === this.commit, limit: 30 }));
     }
     /* A friendly explanation instead of empty diagrams. */
     showEmpty(title, detail, isError) {
@@ -1901,6 +1994,8 @@
       if (ev.ctrlKey || ev.metaKey || ev.altKey || (ev.target && ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable], .viewport"))) return;
       if (ev.key === "j") { ev.preventDefault(); this.stepFile(1); }
       else if (ev.key === "k") { ev.preventDefault(); this.stepFile(-1); }
+      else if (ev.key === "]") { ev.preventDefault(); this.stepCommit(1); }
+      else if (ev.key === "[") { ev.preventDefault(); this.stepCommit(-1); }
       else if (ev.key === "m" && this.selectedFile) { ev.preventDefault(); const f = this.report.files.find((x) => x.path === this.selectedFile); this.setReviewed(this.selectedFile, !this.isReviewed(f), !this.isReviewed(f)); }
     }
     drawProgress() {
@@ -1918,6 +2013,7 @@
         h("span", { class: "item" }, h("span", { class: "line added" }), "+ new dependency"), h("span", { class: "item" }, h("span", { class: "line cycle" }), "⟲ new cycle")];
     }
     draw() {
+      this.drawCommits();
       this.drawStats();
       this.drawMap();
       this.drawPanels();
@@ -2078,7 +2174,8 @@
     }
     async drawMap() {
       const view = this.mapView();
-      this.map.setTitle(`Where the agent went · by ${view.level} · ${this.report.target.label}`);
+      const one = this.commit && this.commitItems().find((c) => c.sha === this.commit);
+      this.map.setTitle(`Where the agent went · by ${view.level} · ${this.report.target.label}` + (one ? ` · ${one.uncommitted ? "uncommitted work" : "commit " + one.short}` : ""));
       await this.map.render(view, {
         onNode: (id) => {
           const n = view.nodes.find((x) => x.id === id);
@@ -2316,7 +2413,7 @@
       }
     }
     drawFeedback() {
-      const o = this.opts, r = this.report;
+      const o = this.opts, r = this.waveReport || this.report;  // the prompt always covers the whole wave
       const prompt = feedbackMarkdown(r, this.notes.filter((n) => n.verdict !== "ok"), o.minSeverity, o.includeFindings);
       const general = h("div", { class: "group" });
       const preview = h("pre", { class: "prompt", text: prompt });
@@ -2384,6 +2481,10 @@
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
           "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file."] },
+        { h: "Commit by commit" },
+        { ul: ["When the wave has commits, the **Commits** panel lists them oldest first, followed by any uncommitted work, with files, lines and signals per commit.",
+          "Click a commit (or press `[` / `]`) to review that step alone: in the live app its own diff, key changes and signals; in a report, the files it touched. **Show all** returns to the whole wave.",
+          "Notes you take while looking at one commit still go to the wave's feedback prompt. *Changed, then changed back* flags files a commit changed and a later one restored."] },
         { h: "6. Send feedback" },
         { ul: ["**Feedback for the agent** turns your notes into a numbered, `file:line`-referenced prompt grouped as Revert / Fix / Complete / Improve / Answer.",
           "Optionally include untriaged signals at or above a severity, then **Copy prompt** or **Download .md**.",
@@ -2447,7 +2548,7 @@
     { id: "keys", title: "Keyboard shortcuts", icon: "keyboard", intro: "Shortcuts are ignored while you type in a field.",
       blocks: [
         { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file (AI Review)"],
-          ["m", "mark the open file reviewed and go to the next unreviewed one (AI Review)"], ["Ctrl+Enter", "apply the scope boxes (AI Review)"],
+          ["m", "mark the open file reviewed and go to the next unreviewed one (AI Review)"], ["[ / ]", "previous / next commit of the wave; past either end shows the whole wave (AI Review)"], ["Ctrl+Enter", "apply the scope boxes (AI Review)"],
           ["arrows, + / -, 0", "pan, zoom and fit a focused diagram"], ["Enter", "open the focused table row or diagram node"]] },
       ] },
     { id: "modes", title: "Live app and static report", icon: "terminal", intro: "The same interface works in two modes.",
