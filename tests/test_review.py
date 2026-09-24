@@ -152,7 +152,7 @@ def test_architecture_signals_and_rules(make_repo) -> None:
     money.write_text("from app.billing.invoice import total\nimport app.missing_module\n\n" + money.read_text())
     report = build_review(Repository(repo.path), resolve_target(Repository(repo.path), "all"))
     kinds = by_kind(report)
-    assert kinds["forbidden-dependency"][0]["detail"].startswith("util must stay generic")
+    assert kinds["contract-broken"][0]["detail"].startswith("util must stay generic")  # [[review.rules]] unchanged
     assert kinds["new-cycle"]  # billing -> util -> billing
     assert kinds["unresolved-internal-import"][0]["title"] == "Broken import"
     assert report["scope"]["protected"] == ["src/app/auth/**"]
@@ -1121,3 +1121,147 @@ def test_renamed_class_counts_the_callers_of_its_constructor(make_repo) -> None:
         p.write_text(p.read_text().replace("AppError", "ServiceError"))
     risk = next(f for f in _review_all(repo)["files"] if f["path"] == "app/errs.py")["risk"]
     assert "called from 2 places" in [x["text"] for x in risk["factors"]]  # calls to the class hit its __init__
+
+
+# --------------------------------------------------------------------------- architecture contracts (#16)
+
+LAYERED = {
+    "app/__init__.py": "", "app/routes/__init__.py": "", "app/services/__init__.py": "", "app/models/__init__.py": "",
+    "app/util/__init__.py": "", "app/storage/__init__.py": "",
+    "app/routes/api.py": "from app.services import billing\n",
+    "app/services/billing.py": "from app.models import user\n",
+    "app/models/user.py": "X = 1\n",
+    "app/util/helpers.py": "Y = 2\n",
+    "app/storage/api.py": "def api():\n    return 1\n",
+    "app/storage/_internal.py": "def _raw():\n    return 2\n",
+    "tests/test_x.py": "from app.storage import _internal\nfrom app.routes import api\n",
+}
+LAYERS_TOML = ('[[contracts]]\nname = "Layered backend"\ntype = "layers"\n'
+               'layers = ["app.routes", "app.services", "app.models"]\n')
+
+
+def _contracts(repo, toml: str):
+    from repoviz.contracts import check, contracts_of
+
+    Path(repo.path, ".repoviz.toml").write_text(toml)
+    r = Repository(repo.path)
+    return {res.contract.name: res for res in check(r.snapshot("WORKTREE"), contracts_of(r.config))}
+
+
+def test_layers_contract_new_upward_import_breaks_it(make_repo) -> None:
+    repo = make_repo(dict(LAYERED, **{".repoviz.toml": LAYERS_TOML}))
+    repo.write({"app/models/user.py": "from app.routes import api\n\nX = 1\n"})
+    report = _review_all(repo)
+    [broken] = by_kind(report)["contract-broken"]
+    assert broken["severity"] == "high" and broken["title"] == "Contract broken: Layered backend"
+    assert (broken["path"], broken["line"]) == ("app/models/user.py", 1)
+    assert "app.models.user imports app.routes.api" in broken["detail"] and "'app.models' is below 'app.routes'" in broken["detail"]
+    assert "forbidden-dependency" not in by_kind(report)  # the old name is gone
+
+
+def test_indirect_violation_is_reported_with_its_chain(make_repo) -> None:
+    toml = LAYERS_TOML + "allow_indirect = false\n"
+    repo = make_repo(dict(LAYERED, **{"app/models/user.py": "from app.util import helpers\n",
+                                      "app/util/helpers.py": "from app.routes import api\n"}))
+    direct = _contracts(repo, LAYERS_TOML)["Layered backend"]
+    assert direct.violations == []  # models → util → routes is indirect
+    [v] = _contracts(repo, toml)["Layered backend"].violations
+    assert v.chain == ["app.models.user", "app.util.helpers", "app.routes.api"] and v.indirect
+    assert "(through app.util.helpers)" in v.detail and (v.path, v.line) == ("app/models/user.py", 1)
+
+
+def test_independence_and_public_interface_in_python(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/features/__init__.py": "", "app/features/a/__init__.py": "",
+                      "app/features/b/__init__.py": "", "app/features/a/views.py": "from app.features.b import models\n",
+                      "app/features/b/models.py": "M = 1\n", "app/storage/__init__.py": "",
+                      "app/storage/api.py": "A = 1\n", "app/storage/_internal.py": "I = 1\n",
+                      "app/features/b/repo.py": "from app.storage import _internal\nfrom app.storage import api\n"})
+    toml = ('[[contracts]]\nname = "Features"\ntype = "independence"\nmodules = ["app.features.*"]\n'
+            '[[contracts]]\nname = "Storage API"\ntype = "public-interface"\nmodule = "app.storage"\n'
+            'public = ["app.storage.api"]\n')
+    res = _contracts(repo, toml)
+    [ind] = res["Features"].violations
+    assert (ind.source, ind.target) == ("app.features.a.views", "app.features.b.models")
+    assert "app.features.a and app.features.b must stay independent" in ind.detail
+    [pub] = res["Storage API"].violations
+    assert (pub.source, pub.target) == ("app.features.b.repo", "app.storage._internal")
+
+
+def test_independence_and_public_interface_in_javascript(make_repo) -> None:
+    repo = make_repo({"package.json": '{"name": "web"}',
+                      "src/features/a/index.js": "import { b } from '../b/index.js';\nexport const a = b;\n",
+                      "src/features/b/index.js": "import { raw } from '../../storage/internal.js';\nexport const b = raw;\n",
+                      "src/storage/api.js": "export const api = 1;\n", "src/storage/internal.js": "export const raw = 2;\n"})
+    toml = ('[[contracts]]\nname = "Features"\ntype = "independence"\nmodules = ["src/features/*"]\n'
+            '[[contracts]]\nname = "Storage API"\ntype = "public-interface"\nmodule = "src/storage"\n'
+            'public = ["src/storage/api.js"]\n')
+    res = _contracts(repo, toml)
+    assert [(v.source, v.target) for v in res["Features"].violations] == [("src/features/a/index", "src/features/b/index")]
+    assert [(v.source, v.target) for v in res["Storage API"].violations] == [("src/features/b/index", "src/storage/internal")]
+
+
+def test_forbidden_acyclic_required_and_containers(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/a/__init__.py": "", "app/b/__init__.py": "",
+                      "app/a/x.py": "from app.b import y\n", "app/b/y.py": "from app.a import z\n", "app/a/z.py": "Z = 1\n",
+                      "app/handlers/__init__.py": "", "app/handlers/h1.py": "from app.a import z\n",
+                      "app/handlers/h2.py": "H = 2\n",
+                      "svc/__init__.py": "", "svc/one/__init__.py": "", "svc/one/web.py": "W = 1\n",
+                      "svc/one/db.py": "from svc.one import web\n"})
+    toml = ('[[contracts]]\nname = "No b from a"\ntype = "forbidden"\nfrom = ["app.a"]\nto = ["app.b"]\n'
+            '[[contracts]]\nname = "No cycles"\ntype = "acyclic"\nmodules = ["app.*"]\n'
+            '[[contracts]]\nname = "Handlers use a"\ntype = "required"\nfrom = ["app.handlers.h*"]\nto = ["app.a"]\n'
+            '[[contracts]]\nname = "Per service"\ntype = "layers"\ncontainers = ["svc.one"]\nlayers = ["web", "db"]\n')
+    res = _contracts(repo, toml)
+    assert [(v.source, v.target) for v in res["No b from a"].violations] == [("app.a.x", "app.b.y")]
+    [cycle] = res["No cycles"].violations
+    assert cycle.source == "app.a ⇄ app.b" and "import cycle between app.a → app.b → app.a" in cycle.detail
+    assert [v.source for v in res["Handlers use a"].violations] == ["app.handlers.h2"]
+    assert [(v.source, v.target) for v in res["Per service"].violations] == [("svc.one.db", "svc.one.web")]
+
+
+def test_contract_baseline_known_new_fixed_and_changed(make_repo) -> None:
+    from repoviz.cli import main as cli
+
+    repo = make_repo(dict(LAYERED, **{".repoviz.toml": LAYERS_TOML,
+                                      "app/models/legacy.py": "from app.routes import api\n",
+                                      "app/models/old.py": "from app.routes import api\n"}))
+    out = Path(repo.path, "..", "baseline.json")
+    assert cli(["contracts", "-C", repo.path, "--baseline", "-o", str(out)]) == 0
+    repo.write({".repoviz-known-violations.json": out.read_text()}).commit("baseline")
+    repo.write({"app/models/new.py": "from app.routes import api\n"})  # a new violation
+    repo.delete("app/models/old.py")  # a known one goes away
+    kinds = by_kind(_review_all(repo))
+    assert [f["detail"].split(":")[0] for f in kinds["contract-broken"]] == ["app.models.new imports app.routes.api"]
+    assert [f["severity"] for f in kinds["contract-fixed"]] == ["info"]
+    assert "contract-baseline-changed" not in kinds
+    # Accepting a violation by editing the baseline is itself a signal.
+    data = json.loads(out.read_text())
+    data["violations"].append({"key": "Layered backend::app.models.new::app.routes.api"})
+    repo.write({".repoviz-known-violations.json": json.dumps(data)})
+    kinds = by_kind(_review_all(repo))
+    assert "contract-broken" not in kinds and kinds["contract-baseline-changed"][0]["severity"] == "medium"
+    repo.write({".repoviz-known-violations.json": "{not json"})
+    assert by_kind(_review_all(repo))["contract-baseline-invalid"][0]["severity"] == "low"
+
+
+def test_contract_ignores_and_configuration_checks(make_repo) -> None:
+    import pytest
+
+    from repoviz.config import ConfigError, load_config
+
+    repo = make_repo(dict(LAYERED, **{"app/models/legacy.py": "from app.routes import api\n"}))
+    res = _contracts(repo, LAYERS_TOML + 'ignore = ["app.models.legacy -> app.routes", "app.gone -> app.routes"]\n')
+    assert res["Layered backend"].violations == [] and res["Layered backend"].stale_ignores == ["app.gone -> app.routes"]
+    Path(repo.path, ".repoviz.toml").write_text(LAYERS_TOML + "colour = 'red'\n")
+    assert any("contracts.Layered backend.colour" in s for s in load_config(Path(repo.path)).sources)
+    for bad in ('[[contracts]]\nname = "x"\ntype = "onion"\n', '[[contracts]]\ntype = "layers"\nlayers = ["a"]\n',
+                LAYERS_TOML + LAYERS_TOML, '[[contracts]]\ntype = "forbidden"\nfrom = ["a"]\nto = ["b"]\nignore = ["a b"]\n'):
+        Path(repo.path, ".repoviz.toml").write_text(bad)
+        with pytest.raises(ConfigError):
+            load_config(Path(repo.path))
+
+
+def test_disabled_forbidden_dependency_disables_contract_signals(make_repo) -> None:
+    repo = make_repo(dict(LAYERED, **{".repoviz.toml": LAYERS_TOML + '[review]\ndisabled_checks = ["forbidden-dependency"]\n'}))
+    repo.write({"app/models/user.py": "from app.routes import api\n"})
+    assert "contract-broken" not in by_kind(_review_all(repo))

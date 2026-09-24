@@ -94,12 +94,121 @@ size = 10                         # lines added and removed
 high = 40                         # score from which a file is "high" risk
 medium = 20                       # score from which it is "medium"
 
-[[review.rules]]                  # forbidden dependencies
+[[review.rules]]                  # forbidden dependencies (a "forbidden" contract over path globs; see below)
 from = ["src/ui/**"]
 to = ["src/db/**"]
 message = "UI must go through the service layer"
 severity = "high"                 # high | medium | low
 ```
+
+## Architecture contracts
+
+Contracts say who may import whom. repoviz checks them on the module import
+graph of every analyzed language:
+- **Reviews** report the violations a change introduces as `contract-broken`
+  (see [review.md](review.md)).
+- **`repoviz contracts`** checks a whole tree for CI.
+- **The Dependencies tab** draws them with its **Contracts** overlay.
+
+```toml
+[[contracts]]
+name = "Layered backend"            # unique; shown in signals and the UI
+type = "layers"                     # layers | independence | forbidden | public-interface | acyclic | required
+layers = ["app.routes", "app.services", "app.models"]   # high → low: a lower layer may not import a higher one
+containers = []                     # optional: the same layers inside each container, e.g. ["svc.orders", "svc.users"]
+ignore = ["app.services.legacy -> app.routes.compat"]   # imports allowed anyway ("importer -> imported")
+allow_indirect = true               # false: also follow chains (models → util → routes)
+severity = "high"                   # high | medium | low (default high)
+message = "Keep the layers"         # optional, prefixed to every violation
+
+[[contracts]]
+name = "Features are independent"
+type = "independence"
+modules = ["app.features.*"]        # each feature is a unit; units never import each other
+
+[[contracts]]
+name = "Storage only through its API"
+type = "public-interface"
+module = "app.storage"              # code outside it...
+public = ["app.storage.api", "app.storage.types"]   # ...imports only these
+
+[[contracts]]
+name = "UI does not touch the database"
+type = "forbidden"
+from = ["src/ui/**"]
+to = ["src/db/**"]
+
+[[contracts]]
+name = "No package cycles"
+type = "acyclic"
+modules = ["app.*"]                 # no import cycle between these units
+
+[[contracts]]
+name = "Handlers go through the service layer"
+type = "required"
+from = ["app.handlers.*"]           # every module here...
+to = ["app.services"]               # ...imports at least one of these
+
+contracts_baseline = ".repoviz-known-violations.json"   # top-level key; the default
+```
+
+| Type | Keys | Broken when |
+|---|---|---|
+| `layers` | `layers` (2+, high → low), `containers` | a module in a lower layer imports one in a higher layer (within the same container) |
+| `independence` | `modules` | a module of one unit imports a module of another |
+| `forbidden` | `from`, `to` | a module matching `from` imports one matching `to` |
+| `public-interface` | `module`, `public` | code outside `module` imports something inside it that is not `public` |
+| `acyclic` | `modules` | the units import each other in a cycle (one violation per cycle, with an example) |
+| `required` | `from`, `to` | a module matching `from` imports none of `to` |
+
+**Patterns**
+- **Names.** A pattern without `/` is a qualified name: `app.services` means that
+  package and everything in it. Wildcards match names (`app.handlers.h*`).
+- **Paths.** A pattern with `/` is a path glob anchored at the repository root
+  (`src/features/*`, `src/storage/api.js`). This is how you write contracts for
+  JavaScript, TypeScript or any path-named module.
+- **Units.** `pkg.*` or `dir/*` in `modules` makes one unit per child package or
+  folder.
+
+**Scope.** Imports from test modules and `TYPE_CHECKING`-only imports are not
+checked. By default only direct imports are checked. With
+`allow_indirect = false` (layers, independence, forbidden), repoviz also follows
+chains of imports:
+- a chain only passes through modules the contract does not constrain;
+- chains are at most 8 hops long;
+- violations are reported with the chain.
+
+**Ignores.** `ignore` entries use the same patterns on both sides. An entry that
+matches nothing is reported as a *stale ignore*, so exceptions don't outlive the
+code they excused.
+
+**Checks on the configuration.** Unknown keys in a contract are reported with the
+configuration sources. A contract with a wrong `type` or missing keys is an
+error, as is a duplicate name.
+
+**`[[review.rules]]`** keep working unchanged: each one is a `forbidden`
+contract named "review rule #N". The signal is now `contract-broken`, and
+`forbidden-dependency` in `review.disabled_checks` still turns it off.
+
+### Known violations (baseline)
+
+A new contract on legacy code often starts with violations. Record them once,
+commit the file, and only new violations are reported from then on:
+
+```bash
+repoviz contracts --baseline > .repoviz-known-violations.json   # or: -o .repoviz-known-violations.json
+git add .repoviz-known-violations.json
+```
+
+repoviz never writes into the repository on its own: `--baseline` prints the file
+and you decide where it goes (see the read-only rule in `AGENTS.md`). The
+baseline is read from the tree being checked, so it travels with the code:
+- Reviews and `repoviz contracts` skip the violations it lists.
+- Violations it lists that no longer exist are reported as *fixed*, so you can
+  remove them from the file.
+- A review that edits the baseline raises `contract-baseline-changed`: *medium*
+  when it newly accepts violations. This matters because an agent editing the
+  file is how violations get quietly accepted.
 
 ## Glob syntax
 

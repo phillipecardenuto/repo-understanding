@@ -50,6 +50,41 @@ class ComponentRule:
     description: str = ""
 
 
+CONTRACT_TYPES = ("layers", "independence", "forbidden", "public-interface", "acyclic", "required")
+_CONTRACT_KEYS = {
+    "layers": {"layers", "containers"},
+    "independence": {"modules"},
+    "forbidden": {"from", "to"},
+    "public-interface": {"module", "public"},
+    "acyclic": {"modules"},
+    "required": {"from", "to"},
+}
+_CONTRACT_COMMON = {"name", "type", "severity", "ignore", "allow_indirect", "message"}
+
+
+@dataclass
+class Contract:
+    """An architecture contract over the module import graph (see ``contracts.py``)."""
+
+    name: str
+    type: str
+    severity: str = "high"
+    layers: list[str] = field(default_factory=list)  # layers: high → low
+    containers: list[str] = field(default_factory=list)  # layers: the same layering inside each container
+    modules: list[str] = field(default_factory=list)  # independence / acyclic
+    source: list[str] = field(default_factory=list)  # forbidden / required: "from"
+    target: list[str] = field(default_factory=list)  # forbidden / required: "to"
+    module: str = ""  # public-interface: the package
+    public: list[str] = field(default_factory=list)  # public-interface: what others may import
+    ignore: list[str] = field(default_factory=list)  # "a -> b" imports that are allowed anyway
+    allow_indirect: bool = True  # False: also follow chains of imports
+    message: str = ""
+    origin: str = "contracts"  # or "review.rules"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: v for k, v in dataclasses.asdict(self).items() if v not in ([], "")}
+
+
 @dataclass
 class DependencyRule:
     """A forbidden dependency: code matching ``source`` must not depend on code matching ``target``."""
@@ -98,6 +133,9 @@ class Config:
     review_wiring_ignore: list[str] = field(default_factory=list)  # new files that need no importer
     review_risk_weights: dict[str, float] = field(default_factory=dict)  # [review.risk] factor weights
     review_risk_thresholds: dict[str, float] = field(default_factory=dict)  # [review.risk] high / medium
+    # Architecture contracts ([[contracts]]; [[review.rules]] are "forbidden" contracts) and their baseline.
+    contracts: list[Contract] = field(default_factory=list)
+    contracts_baseline: str = ".repoviz-known-violations.json"
     # Change coupling from Git history ("these files usually change together").
     history_commits: int = 300  # how many recent commits to learn from (0 disables)
     history_min_revs: int = 5  # a file needs this many commits before its habits count
@@ -113,7 +151,7 @@ class Config:
         data.pop("sources", None)
         data.pop("poll_seconds", None)
         data.pop("max_diagram_nodes", None)
-        for key in [k for k in data if k.startswith(("review_", "history_"))]:
+        for key in [k for k in data if k.startswith(("review_", "history_", "contracts"))]:
             data.pop(key)
         return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -283,12 +321,52 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
                 cfg.review_rules.append(DependencyRule(_as_list(r["from"], "review.rules.from"),
                                                        _as_list(r["to"], "review.rules.to"),
                                                        str(r.get("message", "")), sev))
+    contracts = take("contracts")
+    if contracts is not None:
+        if not isinstance(contracts, list):
+            raise ConfigError("'contracts' must be an array of tables ([[contracts]])")
+        cfg.contracts = [_contract(c, i, unknown_nested) for i, c in enumerate(contracts)]
+        names = [c.name for c in cfg.contracts]
+        if len(set(names)) != len(names):
+            raise ConfigError("contract names must be unique")
+    if take("contracts_baseline") is not None:
+        cfg.contracts_baseline = str(data["contracts_baseline"])
     unknown = sorted(set(data) - known) + unknown_nested
     if unknown:
         cfg.sources.append(f"{origin} (ignored unknown keys: {', '.join(unknown)})")
     else:
         cfg.sources.append(origin)
     return cfg
+
+
+def _contract(c: Any, i: int, unknown: list[str]) -> Contract:
+    if not isinstance(c, dict):
+        raise ConfigError("each [[contracts]] entry must be a table")
+    ctype = str(c.get("type", ""))
+    if ctype not in CONTRACT_TYPES:
+        raise ConfigError(f"contract #{i + 1}: type must be one of {', '.join(CONTRACT_TYPES)}")
+    name = str(c.get("name") or f"{ctype} #{i + 1}")
+    where = f"contract {name!r}"
+    unknown += [f"contracts.{name}.{k}" for k in sorted(set(c) - _CONTRACT_KEYS[ctype] - _CONTRACT_COMMON)]
+    severity = str(c.get("severity", "high"))
+    if severity not in ("high", "medium", "low"):
+        raise ConfigError(f"{where}: severity must be high, medium or low")
+    lst = lambda key: _as_list(c.get(key), f"{where}: {key}")  # noqa: E731
+    contract = Contract(name=name, type=ctype, severity=severity, layers=lst("layers"), containers=lst("containers"),
+                        modules=lst("modules"), source=lst("from"), target=lst("to"), module=str(c.get("module", "")),
+                        public=lst("public"), ignore=lst("ignore"), allow_indirect=bool(c.get("allow_indirect", True)),
+                        message=str(c.get("message", "")))
+    need = {"layers": contract.layers and len(contract.layers) >= 2, "independence": len(contract.modules) >= 1,
+            "forbidden": contract.source and contract.target, "public-interface": contract.module and contract.public,
+            "acyclic": len(contract.modules) >= 1, "required": contract.source and contract.target}[ctype]
+    if not need:
+        raise ConfigError(f"{where}: a {ctype} contract needs " + {
+            "layers": "at least two 'layers'", "independence": "'modules'", "forbidden": "'from' and 'to'",
+            "public-interface": "'module' and 'public'", "acyclic": "'modules'", "required": "'from' and 'to'"}[ctype])
+    for entry in contract.ignore:
+        if "->" not in entry:
+            raise ConfigError(f"{where}: ignore entries look like 'importer -> imported', not {entry!r}")
+    return contract
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

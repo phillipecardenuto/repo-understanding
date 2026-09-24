@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 from . import classify, globs
 from .activity import _ImpactIndex, _tests_affected, nodes_by_path
 from .config import DependencyRule
+from .contracts import check as check_contracts
+from .contracts import contracts_of, load_baseline
 from .diff import symbol_changes
 from .flow import affected_flow
 from .gitutil import GitError
@@ -472,6 +474,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     target_snap = repo.snapshot_of(target_src, target_label)
     diff = repo.diff(base_snap, target_snap)
     disabled = set(repo.config.review_disabled_checks)
+    if "forbidden-dependency" in disabled:  # the signal's name before contracts
+        disabled.add("contract-broken")
     b_idx, t_idx = base_snap.node_index(), target_snap.node_index()
     nodes = diff.nodes
 
@@ -666,6 +670,10 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     if not {"unwired-module", "unwired-symbol", "unreachable-from-entry"} <= disabled:
         _wiring_findings(add, diff, target_snap, target_src, component_of, repo.config.review_wiring_ignore)
     _test_coverage_findings(add, files, impact)
+    contracts = contracts_of(repo.config)
+    if contracts and not {"contract-broken", "contract-fixed", "contract-baseline-changed"} <= disabled:
+        _contract_findings(add, repo.config.contracts_baseline, contracts, base_snap, target_snap, base_src, target_src,
+                           component_of)
     _rename_findings(add, diff, target_snap, target_src, component_of)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
@@ -1152,14 +1160,6 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
                             loc_path, loc_line, ev.excerpt if ev else None,
                             component=component_of(loc_path)[1] if loc_path else None),
                     key=f"{dep['source']}->{dep['target']}")
-        dst_path = dst.node.path if dst else None
-        if src_path is not None and dst_path is not None and e.direct:
-            for rule in scope.rules:
-                if globs.match_any(src_path, rule.source) and globs.match_any(dst_path, rule.target):
-                    add(Finding("forbidden-dependency", "architecture", rule.severity, "Forbidden dependency",
-                                (rule.message + ": " if rule.message else "") + f"{dep['source']} → {dep['target']}",
-                                loc_path, loc_line, ev.excerpt if ev else None,
-                                component=component_of(src_path)[1]), key=f"{dep['source']}->{dep['target']}")
     # Calls to removed symbols that are still present in the (unchanged or modified) caller.
     t_lines: dict[str, list[str]] = {}
     # A caller that now calls a *different* symbol of the same name was redirected (e.g. a renamed base
@@ -1469,6 +1469,41 @@ def _package_dependency_exists(snapshot: RepositorySnapshot, src_pkg: str, dst_p
                 cache.add((a.path.rsplit("/", 1)[0], b.path.rsplit("/", 1)[0]))
         snapshot.__dict__["_package_pairs"] = cache
     return (src_pkg, dst_pkg) in cache
+
+
+def _contract_findings(add: Any, baseline_path: str, contracts: list[Any], base: RepositorySnapshot,
+                       target: RepositorySnapshot, base_src: TreeSource, target_src: TreeSource,
+                       component_of: Any) -> None:
+    """Architecture contracts: violations this change introduces (not in the base, not in the baseline), the ones
+    it fixes, and edits to the known-violations baseline itself."""
+    known, problem = load_baseline(target_src.read_text(baseline_path) if baseline_path else None)
+    before = [v for r in check_contracts(base, contracts) for v in r.violations]
+    after = [v for r in check_contracts(target, contracts) for v in r.violations]
+    before_keys, after_keys = {v.key for v in before}, {v.key for v in after}
+    for v in after:
+        if v.key in before_keys or v.key in known:
+            continue
+        chain = " → ".join(v.chain) if len(v.chain) > 2 else None
+        add(Finding("contract-broken", "architecture", v.severity, f"Contract broken: {v.contract}", v.detail,
+                    v.path, v.line, v.excerpt, component=component_of(v.path)[1] if v.path else None,
+                    suggestion=("Remove the import chain " + chain if chain else "Remove this import") +
+                    ", or record the exception with an `ignore` entry on the contract."), key=v.key)
+    for v in before:
+        if v.key not in after_keys:
+            add(Finding("contract-fixed", "architecture", "info", f"Contract violation fixed: {v.contract}",
+                        f"{v.source} no longer breaks it ({v.target}).", v.path if v.path and target_src.content_hash(v.path)
+                        else None, component=component_of(v.path)[1] if v.path else None), key=v.key)
+    if baseline_path and base_src.content_hash(baseline_path) != target_src.content_hash(baseline_path):
+        accepted = known - load_baseline(base_src.read_text(baseline_path))[0]
+        add(Finding("contract-baseline-changed", "architecture", "medium" if accepted else "info",
+                    "Known-violations baseline changed",
+                    f"{baseline_path} now accepts {len(accepted)} more violation(s)"
+                    + (f": {', '.join(sorted(accepted)[:3])}{', …' if len(accepted) > 3 else ''}" if accepted else "")
+                    + ". Violations in the baseline are no longer reported.", baseline_path,
+                    suggestion="Check that each newly accepted violation was agreed on, not hidden."), key="baseline")
+    if problem:
+        add(Finding("contract-baseline-invalid", "architecture", "low", "Known-violations baseline ignored",
+                    f"{baseline_path}: {problem}. Every violation is reported.", baseline_path), key="baseline-invalid")
 
 
 def _test_coverage_findings(add: Any, files: list[dict[str, Any]], impact: _ImpactIndex) -> None:

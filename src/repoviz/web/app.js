@@ -451,6 +451,18 @@
   }
   function shortSymbol(n) { const q = n.qualified_name || n.name; const parts = q.split(/[.:]/); return n.component_type === "method" ? parts.slice(-2).join(".") : parts[parts.length - 1]; }
 
+  /* Architecture contracts (contracts.py): which snapshot edges break which contract, and a layers contract's layers. */
+  function contractInfo(c) {
+    if (!c || !(c.contracts || []).length) return null;
+    const edges = new Map();
+    for (const v of c.violations || []) for (const id of v.edge_ids || []) push(edges, id, v);
+    return { edges, layers: (c.layers || [])[0] || null };
+  }
+  const contractLegend = () => h("span", { class: "item" }, h("span", { class: "line removed" }), "⚠ breaks a contract (thick, dashed; “known” when in the baseline)");
+  function contractStatus(c) {
+    return c.status === "fail" ? pill([iconEl("alert", true), ` ${c.new} new`], "high") : pill([iconEl("check", true), " pass"], "added");
+  }
+
   /* Dependencies view. */
   function dependencyView(si, o) {
     const rels = new Set(o.relationships);
@@ -478,6 +490,11 @@
       const [s, t] = key.split("\u0000");
       return { source: s, target: t, status: "unchanged", cycle: o.cycles && cyc.pairs.has(key), count, relationship: relOf.get(key), underlying: under.get(key) };
     });
+    const ci = o.contracts ? si.contractInfo : null;
+    if (ci) for (const e of edges) {
+      const hits = (e.underlying || []).flatMap((id) => ci.edges.get(id) || []);
+      if (hits.length) e.contract = { names: [...new Set(hits.map((v) => v.contract))], known: hits.every((v) => v.known) };
+    }
     if (o.cyclesOnly) edges = edges.filter((e) => cyc.pairs.has(e.source + "\u0000" + e.target));
     let visible = new Set(edges.flatMap((e) => [e.source, e.target]));
     const focus = o.focus ? group(o.focus) || o.focus : null;
@@ -500,6 +517,15 @@
     const prio = new Set(focus ? [focus] : []);
     const view = finishView(si, [...visible].filter((v) => si.nodes.has(v)), edges, prio, o, () => "unchanged", "kind", `Dependencies at ${o.level} level`);
     if (focus) for (const n of view.nodes) if (n.id === focus) n.kind = "component";
+    if (ci && ci.layers && o.level !== "symbol") {  // a layers contract: its layers as numbered groups (Layer 1 is the highest)
+      const layered = view.nodes.filter((n) => ci.layers.nodes[n.id] !== undefined);
+      if (layered.length) {
+        view.direction = "TB";
+        const groups = new Map(ci.layers.layers.map((pattern, i) => ["layer_" + i, { label: `Layer ${i + 1}: ${pattern}` }]));
+        view.subgraphs = new Map([...groups, ...view.subgraphs]);
+        for (const n of layered) n.parent = "layer_" + ci.layers.nodes[n.id];
+      }
+    }
     view.cycles = cyc.components;
     return view;
   }
@@ -673,6 +699,11 @@
     }
     if (e.count > 1) markers.push("×" + e.count);
     if (e.relationship && !["imports", "contains", "calls"].includes(e.relationship)) markers.unshift(e.relationship);
+    if (e.contract) {  // breaks an architecture contract: thick, dashed and labelled (never colour alone)
+      style = { stroke: t.removed.stroke, width: 3.5, dash: "7 4" };
+      arrow = "-.->";
+      markers.unshift("⚠ " + e.contract.names.join(", ") + (e.contract.known ? " (known)" : ""));
+    }
     const parts = [`stroke:${style.stroke}`, `stroke-width:${style.width}px`, "fill:none"];
     if (style.dash) parts.push(`stroke-dasharray:${style.dash}`);
     if (e.relationship === "contains") { arrow = "---"; }
@@ -1364,7 +1395,7 @@
           checkbox("churn hotspots", o.hotspots, (c) => { o.hotspots = c; redraw(); }))),
         h("span", { class: "muted", text: "Double-click a node to drill down." })),
         h("div", { class: "split" }, h("div", null, this.diagram.el, this.drawer), this.details.el),
-        profileCards(app.bundle.profile || app.bundle.snapshot.profile || {}, app.bundle.snapshot));
+        profileCards(app.bundle.profile || app.bundle.snapshot.profile || {}, app.bundle.snapshot, app.bundle.contracts));
       this.draw();
     }
     setRoot(id) { this.opts.root = id; this.save(); this.draw(); }
@@ -1468,7 +1499,7 @@
     },
   });
 
-  function profileCards(p, snap) {
+  function profileCards(p, snap, contracts) {
     const list = (items, render, empty) => items && items.length ? h("ul", { class: "plain" }, items.map((x) => h("li", null, render(x)))) : h("div", { class: "empty", text: empty || "None found." });
     const langs = p.languages || [];
     const maxFiles = Math.max(1, ...langs.map((l) => l.files));
@@ -1510,6 +1541,9 @@
           h("h4", { text: "Containers" }), list(p.containers, (c) => [h("span", { class: "mono", text: c.path }), " ", pill(c.kind), c.services && c.services.length ? " services: " + c.services.join(", ") : "", c.base_images && c.base_images.length ? " from " + c.base_images.join(", ") : ""]),
           h("h4", { text: "Deployment" }), list(p.deployment, (d) => [h("span", { class: "mono", text: d.path }), " ", pill(d.kind)]),
           h("h4", { text: "CI" }), list(p.ci, (c) => [h("span", { class: "mono", text: c.path }), " ", pill(c.provider), (c.jobs || []).length ? ` ${c.jobs.length} job(s)` : ""])),
+        contracts && (contracts.contracts || []).length ? h("div", { class: "card" }, h("h3", { text: `Architecture contracts (${contracts.contracts.length})` }),
+          h("div", { class: "muted small", text: "From [[contracts]] and [[review.rules]]; violations in the baseline count as known. The Dependencies tab lists them and draws them with the Contracts overlay." }),
+          list(contracts.contracts, (c) => [contractStatus(c), " ", h("b", { text: c.name }), h("span", { class: "faint", text: ` · ${c.type}${c.known ? ` · ${c.known} known` : ""}` })])) : null,
         h("div", { class: "card" }, h("h3", { text: "Existing architecture & dependency tooling" }),
           h("h4", { text: "Architecture configuration" }), list(p.architecture_config, (a) => [h("span", { class: "mono", text: a.path }), " ", pill(a.tool), a.embedded ? pill("embedded") : null]),
           h("h4", { text: "Dependency-analysis tools" }), list(p.dependency_tools, (t) => [pill(t.tool), " ", h("span", { class: "mono faint", text: t.evidence.join(", ") })])),
@@ -1525,7 +1559,7 @@
       this.app = app; this.root = root;
       const cfg = app.bundle.config || {};
       this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on"], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
-        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false }, storage.get("rv.deps", {}));
+        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false, contracts: false }, storage.get("rv.deps", {}));
       this.opts.cycleMembers = null;
     }
     save() { const o = Object.assign({}, this.opts); delete o.cycleMembers; storage.set("rv.deps", o); }
@@ -1533,7 +1567,9 @@
       const o = this.opts, app = this.app;
       this.si = app.snapshotIndex;
       if (o.focus && !this.si.nodes.has(o.focus)) o.focus = null;
-      this.diagram = new Diagram({ title: "Dependencies", legend: kindLegend, spotlight: true });
+      this.si.contractInfo = contractInfo(app.bundle.contracts);
+      if (!this.si.contractInfo) o.contracts = false;
+      this.diagram = new Diagram({ title: "Dependencies", legend: () => [...kindLegend(), contractLegend()], spotlight: true });
       this.details = new DetailsPanel(app);
       this.focusInput = h("input", { type: "search", list: "rv-nodes", placeholder: "type a name…", size: 26, "aria-label": "Focus node" });
       this.datalist = h("datalist", { id: "rv-nodes" });
@@ -1546,6 +1582,11 @@
       const redraw = () => { this.save(); this.draw(); };
       this.cyclesEl = h("div", { class: "card" });
       this.fanEl = h("div", { class: "card" });
+      this.contractsEl = h("div", { class: "card contracts-card" });
+      const overlay = checkbox("contracts", o.contracts, (c) => { o.contracts = c; redraw(); });
+      this.overlayInput = $("input", overlay);
+      if (!this.si.contractInfo) { this.overlayInput.disabled = true; overlay.title = "No [[contracts]] configured (see docs/configuration.md or run `repoviz contracts --suggest`)"; }
+      else overlay.title = "Mark imports that break an architecture contract, and draw a layers contract's layers";
       put(this.root, h("div", { class: "toolbar" },
         field("Level", select([["auto", "Auto"], ["component", "Components"], ["project", "Projects"], ["package", "Packages / directories"], ["module", "Modules / files"], ["symbol", "Symbols (use with focus)"]], o.level, (v) => {
           o.level = v; if (v === "symbol" && !o.relationships.includes("calls")) o.relationships = [...o.relationships, "calls"]; redraw(); })),
@@ -1560,10 +1601,42 @@
           checkbox("external", o.external, (c) => { o.external = c; redraw(); }), checkbox("stdlib", o.stdlib, (c) => { o.stdlib = c; redraw(); }),
           checkbox("tests", o.tests, (c) => { o.tests = c; redraw(); }), checkbox("type-only imports", o.typeOnly, (c) => { o.typeOnly = c; redraw(); }),
           checkbox("highlight cycles", o.cycles, (c) => { o.cycles = c; redraw(); }), checkbox("cycles only", o.cyclesOnly, (c) => { o.cyclesOnly = c; redraw(); }),
-          checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); })))),
+          checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
+        h("div", { class: "field" }, h("span", { text: "Overlay" }), h("div", { class: "group" }, overlay))),
         h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el),
-        h("div", { class: "two-col" }, this.cyclesEl, this.fanEl));
+        h("div", { class: "two-col" }, this.cyclesEl, this.fanEl), this.contractsEl);
+      this.drawContracts();
       this.draw();
+    }
+    /* Contracts: pass or fail, then each violation (click one to focus on the importing module with the overlay on). */
+    drawContracts() {
+      const c = this.app.bundle.contracts, el = this.contractsEl;
+      el.innerHTML = "";
+      if (!c || !(c.contracts || []).length) {
+        put(el, h("h3", { text: "Architecture contracts" }), h("div", { class: "empty" }, "No contracts configured. Add ", h("code", { text: "[[contracts]]" }),
+          " to .repoviz.toml (layers, independence, forbidden, public interface, acyclic, required), or run ", h("code", { text: "repoviz contracts --suggest" }), "."));
+        return;
+      }
+      const failing = c.contracts.filter((x) => x.status === "fail").length;
+      put(el, h("h3", null, `Architecture contracts (${c.contracts.length}) `, failing ? pill([iconEl("alert", true), ` ${failing} failing`], "high") : pill([iconEl("check", true), " all pass"], "added")),
+        c.baseline && c.baseline.problem ? h("div", { class: "notice", text: `Baseline ${c.baseline.path} ignored: ${c.baseline.problem}` })
+          : c.baseline && c.baseline.known ? h("div", { class: "muted", text: `Baseline ${c.baseline.path}: ${c.baseline.known} known violation(s), shown as “known”.` }) : null,
+        c.error ? h("div", { class: "notice", text: "Contracts could not be checked: " + c.error } ) : null);
+      const byContract = new Map();
+      for (const v of c.violations) push(byContract, v.contract, v);
+      const ul = h("ul", { class: "plain" });
+      for (const x of c.contracts) {
+        const vs = (byContract.get(x.name) || []).sort((a, b) => (a.known - b.known) || a.source.localeCompare(b.source));
+        ul.appendChild(h("li", null, contractStatus(x), x.known ? h("span", { class: "faint", text: ` ${x.known} known` }) : null, " ", h("b", { text: x.name }), h("span", { class: "muted", text: ` · ${x.type}${x.origin === "review.rules" ? " (review rule)" : ""}` }),
+          vs.length ? h("ul", { class: "plain contract-violations" }, vs.slice(0, 50).map((v) => h("li", null,
+            h("a", { href: "#", title: "Focus on the importing module, with the contracts overlay", onclick: (ev) => { ev.preventDefault(); if (v.source_id) { this.opts.contracts = true; this.overlayInput.checked = true; this.setFocus(v.source_id); } } },
+              v.known ? "known · " : "⚠ ", v.chain && v.chain.length > 2 ? v.chain.join(" → ") : `${v.source} → ${v.target}`),
+            v.path ? h("span", { class: "faint mono", text: ` ${v.path}${v.line ? ":" + v.line : ""}` }) : null))) : null,
+          x.stale_ignores.length ? h("div", { class: "faint", text: "Stale ignore (matches nothing): " + x.stale_ignores.join("; ") }) : null,
+          x.capped ? h("div", { class: "faint", text: "Stopped early (work cap): more violations may exist." }) : null));
+      }
+      el.appendChild(ul);
+      if ((c.fixed || []).length) el.appendChild(h("div", { class: "muted", text: `Fixed since the baseline (${c.fixed.length}): remove them from ${c.baseline.path}.` }));
     }
     setFocus(id) { this.opts.focus = id; this.opts.cycleMembers = null; const n = this.si.nodes.get(id); this.focusInput.value = n ? displayName(n) : ""; this.save(); this.draw(); }
     async draw() {
@@ -2774,7 +2847,7 @@
           "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
           "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
-          "Below the diagram, **Repository discovery** lists what was detected: languages, projects and workspaces, source and test roots, entry points, containers, CI, Git submodules and the analyzers that ran."] },
+          "Below the diagram, **Repository discovery** lists what was detected: languages, projects and workspaces, source and test roots, entry points, containers, CI, Git submodules, the architecture contracts (pass or fail) and the analyzers that ran."] },
         { tip: "If something looks wrong (a missing source root, tests counted as code, generated code analyzed), fix it once in `.repoviz.toml`. See `docs/configuration.md`." },
         { p: "Analysis diagnostics at the bottom explain what could not be resolved (unsupported languages, unresolved imports, dynamic calls), so you know the limits of the picture." },
       ] },
@@ -2785,7 +2858,8 @@
           "**Focus** on a name to see its neighbourhood; **Depth** and **Direction** control it. *Dependents* answers \"what breaks if I change this?\"; *dependencies* answers \"what does this use?\".",
           "**Include**: external packages, the standard library, tests and type-only imports can be switched on or off to reduce noise.",
           "**Highlight cycles** draws dependency cycles in purple; **cycles only** shows nothing else. The Cycles card lists every cycle; click one to focus on it.",
-          "The fan-in / fan-out table ranks the most-used and most-dependent nodes, often the core and the riskiest modules."] },
+          "The fan-in / fan-out table ranks the most-used and most-dependent nodes, often the core and the riskiest modules.",
+          "**Contracts** (Overlay) marks every import that breaks an architecture contract from `[[contracts]]`: a thick, dashed line labelled “⚠ contract name” (“known” when it is in the baseline). A layers contract also draws its layers as numbered groups (Layer 1 is the highest; the layout may place them side by side). The **Architecture contracts** card lists each contract (✓ pass or ⚠ N new) and its violations; click one to focus on the importing module. Check a whole tree with `repoviz contracts`."] },
         { tip: "Before accepting a wave that adds a dependency, focus on its source and check the direction matches your layering (for example UI → service → data, never back)." },
       ] },
     { id: "activity", title: "Activity & Flow", icon: "pulse", tab: "activity", intro: "Watch work in progress: which files are changing now, what they affect, and which entry points and tests reach them.",

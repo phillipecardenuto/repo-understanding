@@ -82,6 +82,10 @@ def _edge_style(e: VEdge) -> tuple[str, str, str]:
         markers.append(f"×{e.count}")
     if e.relationship not in ("imports", "contains", "calls"):
         markers.insert(0, e.relationship)
+    if e.contract:  # thick, dashed and labelled: never colour alone
+        style = {"stroke": t["removed"]["stroke"], "width": 3.5, "dash": "7 4"}
+        arrow = "-.->"
+        markers.insert(0, f"⚠ {e.contract}")
     parts = [f"stroke:{style['stroke']}", f"stroke-width:{style['width']}px", "fill:none"]
     if style.get("dash"):
         parts.append(f"stroke-dasharray:{style['dash']}")

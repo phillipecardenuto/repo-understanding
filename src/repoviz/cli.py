@@ -273,9 +273,21 @@ def cmd_mermaid(args: argparse.Namespace) -> int:
                 return EXIT_USAGE
             focus = match[0].id
         if args.view == "dependencies":
+            contract_edges, layers = None, None
+            if args.contracts:
+                from .contracts import check, contracts_of, layer_groups
+
+                contract_edges = {}
+                cs = contracts_of(repo.config)
+                for res in check(snap, cs):
+                    for v in res.violations:
+                        for eid in v.edge_ids:
+                            contract_edges.setdefault(eid, []).append(v.contract)
+                layers = (layer_groups(snap, cs) or [None])[0]
             view = views.dependency_view(snap, level=args.level, include_external=args.external, focus=focus,
                                          depth=args.depth, max_nodes=args.max_nodes, icons=icons,
-                                         relationships=args.relationships or ("imports", "depends-on"))
+                                         relationships=args.relationships or ("imports", "depends-on"),
+                                         contract_edges=contract_edges, layers=layers)
         else:
             view = views.structure_view(snap, root=focus, depth=args.depth, include_files=args.files,
                                         max_nodes=args.max_nodes, icons=icons)
@@ -343,6 +355,73 @@ def cmd_activity(args: argparse.Namespace) -> int:
             out.append(f"  {ep['name']} [{ep['kind']}] (distance {ep['distance']})")
     _write("\n".join(out), args.output)
     return EXIT_OK
+
+
+def cmd_contracts(args: argparse.Namespace) -> int:
+    from . import __version__
+    from .contracts import baseline_json, check, contracts_of, load_baseline, report, sarif, suggest_layers
+
+    repo = _open(args)
+    rev = args.rev or "WORKTREE"
+    try:
+        snapshot = repo.snapshot(rev)
+        source = repo.open_source(rev)
+    except (RepositoryError, ValueError, RuntimeError) as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if args.suggest:
+        _write(suggest_layers(snapshot), args.output)
+        return EXIT_OK
+    contracts = contracts_of(repo.config)
+    if not contracts:
+        print("repoviz: no contracts configured: add [[contracts]] to .repoviz.toml (see docs/configuration.md), "
+              "or try `repoviz contracts --suggest`", file=sys.stderr)
+        return EXIT_OK
+    results = check(snapshot, contracts)
+    if args.baseline:  # printed for the user to commit; repoviz never writes into the repository on its own
+        _write(baseline_json(results), args.output)
+        return EXIT_OK
+    path = repo.config.contracts_baseline
+    known, problem = (set(), None) if args.no_baseline else load_baseline(source.read_text(path) if path else None)
+    rep = report(results, known, problem, path)
+    if args.format == "json":
+        _write(json.dumps(rep, indent=1), args.output)
+    elif args.format == "sarif":
+        _write(json.dumps(sarif(rep, __version__), indent=1), args.output)
+    else:
+        _write(format_contracts_text(rep), args.output)
+    return EXIT_GATE if rep["new"] else EXIT_OK
+
+
+def format_contracts_text(rep: dict[str, Any]) -> str:
+    failing = sum(1 for c in rep["contracts"] if c["status"] == "fail")
+    out = [f"Contracts ({len(rep['contracts'])}): " + (f"{failing} failing" if failing else "all pass")]
+    base = rep["baseline"]
+    if base["problem"]:
+        out.append(f"  baseline {base['path']} ignored: {base['problem']}")
+    elif base["known"]:
+        out.append(f"  baseline {base['path']}: {base['known']} known violation(s) not reported")
+    by_contract: dict[str, list[dict[str, Any]]] = {}
+    for v in rep["violations"]:
+        by_contract.setdefault(v["contract"], []).append(v)
+    for c in rep["contracts"]:
+        mark = "✗" if c["status"] == "fail" else "✓"
+        counts = ", ".join(x for x in (f"{c['new']} new" if c["new"] else "",
+                                         f"{c['known']} known" if c["known"] else "") if x) or "no violation"
+        out.append(f"  {mark} {c['name']} ({c['type']}): {counts}")
+        for v in by_contract.get(c["name"], []):
+            if v["known"]:
+                continue
+            loc = f"{v['path']}:{v['line']}" if v["path"] and v["line"] else (v["path"] or "")
+            out.append(f"      [{v['severity']}] {v['detail']}" + (f"  ({loc})" if loc else ""))
+        for entry in c["stale_ignores"]:
+            out.append(f"      stale ignore (matches nothing): {entry}")
+        if c["capped"]:
+            out.append("      note: stopped early (work cap); more violations may exist")
+    if rep["fixed"]:
+        out.append(f"Fixed since the baseline ({len(rep['fixed'])}): " + ", ".join(rep["fixed"][:5])
+                   + (" …" if len(rep["fixed"]) > 5 else "") + " (remove them from the baseline)")
+    return "\n".join(out) + "\n"
 
 
 def cmd_coupling(args: argparse.Namespace) -> int:
@@ -556,6 +635,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--depth", type=int, default=3)
     p.add_argument("--files", action="store_true", help="structure view: include modules/files")
     p.add_argument("--external", action="store_true")
+    p.add_argument("--contracts", action="store_true",
+                   help="dependencies view: mark imports that break a contract, and draw a layers contract's layers")
     p.add_argument("--max-nodes", type=int, default=200)
     p.set_defaults(func=cmd_mermaid)
 
@@ -586,6 +667,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-diff", action="store_true", help="include the full diff in --json output")
     p.add_argument("--no-session", action="store_true", help="compare with HEAD even if a session is active")
     p.set_defaults(func=cmd_activity)
+
+    p = sub.add_parser("contracts", parents=[common],
+                       help="check architecture contracts ([[contracts]]); exit 3 on violations not in the baseline")
+    p.add_argument("--rev", help="revision to check (default: the working tree)")
+    p.add_argument("--format", choices=("text", "json", "sarif"), default="text")
+    p.add_argument("--baseline", action="store_true",
+                   help="print the current violations as a baseline to commit, e.g. "
+                   "`repoviz contracts --baseline > .repoviz-known-violations.json`")
+    p.add_argument("--no-baseline", action="store_true", help="report every violation, ignoring the baseline")
+    p.add_argument("--suggest", action="store_true",
+                   help="print a layers contract (TOML) suggested from the current imports between components")
+    p.set_defaults(func=cmd_contracts)
 
     p = sub.add_parser("coupling", parents=[common],
                        help="files that usually change together, learned from Git history")

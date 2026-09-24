@@ -601,3 +601,30 @@ def test_structure_code_changes_in_the_live_app(page, make_repo) -> None:
         assert page.errors == []  # type: ignore[attr-defined]
     finally:
         srv.shutdown()
+
+
+def test_contracts_overlay_in_dependencies_and_structure(page, make_repo, tmp_path: Path) -> None:
+    from test_review import LAYERED, LAYERS_TOML
+
+    repo = make_repo(dict(LAYERED, **{".repoviz.toml": LAYERS_TOML}))
+    repo.write({"app/models/user.py": "from app.routes import api\n"})
+    report = tmp_path / "contracts.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=dependencies")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    card = page.inner_text("#tab-dependencies .contracts-card")
+    assert "1 failing" in card and "Layered backend" in card and "app.models.user → app.routes.api" in card
+    assert "app/models/user.py:1" in card
+    page.select_option("#tab-dependencies .toolbar select >> nth=0", "module")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    page.check("#tab-dependencies label.check:has-text('contracts') input")
+    page.wait_for_function("() => document.querySelector('#tab-dependencies .viewport svg') && "
+                           "document.querySelector('#tab-dependencies .viewport').textContent.includes('⚠ Layered backend')", timeout=30_000)
+    svg = page.inner_text("#tab-dependencies .viewport")
+    assert "Layer 1: app.routes" in svg and "Layer 3: app.models" in svg  # the layers, as ordered groups
+    styles = page.evaluate("Array.from(document.querySelectorAll('#tab-dependencies path.flowchart-link')).map(p => [getComputedStyle(p).strokeDasharray, parseFloat(getComputedStyle(p).strokeWidth)])")
+    assert any(dash not in ("none", "") and width >= 3 for dash, width in styles)  # thick and dashed, not only red
+    page.click("#tabbtn-structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    assert "Architecture contracts (1)" in page.inner_text("#tab-structure") and "1 new" in page.inner_text("#tab-structure")
+    assert page.errors == []  # type: ignore[attr-defined]

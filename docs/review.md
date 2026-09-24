@@ -140,7 +140,10 @@ Credential-like values are always redacted in excerpts and diffs.
 | `missed-companion` | low (medium when ≥ 80% of ≥ 8 commits) | correctness | a changed file usually changes together with another file that this change left untouched; see [Files that usually change together](#files-that-usually-change-together) |
 | `error-handling-removed` | low | correctness | more raise/except/throw/catch lines removed than added |
 | `new-cycle` / `cycle-grown` | high | architecture | a dependency cycle was introduced or extended |
-| `forbidden-dependency` | rule | architecture | a new dependency violates a `[[review.rules]]` rule |
+| `contract-broken` | contract (default high) | architecture | a new import breaks an architecture contract (`[[contracts]]` or `[[review.rules]]`), with the file, line and, for an indirect violation, the chain. Violations already in the base or in the baseline are not reported. `forbidden-dependency` (its old name) still disables it |
+| `contract-fixed` | info | architecture | a violation present in the base is gone |
+| `contract-baseline-changed` | medium / info | architecture | the known-violations baseline changed; *medium* when it newly accepts violations, which are then no longer reported |
+| `contract-baseline-invalid` | low | architecture | the baseline file is not valid, so every violation is reported |
 | `new-component-dependency` | medium | architecture | two components are now coupled |
 | `new-package-dependency` | low | architecture | a package now imports a package it never used before |
 | `undeclared-dependency` | medium | architecture | an import of a package not declared in any manifest |
@@ -456,11 +459,42 @@ Either way, **Copy prompt** or **Download .md** exports them.
 The prompt lists your notes first, then, optionally, untriaged signals at or
 above a chosen severity, and restates the allowed and protected scope.
 
+### Architecture contracts
+
+Contracts (see [configuration.md](configuration.md#architecture-contracts)) turn
+"respect the architecture" into something checked on every wave:
+
+```text
+[high] Contract broken: Layered backend: app.models.user imports app.routes.api:
+       layer 'app.models' is below 'app.routes' and may not import it.  (app/models/user.py:1)
+[high] Contract broken: Layered backend: app.models.user imports app.routes.api (through
+       app.util.helpers): ...                                          (with allow_indirect = false)
+[medium] Known-violations baseline changed: .repoviz-known-violations.json now accepts
+       1 more violation(s): Layered backend::app.models.new::app.routes.api.
+```
+
+A review reports only what the change introduces: violations in the target that
+are neither in the base nor in the baseline. A violation that disappears is
+`contract-fixed`. All four signals can be turned off in `review.disabled_checks`.
+
+`repoviz contracts` checks a whole tree, for CI:
+
+```bash
+repoviz contracts                        # exit 3 when a violation is not in the baseline
+repoviz contracts --format sarif > contracts.sarif   # for code-scanning tools
+repoviz contracts --format json
+repoviz contracts --baseline > .repoviz-known-violations.json   # accept today's violations
+repoviz contracts --suggest              # a layers (or acyclic) contract from the current imports
+repoviz mermaid --view dependencies --level module --contracts   # the overlay as Mermaid
+```
+
 ## Guardrails in automation
 
 ```bash
 repoviz review session --fail-on protected --fail-on high      # exit 3 on violations
 repoviz review session --fail-on risk:high                     # exit 3 when the wave risk is high
+repoviz review session --fail-on contract-broken               # exit 3 when the wave breaks a contract
+repoviz contracts --format sarif > contracts.sarif             # every violation not in the baseline
 repoviz review main...HEAD --format markdown > review.md       # for a PR description
 repoviz diff session --fail-on new-cycle --fail-on new-component-dependency
 ```

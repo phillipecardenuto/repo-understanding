@@ -346,3 +346,41 @@ def test_file_changes_over_the_api_and_in_reports(make_repo, monkeypatch) -> Non
     hot = bundle["file_changes"]["app/hot.py"]
     assert hot["truncated"] and sum(len(hk["lines"]) for hk in hot["hunks"]) == 3
     assert build_bundle(Repository(repo.path), mode="live")["file_changes"] == {}  # the live app asks on demand
+
+
+def test_contracts_command_exit_codes_json_and_sarif(make_repo, capsys) -> None:
+    from test_review import LAYERED, LAYERS_TOML
+
+    repo = make_repo(dict(LAYERED, **{".repoviz.toml": LAYERS_TOML}))
+    assert main(["contracts", "-C", repo.path]) == 0
+    assert "Contracts (1): all pass" in capsys.readouterr().out
+    repo.write({"app/models/user.py": "from app.routes import api\n"})
+    assert main(["contracts", "-C", repo.path, "--format", "json"]) == 3  # a violation not in the baseline
+    data = json.loads(capsys.readouterr().out)
+    assert data["new"] == 1 and data["contracts"][0]["status"] == "fail"
+    [v] = data["violations"]
+    assert (v["path"], v["line"], v["key"]) == ("app/models/user.py", 1, "Layered backend::app.models.user::app.routes.api")
+    assert main(["contracts", "-C", repo.path, "--format", "sarif"]) == 3
+    sarif = json.loads(capsys.readouterr().out)
+    [result] = sarif["runs"][0]["results"]
+    assert sarif["version"] == "2.1.0" and result["ruleId"] == "Layered backend" and result["level"] == "error"
+    assert result["locations"][0]["physicalLocation"] == {"artifactLocation": {"uri": "app/models/user.py"},
+                                                          "region": {"startLine": 1}}
+    assert main(["contracts", "-C", repo.path, "--baseline"]) == 0
+    baseline = capsys.readouterr().out
+    assert json.loads(baseline)["violations"][0]["key"] == v["key"]
+    assert not Path(repo.path, ".repoviz-known-violations.json").exists()  # printed, never written by repoviz
+    repo.write({".repoviz-known-violations.json": baseline})
+    assert main(["contracts", "-C", repo.path]) == 0
+    assert "1 known violation(s) not reported" in capsys.readouterr().out
+    assert main(["contracts", "-C", repo.path, "--no-baseline"]) == 3
+    capsys.readouterr()
+    assert main(["contracts", "-C", repo.path, "--suggest"]) == 0
+    assert "import each other in a cycle" in capsys.readouterr().out  # models now imports routes
+    assert main(["review", "-C", repo.path, "--fail-on", "contract-broken"]) == 0  # known: not reported
+
+
+def test_contracts_command_without_contracts(make_repo, capsys) -> None:
+    repo = make_repo({"a.py": "A = 1\n"})
+    assert main(["contracts", "-C", repo.path]) == 0
+    assert "no contracts configured" in capsys.readouterr().err

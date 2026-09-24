@@ -68,6 +68,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
 | `repoviz activity [--json]` | Files being modified now, with impact, tests and config flags. |
 | `repoviz coupling [--path FILE] [--json]` | Files that usually change together, learned from Git history. |
+| `repoviz contracts [--format text\|json\|sarif] [--baseline] [--suggest]` | Check the architecture contracts (`[[contracts]]`: layers, independence, forbidden, public interface, acyclic, required). Exit 3 on a violation not in the known-violations baseline. `--baseline` prints the baseline to commit; `--suggest` proposes a layers contract. |
 | `repoviz session start\|status\|scope\|end\|list [--allow G] [--protect G]` | Manage work sessions (waves) and their scope. |
 
 Every command takes `-C PATH` (repository), `--config FILE`, `--exclude GLOB`,
@@ -145,7 +146,10 @@ lists:
 (`imports`, `depends-on` from manifests, `calls`, `invokes`, `builds`). Options
 cover external packages, stdlib, tests and type-only imports. You can focus on a
 node, choose depth and direction (depends on / used by), and highlight or isolate
-cycles. Clicking a node spotlights its direct neighbourhood without redrawing:
+cycles. The **Contracts** overlay marks imports that break an architecture
+contract (thick, dashed, "⚠ contract name") and draws a layers contract's
+layers as numbered groups (Layer 1 is the highest); a card lists every contract and its violations.
+Clicking a node spotlights its direct neighbourhood without redrawing:
 modules that use it (solid, thick links), modules it uses (dashed, thick links),
 and everything else faded; Esc or a click on the background restores the graph.
 Clicking an edge label explains *why* one thing depends on another, with
@@ -217,6 +221,15 @@ Review signals flag likely problems for a human to check:
   together with an edited one (a migration, a test, a client) was left untouched;
 - untested changes and weakened tests (skips, removed assertions);
 - swallowed exceptions, debugger statements and possible secrets.
+
+**Architecture contracts** tell the agent to respect the architecture and check it
+on every wave. Declare layers (`routes → services → models`), independent
+features, public interfaces, forbidden or required dependencies and acyclic
+packages in `[[contracts]]`. A review reports each new violation as
+`contract-broken`, with the file, the line and the import chain. Existing
+violations can be accepted once in a committed baseline
+(`repoviz contracts --baseline > .repoviz-known-violations.json`), so only new
+ones count. See [docs/configuration.md](docs/configuration.md#architecture-contracts).
 
 Each changed file also gets an explainable **risk score**, and the wave's risk is
 its riskiest file. The text output starts with "Review first (riskiest files)",

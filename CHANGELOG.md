@@ -6,6 +6,27 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Architecture contracts with a known-violations baseline** ([#16](https://github.com/phillipecardenuto/repo-understanding/issues/16)).
+  - `[[contracts]]` declares layers (optionally per container), independent
+    modules, public interfaces, forbidden and required dependencies, and
+    acyclic packages. Patterns are qualified names (`app.features.*`) or path
+    globs, so every analyzed language works. `allow_indirect = false` follows
+    import chains, and `ignore` entries that match nothing are reported as
+    stale. `[[review.rules]]` are now `forbidden` contracts.
+  - Reviews raise `contract-broken` for violations the change introduces, with
+    the file, the line and the chain. It replaces `forbidden-dependency`, which
+    still works in `disabled_checks`. Also new: `contract-fixed`,
+    `contract-baseline-changed` and `contract-baseline-invalid`.
+  - Known violations can be accepted in a committed baseline.
+    `repoviz contracts --baseline` prints it: repoviz never writes into the
+    repository.
+  - New command `repoviz contracts`: text, JSON or SARIF; exit 3 on new
+    violations; `--suggest` proposes a layers contract.
+  - The Dependencies tab gets a **Contracts** overlay (violating imports thick,
+    dashed and labelled, layers drawn as numbered groups) and a contracts card.
+  - The Structure profile lists pass/fail per contract.
+  - `repoviz mermaid --view dependencies --contracts` draws the overlay in
+    Mermaid.
 - **Code changes of churn hotspots in the Structure tab** ([#36](https://github.com/phillipecardenuto/repo-understanding/issues/36)).
   - Clicking a hotspot opens a drawer under the graph. It shows the file's last
     commits and the diff of the latest one, or of its uncommitted edits, with an

@@ -259,6 +259,7 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "activity": to_jsonable(activity) if activity is not None else None,
         "reviews": reviews,
         "file_changes": _hotspot_changes(repo, snapshot) if mode == "static" else {},
+        "contracts": _contracts_payload(repo, snapshot),
         "review_targets": [t.to_dict() for t in targets],
         "theme": theme(),
         "session": _current_session(repo),
@@ -279,6 +280,28 @@ def _current_session(repo: Repository) -> dict[str, Any] | None:
     except Exception:
         return None
     return session.to_dict() if session else None
+
+
+def _contracts_payload(repo: Repository, snapshot: Any) -> dict[str, Any] | None:
+    """Architecture contracts on the working tree, for the Dependencies overlay and the Structure profile."""
+    from ..contracts import check, contracts_of, layer_groups, load_baseline, report
+    from ..filechanges import _read_disk, checked_path
+
+    contracts = contracts_of(repo.config)
+    if not contracts:
+        return None
+    path = repo.config.contracts_baseline
+    try:
+        data = _read_disk(repo.root, checked_path(path)) if path else None
+    except ValueError:
+        data = None
+    known, problem = load_baseline(data.decode("utf-8", "replace") if isinstance(data, bytes) else None)
+    try:
+        payload = report(check(snapshot, contracts), known, problem, path)
+    except Exception as exc:  # contracts are optional for a report
+        return {"error": f"{type(exc).__name__}: {exc}", "contracts": [], "violations": []}
+    payload["layers"] = layer_groups(snapshot, contracts)
+    return payload
 
 
 def _hotspot_changes(repo: Repository, snapshot: Any) -> dict[str, Any]:

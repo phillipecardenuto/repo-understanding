@@ -61,6 +61,7 @@ class VEdge:
     cycle_introduced: bool = False
     count: int = 1
     relationship: str = REL_IMPORTS
+    contract: str = ""  # contracts this dependency breaks (the contracts overlay)
 
 
 @dataclass
@@ -293,7 +294,10 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
 def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
                     relationships: Iterable[str] = DEFAULT_RELATIONSHIPS, include_external: bool = False,
                     include_tests: bool = True, focus: str | None = None, depth: int = 1, max_nodes: int = 250,
-                    icons: dict[str, str] | None = None) -> ViewGraph:
+                    icons: dict[str, str] | None = None, contract_edges: dict[str, list[str]] | None = None,
+                    layers: dict[str, Any] | None = None) -> ViewGraph:
+    """``contract_edges`` (import edge ID → contracts it breaks) marks those dependencies; ``layers`` (from
+    ``contracts.layer_groups``) draws a layers contract's layers as numbered groups."""
     icons = default_icons() if icons is None else icons
     rels = set(relationships)
     nodes = snapshot.node_index()
@@ -301,6 +305,7 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
     pairs: dict[tuple[str, str], int] = {}
     runtime: set[tuple[str, str]] = set()
     rel_of: dict[tuple[str, str], str] = {}
+    broken: dict[tuple[str, str], set[str]] = {}
     for e in snapshot.dependency_edges + snapshot.call_edges:
         if not e.direct or e.relationship not in rels:
             continue
@@ -313,6 +318,8 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
             continue
         pairs[(s, t)] = pairs.get((s, t), 0) + e.occurrences
         rel_of.setdefault((s, t), e.relationship)
+        if contract_edges and e.id in contract_edges:
+            broken.setdefault((s, t), set()).update(contract_edges[e.id])
         if not e.metadata.get("type_checking_only"):
             runtime.add((s, t))
     cycles = _scc_pairs(runtime)
@@ -333,13 +340,20 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
     order = sorted(visible, key=lambda v: nodes[v].qualified_name if v in nodes else v)
     view = ViewGraph(title=f"Dependencies ({level} level)", mode="kind", truncated=max(0, len(order) - max_nodes))
     keep = set(order[:max_nodes])
+    in_layer = (layers or {}).get("nodes", {})
+    if in_layer:
+        view.direction = "TB"
+        for i, pattern in enumerate(layers["layers"]):  # declared in order: highest layer first
+            view.subgraphs[f"layer_{i}"] = (f"Layer {i + 1}: {pattern}", None)
     for v in order[:max_nodes]:
         node = nodes[v]
+        parent = f"layer_{in_layer[v]}" if v in in_layer else None
         view.nodes.append(VNode(v, node.qualified_name or node.name, _sublabel(node), UNCHANGED, _kind(node),
-                                "stadium" if "external" in node.tags else "box", None, _icon(node, icons)))
+                                "stadium" if "external" in node.tags else "box", parent, _icon(node, icons)))
     for (s, t), count in sorted(pairs.items()):
         if s in keep and t in keep:
-            view.edges.append(VEdge(s, t, UNCHANGED, (s, t) in cycles, False, count, rel_of[(s, t)]))
+            view.edges.append(VEdge(s, t, UNCHANGED, (s, t) in cycles, False, count, rel_of[(s, t)],
+                                    ", ".join(sorted(broken.get((s, t), ())))))
     return view
 
 
