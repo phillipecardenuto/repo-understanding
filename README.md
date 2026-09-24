@@ -299,7 +299,12 @@ PLAYWRIGHT_BROWSERS_PATH=/path/to/browsers pytest tests/test_browser.py
 
 Documentation: [reviewing agent work](docs/review.md) · [architecture](docs/architecture.md) ·
 [configuration](docs/configuration.md) · [data model](docs/data-model.md) ·
-[evaluation on a large multi-module system](docs/evaluation-elies.md).
+[evaluation on a large multi-module system](docs/evaluation-elies.md) ·
+[feature wishlist](docs/wishlist.md).
+
+Contributing, by people or coding agents: start with [AGENTS.md](AGENTS.md). It
+covers the invariants, how to test and when a change counts as done. Planned work
+is in the GitHub issues labelled `wishlist`.
 
 Mermaid 11.17.2 is vendored in `src/repoviz/web/vendor/` under the MIT licence
 (`LICENSE-mermaid.txt`).

@@ -2,6 +2,17 @@
 
 All notable changes to repoviz. Versions follow [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+
+- **Feature wishlist** ([docs/wishlist.md](docs/wishlist.md)). It surveys
+  similar tools and tracks 33 improvements as GitHub issues, with priorities and
+  a suggested order.
+- **`AGENTS.md`**, a guide for coding agents (and people) working on repoviz:
+  code map, invariants, tests and when a change counts as done. `CLAUDE.md`
+  imports it.
+
 ## [0.1.0] - 2026-09-24
 
 First release: a local, read-only tool to understand a repository's architecture
@@ -79,4 +90,5 @@ and to supervise AI coding agents feature by feature.
 - **Speed.** Caches are single-flight, activity polls get ETag/304 answers and
   API payloads are compact. On Django, a cached page load takes about 0.5 s.
 
+[Unreleased]: https://github.com/phillipecardenuto/repo-understanding/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/phillipecardenuto/repo-understanding/releases/tag/v0.1.0

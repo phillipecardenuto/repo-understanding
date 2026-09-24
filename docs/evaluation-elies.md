@@ -70,6 +70,18 @@ ELIES is large as a system rather than by file count:
 Priorities: **P1** would noticeably change the usefulness on repositories like this
 one, **P2** is a clear improvement, **P3** is polish.
 
+Every item below is now a GitHub issue; [wishlist.md](wishlist.md) has the full list.
+
+| Item | Issue | Item | Issue | Item | Issue |
+|---|---|---|---|---|---|
+| A1, C4 | [#21](https://github.com/phillipecardenuto/repo-understanding/issues/21) | B1 | [#2](https://github.com/phillipecardenuto/repo-understanding/issues/2) | C1 | [#27](https://github.com/phillipecardenuto/repo-understanding/issues/27) |
+| A2, A5, C5 | [#22](https://github.com/phillipecardenuto/repo-understanding/issues/22) | B2 | [#3](https://github.com/phillipecardenuto/repo-understanding/issues/3) | C2, C3 | [#29](https://github.com/phillipecardenuto/repo-understanding/issues/29) |
+| A3 | [#23](https://github.com/phillipecardenuto/repo-understanding/issues/23) | B3 | [#4](https://github.com/phillipecardenuto/repo-understanding/issues/4) | | |
+| A4, A8 | [#24](https://github.com/phillipecardenuto/repo-understanding/issues/24) | B4 | [#13](https://github.com/phillipecardenuto/repo-understanding/issues/13) | | |
+| A6, A7 | [#25](https://github.com/phillipecardenuto/repo-understanding/issues/25) | B5 | [#14](https://github.com/phillipecardenuto/repo-understanding/issues/14) | | |
+| | | B6 | [#31](https://github.com/phillipecardenuto/repo-understanding/issues/31) | | |
+| | | B7, B8 | [#15](https://github.com/phillipecardenuto/repo-understanding/issues/15) | | |
+
 ### A. Project awareness
 
 1. **P1: Analyze submodules as sub-projects.** Reviews look inside submodules, but
