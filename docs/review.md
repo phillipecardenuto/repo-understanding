@@ -116,7 +116,10 @@ Credential-like values are always redacted in excerpts and diffs.
 | `new-component-dependency` | medium | architecture | two components are now coupled |
 | `new-package-dependency` | low | architecture | a package now imports a package it never used before |
 | `undeclared-dependency` | medium | architecture | an import of a package not declared in any manifest |
-| `public-api-removed` | medium | architecture | a public function/class/method was removed |
+| `public-api-removed` | medium | architecture | a public function/class/method was removed (a rename is not a removal: see below) |
+| `renamed-symbol-stale-references` | high | correctness | a function or class was renamed, but code still uses the old name (calls, imports, uses as a value), with each location |
+| `renamed-symbol` | low | architecture | a function or class was renamed and no reference to the old name is left |
+| `submodule-moved` | medium | architecture | a submodule now lives at another path (same URL or commit, or a similar name in the same folder) |
 | `new-external-dependency` | low | architecture | a new third-party import |
 | `untested-change` | medium | tests | changed code that no test imports, even indirectly |
 | `tests-not-updated` | low | tests | new public code while the tests covering the module were not touched |
@@ -136,6 +139,25 @@ Credential-like values are always redacted in excerpts and diffs.
 | `submodule-added` / `submodule-removed` | medium | architecture | a Git submodule was added or removed |
 | `submodule-updated` | medium | architecture | a submodule now points to another commit (commits listed when available) |
 | `submodule-uncommitted` | medium | correctness | files changed inside a submodule are not committed there, so the superproject cannot record them |
+
+### Renames and moves
+
+A rename used to look like one removal plus one addition, with a "public symbol
+removed" signal and a "call to a removed function" for every caller. repoviz now
+pairs them again. The file card shows the file once, at its new path
+("↦ moved from …"), and its diff is only the actual edit. Key changes say
+"↦ was `old_name`", and diagrams label the node "↦ was …". The review asks one
+question: is the old name still used anywhere?
+
+```text
+[high] Renamed, but the old name is still used: app.errs.ELISException was renamed to
+       app.errs.ELIESException, but `ELISException` is still used at app/api.py:1, app/api.py:5.
+```
+
+The old name is looked for in calls that no longer resolve and in the renamed
+symbol's module and its importers (imports, calls, uses as a value; comments
+ignored). Methods are only checked through calls, because a method name alone is
+too ambiguous. Moving a protected file counts as touching it.
 
 ### New code that is not wired in
 

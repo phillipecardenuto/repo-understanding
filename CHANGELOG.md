@@ -6,6 +6,16 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Renames and moves are recognised** ([#3](https://github.com/phillipecardenuto/repo-understanding/issues/3)).
+  - The diff pairs removed and added files, folders, submodules and
+    functions/classes that are the same thing under a new name or path. They
+    become one node (`before.previous_id`), and their edges and cycles carry
+    over.
+  - Reviews show a moved file once, with only its real edit.
+  - New signals: `renamed-symbol-stale-references` (high: the old name is still
+    used, with each location), `renamed-symbol` (low) and `submodule-moved`.
+    A rename no longer raises `public-api-removed` or `dangling-call`.
+  - Diagrams label renamed nodes "↦ was …".
 - **Review a wave commit by commit** ([#2](https://github.com/phillipecardenuto/repo-understanding/issues/2)).
   - The AI Review tab gets a **Commits** panel: the range's commits, oldest
     first, then uncommitted work, each with files, lines and signals.

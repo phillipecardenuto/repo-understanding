@@ -417,6 +417,8 @@ class EdgeChange:
     base_evidence: list[SourceEvidence] = field(default_factory=list)
     #: Flags (type_checking_only, lazy_only, scope...) of the base version of a modified edge.
     base_flags: dict[str, Any] = field(default_factory=dict)
+    #: The base edge this one continues when an endpoint was renamed or moved (same relationship).
+    previous_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = self.edge.to_dict()
@@ -429,6 +431,8 @@ class EdgeChange:
             data["base_evidence"] = [e.to_dict() for e in self.base_evidence]
         if self.base_flags:
             data["base_flags"] = dict(self.base_flags)
+        if self.previous_id:
+            data["previous_id"] = self.previous_id
         return data
 
 
@@ -453,6 +457,9 @@ class RepositoryDiff:
     diagnostics: list[Diagnostic] = field(default_factory=list)
     nodes: dict[str, NodeChange] = field(default_factory=dict)
     edges: dict[str, EdgeChange] = field(default_factory=dict)
+    #: Removed + added node pairs that are the same thing renamed or moved (see ``renames.py``); the old node
+    #: is folded into the new one, which is "modified" with ``before.previous_id``.
+    renames: list[dict[str, Any]] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
 
     def summary(self) -> dict[str, Any]:
@@ -501,6 +508,7 @@ class RepositoryDiff:
             },
             "new_dependencies": len(self.new_dependencies),
             "removed_dependencies": len(self.removed_dependencies),
+            "renamed": len(self.renames),
         }
 
     @property
@@ -529,6 +537,7 @@ class RepositoryDiff:
             "new_dependencies": _clean(self.new_dependencies),
             "removed_dependencies": _clean(self.removed_dependencies),
             "diagnostics": [d.to_dict() for d in self.diagnostics],
+            "renames": _clean(self.renames),
             "nodes": [c.to_dict() for c in self.nodes.values()],
             "edges": [c.to_dict() for c in self.edges.values()],
         }

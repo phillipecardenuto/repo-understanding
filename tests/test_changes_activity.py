@@ -255,3 +255,25 @@ def test_activity_shows_companions_not_touched_yet(make_repo) -> None:
     Path(repo.path, "schema.sql").write_text("-- agent\n")
     events = {e["path"]: e for e in observe(Repository(repo.path))["events"]}
     assert not events["app.py"].get("companions")
+
+
+def test_diff_folds_renames_and_redirects_their_edges(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/billing/__init__.py": "",
+                      "app/billing/invoice.py": "from app.billing import tax\n\n\ndef total(x):\n    return tax.tax(x)\n",
+                      "app/billing/tax.py": "from app.billing import invoice\n\n\ndef tax(x):\n    return x * 2\n",
+                      "app/main.py": "from app.billing.invoice import total\n\nprint(total(1))\n"})
+    repo.git("mv", "app/billing", "app/payments")
+    for name in ("app/payments/invoice.py", "app/payments/tax.py", "app/main.py"):
+        p = Path(repo.path, name)
+        p.write_text(p.read_text().replace("app.billing", "app.payments"))
+    _comp, diff = Repository(repo.path).compare(mode="all")
+    kinds = {(r["kind"], r["old_name"], r["new_name"]) for r in diff.renames}
+    assert ("file", "app.billing.invoice", "app.payments.invoice") in kinds
+    assert ("symbol", "app.billing.tax.tax", "app.payments.tax.tax") in kinds
+    assert not diff.added_nodes or all(diff.nodes[n].node.path in ("app/payments",) for n in diff.added_nodes)
+    moved = next(c for c in diff.nodes.values() if c.node.qualified_name == "app.payments.invoice")
+    assert moved.status == "modified" and moved.before["previous_id"] and "moved from app/billing/invoice.py" in moved.reasons
+    # The import edges followed the move: no dependency appears or disappears, and the cycle is the same one.
+    assert diff.new_dependencies == [] and diff.removed_dependencies == []
+    assert diff.introduced_cycles == [] and diff.resolved_cycles == []
+    assert any(c.previous_id for c in diff.edges.values())

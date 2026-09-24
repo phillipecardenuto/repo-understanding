@@ -195,6 +195,8 @@ Review signals flag likely problems for a human to check:
 - broken imports, and calls to functions the agent removed;
 - changed signatures whose callers were not updated;
 - new code that is not wired in (a router never registered, a module nothing imports);
+- a rename that left code using the old name (renames and moves are recognised
+  instead of showing as a removal plus an addition);
 - a usual companion change that is missing: a file that almost always changes
   together with an edited one (a migration, a test, a client) was left untouched;
 - untested changes and weakened tests (skips, removed assertions);

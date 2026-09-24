@@ -34,6 +34,7 @@ from .model import (
     RepositorySnapshot,
 )
 from .pipeline import utcnow
+from .renames import detect_renames
 
 #: Metadata keys whose change makes a node "modified".
 SIGNIFICANT_NODE_METADATA = (
@@ -77,9 +78,9 @@ def _node_changes(before: ComponentNode, after: ComponentNode) -> tuple[list[str
     return reasons, prior
 
 
-def _edge_changes(before: DependencyEdge, after: DependencyEdge) -> list[str]:
+def _edge_changes(before: DependencyEdge, after: DependencyEdge, evidence: bool = True) -> list[str]:
     reasons = []
-    if before.evidence_signature() != after.evidence_signature():
+    if evidence and before.evidence_signature() != after.evidence_signature():
         reasons.append("evidence changed")
     if before.occurrences != after.occurrences:
         reasons.append(f"occurrences {before.occurrences} → {after.occurrences}")
@@ -91,7 +92,11 @@ def _edge_changes(before: DependencyEdge, after: DependencyEdge) -> list[str]:
     return reasons
 
 
-def _match_cycles(base: list[Cycle], target: list[Cycle]) -> tuple[list[Cycle], list[Cycle], list[dict[str, Any]]]:
+def _match_cycles(base: list[Cycle], target: list[Cycle],
+                  renamed: dict[str, str] | None = None) -> tuple[list[Cycle], list[Cycle], list[dict[str, Any]]]:
+    """Match cycles by members; base members are seen through ``renamed`` (old id → new id)."""
+    renamed = renamed or {}
+    members_of = {c.id: {renamed.get(m, m) for m in c.members} for c in base}
     introduced: list[Cycle] = []
     changed: list[dict[str, Any]] = []
     base_by_level: dict[str, list[Cycle]] = {}
@@ -100,15 +105,15 @@ def _match_cycles(base: list[Cycle], target: list[Cycle]) -> tuple[list[Cycle], 
     matched_base: set[str] = set()
     for t in target:
         candidates = base_by_level.get(t.level, [])
-        same = next((c for c in candidates if c.id == t.id), None)
+        same = next((c for c in candidates if c.id == t.id or members_of[c.id] == set(t.members)), None)
         if same is not None:
             matched_base.add(same.id)
             continue
-        overlapping = [c for c in candidates if set(c.members) & set(t.members)]
+        overlapping = [c for c in candidates if members_of[c.id] & set(t.members)]
         if not overlapping:
             introduced.append(t)
             continue
-        before_members = set().union(*(set(c.members) for c in overlapping))
+        before_members = set().union(*(members_of[c.id] for c in overlapping))
         matched_base.update(c.id for c in overlapping)
         changed.append({
             "level": t.level, "relationship": t.relationship, "target_cycle": t.id,
@@ -142,6 +147,29 @@ def diff_snapshots(base: RepositorySnapshot, target: RepositorySnapshot) -> Repo
         else:
             reasons, prior = _node_changes(before, after)
             diff.nodes[nid] = NodeChange(after, MODIFIED if reasons else UNCHANGED, reasons, prior)
+
+    # Removed + added pairs that are one thing renamed or moved become one modified node.
+    id_map: dict[str, str] = {}
+    for rn in detect_renames(base, target, {i for i, c in diff.nodes.items() if c.status == REMOVED},
+                             {i for i, c in diff.nodes.items() if c.status == ADDED}):
+        before, after = b_nodes[rn.old_id], t_nodes[rn.new_id]
+        reasons, prior = _node_changes(before, after)
+        # A qualified name changes with the file; "renamed" means the name itself changed.
+        reasons = [f"renamed from {before.name}" if r == "renamed" and rn.renamed else
+                   f"moved from {before.path}" if r == "moved" and before.path != after.path else r
+                   for r in reasons if r != "renamed" or rn.renamed]
+        if rn.renamed and not any(r.startswith("renamed") for r in reasons):
+            reasons.insert(0, f"renamed from {before.name}")
+        if before.path != after.path and not any(r.startswith("moved") for r in reasons):
+            reasons.insert(0, f"moved from {before.path}")
+        reasons = [r for r in reasons if r != "moved"]
+        prior.update({"previous_id": rn.old_id, "qualified_name": before.qualified_name, "name": before.name})
+        if before.path != after.path:
+            prior["path"] = before.path
+        diff.nodes[rn.new_id] = NodeChange(after, MODIFIED, reasons or [f"renamed from {before.name}"], prior)
+        del diff.nodes[rn.old_id]
+        id_map[rn.old_id] = rn.new_id
+        diff.renames.append(rn.to_dict())
 
     # Containers of changed nodes are modified too ("contents changed").
     def parent_of(nid: str) -> str | None:
@@ -184,10 +212,32 @@ def diff_snapshots(base: RepositorySnapshot, target: RepositorySnapshot) -> Repo
                             base_flags={k: before.metadata[k] for k in EDGE_FLAGS if before.metadata.get(k)}
                             if reasons else {})
         diff.edges[eid] = ch
+
+    # An edge whose endpoint was renamed continues as the target's edge between the renamed nodes.
+    if id_map:
+        added_by_ends = {(c.edge.relationship, c.edge.source_id, c.edge.target_id): eid
+                         for eid, c in diff.edges.items() if c.status == ADDED}
+        for eid, ch in list(diff.edges.items()):
+            e = ch.edge
+            if ch.status != REMOVED or (e.source_id not in id_map and e.target_id not in id_map):
+                continue
+            new_eid = added_by_ends.get((e.relationship, id_map.get(e.source_id, e.source_id),
+                                         id_map.get(e.target_id, e.target_id)))
+            if new_eid is None:
+                continue
+            cont = diff.edges[new_eid]
+            reasons = _edge_changes(e, cont.edge, evidence=False)  # locations moved with the file
+            cont.status = MODIFIED if reasons else UNCHANGED
+            cont.reasons = reasons
+            cont.in_base_cycle = e.in_cycle
+            cont.previous_id = eid
+            del diff.edges[eid]
+    for eid, ch in diff.edges.items():
         {ADDED: diff.added_edges, REMOVED: diff.removed_edges, MODIFIED: diff.modified_edges,
          UNCHANGED: diff.unchanged_edges}[ch.status].append(eid)
 
-    diff.introduced_cycles, diff.resolved_cycles, diff.changed_cycles = _match_cycles(base.cycles, target.cycles)
+    diff.introduced_cycles, diff.resolved_cycles, diff.changed_cycles = _match_cycles(base.cycles, target.cycles,
+                                                                                      id_map)
     diff.new_dependencies = _dependency_summary(diff, (ADDED,), t_nodes, b_nodes)
     diff.new_dependencies += _became_runtime(diff, t_nodes, b_nodes)
     diff.removed_dependencies = _dependency_summary(diff, (REMOVED,), t_nodes, b_nodes)

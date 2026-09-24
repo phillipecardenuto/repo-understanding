@@ -80,14 +80,28 @@ through the first member).
 | `introduced_cycles`, `resolved_cycles` | `Cycle` lists |
 | `changed_cycles` | overlapping cycles with `added_members` / `removed_members` |
 | `new_dependencies`, `removed_dependencies` | summaries: `level` (`component`, `project`, `module`, `external`), `source`, `target`, `evidence`, `in_cycle`, `scope`, `note` (e.g. "type-checking-only import became a runtime import") |
-| `nodes` | union of both snapshots' nodes, each with `status`, `change_reasons` and `before` (previous values) |
-| `edges` | union of edges, each with `status`, `change_reasons`, `in_base_cycle`, `in_target_cycle`, `base_evidence`, `base_flags` |
+| `nodes` | union of both snapshots' nodes, each with `status`, `change_reasons` and `before` (previous values). A renamed or moved node appears once, at its new ID, as `modified`, with `before.previous_id`, `before.name`, `before.qualified_name` and (when it moved) `before.path` |
+| `edges` | union of edges, each with `status`, `change_reasons`, `in_base_cycle`, `in_target_cycle`, `base_evidence`, `base_flags`. An edge that continues a base edge whose endpoint was renamed has `previous_id` and is `unchanged` (or `modified` for other changes); it is not a new or removed dependency |
+| `renames` | removed + added pairs folded into one node: `kind` (`file`, `folder`, `submodule`, `symbol`), `old_id` / `new_id`, `old_name` / `new_name`, `old_path` / `new_path`, `how` (`same content`, `similar content`, `same name`, `same body, new name`, `similar name`, `same signature and size`, `moved with its folder`, ...), `similarity`, `renamed`, `moved` |
 | `summary` | counts by status, category and relationship |
 | `diagnostics` | e.g. different repositories or configurations |
 
 Node reasons: `content changed`, `formatting or comments only`, `contents
-changed` (a descendant changed), `moved`, `renamed`, `type a → b`, `<key> changed`,
-`roles changed: …`. Edge reasons: `evidence changed`, `occurrences a → b`,
+changed` (a descendant changed), `moved`, `renamed`, `renamed from <name>`,
+`moved from <path>`, `type a → b`, `<key> changed`, `roles changed: …`.
+
+Renames are found without reading files (`renames.py`).
+- **Files** are paired by identical content, or, for code, by the share of
+  top-level names they have in common.
+- **Folders** are paired when most of their files moved together.
+- **Submodules** are paired by the same URL or commit, or, when the upstream repository
+  was renamed too, by a similar name in the same folder (`elis-frontend` → `elies-frontend`).
+- **Symbols** are paired within their (renamed) parent. The same name, the same
+  body without its own name (`body_fingerprint`), a similar name, or the same
+  signature and size all count.
+
+Cycles are matched through renames, so a cycle whose modules moved is not
+"introduced". Edge reasons: `evidence changed`, `occurrences a → b`,
 `<flag>: a → b`.
 
 ## ActivityEvent

@@ -140,10 +140,13 @@ def _kind(node: ComponentNode) -> str:
     return "package"
 
 
-def _sublabel(node: ComponentNode) -> str:
+def _sublabel(node: ComponentNode, before: dict[str, Any] | None = None) -> str:
     parts = [node.component_type]
     if node.language:
         parts.append(node.language)
+    if before and before.get("previous_id"):  # renamed or moved: say what it was
+        was = before.get("path") if before.get("path") and before.get("path") != node.path else before.get("name")
+        parts.append(f"↦ was {was}")
     return " · ".join(parts)
 
 
@@ -271,8 +274,9 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
     for v in order[:max_nodes]:
         node = nodes[v]
         st = group_status.get(v, status.get(v, UNCHANGED))
-        view.nodes.append(VNode(v, node.qualified_name or node.name, _sublabel(node), st, _kind(node),
-                                "stadium" if "external" in node.tags else "box",
+        change = diff.nodes.get(v)
+        view.nodes.append(VNode(v, node.qualified_name or node.name, _sublabel(node, change.before if change else None),
+                                st, _kind(node), "stadium" if "external" in node.tags else "box",
                                 f"sg_{parents[v]}" if v in parents else None, _icon(node, icons), reasons.get(v, [])))
     view.edges = [e for e in edges if e.source in keep and e.target in keep]
     if hidden_neighbors:

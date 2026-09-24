@@ -324,7 +324,7 @@ def _text(source: TreeSource, path: str, limit: int = 2_000_000) -> tuple[str | 
 
 
 def _submodule_entry(ch: Any, files: list[dict[str, Any]], scope: ScopePolicy, component: tuple[str | None, str | None],
-                     add: Any) -> dict[str, Any]:
+                     add: Any, moved_from: str | None = None) -> dict[str, Any]:
     """A review entry (and findings) for a submodule whose pointer or contents changed."""
     inner = {p for p, _b, _a in ch.files}
     inner_entries = [f for f in files if f["path"] in inner]
@@ -345,7 +345,13 @@ def _submodule_entry(ch: Any, files: list[dict[str, Any]], scope: ScopePolicy, c
     }
     short = lambda sha: sha[:10] if sha else "?"  # noqa: E731
     log = "\n".join(f"{c['sha']} {c['subject']}" for c in (ch.commits or [])[:8]) or None
-    if ch.status == "added":
+    if moved_from and ch.status == "added":
+        entry["status"] = "renamed"
+        entry["previous_path"] = moved_from
+        add(Finding("submodule-moved", "architecture", "medium", "Submodule moved",
+                    f"The submodule at {moved_from} now lives at {ch.path} (at {short(ch.new)}).", ch.path,
+                    component=cname, suggestion="Check build files, Dockerfiles and imports that use the old path."))
+    elif ch.status == "added":
         add(Finding("submodule-added", "architecture", "medium", "Submodule added",
                     f"{ch.path} was added as a submodule (at {short(ch.new)}).", ch.path, excerpt=log,
                     component=cname, suggestion="Confirm the new dependency on this repository is intended."))
@@ -450,22 +456,35 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
 
     files: list[dict[str, Any]] = []
     total_diff_lines = 0
+    # Renamed or moved files are one entry at their new path, diffed against their old content.
+    file_renames = {r["new_path"]: r["old_path"] for r in diff.renames
+                    if r["kind"] == "file" and r["old_path"] and r["new_path"] and r["old_path"] != r["new_path"]
+                    and r["new_path"] in changed_set and base_src.content_hash(r["old_path"]) is not None
+                    and target_src.content_hash(r["old_path"]) is None}
+    renamed_away = set(file_renames.values())
     for path in changed_paths:
-        before, b_bin = _text(base_src, path)
+        if path in renamed_away:
+            continue
+        old_path = file_renames.get(path)
+        before, b_bin = _text(base_src, old_path or path)
         after, a_bin = _text(target_src, path)
-        exists_before = base_src.content_hash(path) is not None
+        exists_before = base_src.content_hash(old_path or path) is not None
         exists_after = target_src.content_hash(path) is not None
-        status = ADDED if not exists_before else REMOVED if not exists_after else MODIFIED
+        status = "renamed" if old_path else ADDED if not exists_before else REMOVED if not exists_after else MODIFIED
         node = path_to_node.get(path)
         cid, cname = component_of(path)
         lang, _kind = classify.language_of(path, repo.config.languages)
         is_test = bool(node and "test" in node.tags) or classify.is_test_path(path)
         scope_status = scope.classify(path)
+        if old_path and scope.classify(old_path) == "protected":
+            scope_status = "protected"  # moving a protected file away is touching it
         entry: dict[str, Any] = {"path": path, "status": status, "language": lang, "component_id": cid,
                                  "component": cname, "module_id": node.id if node else None, "is_test": is_test,
                                  "scope": scope_status, "binary": b_bin or a_bin, "config_kind": classify.config_kind(path),
                                  # identifies this state of the file, so "reviewed" marks expire when it changes again
                                  "version": (target_src.content_hash(path) or f"-{base_src.content_hash(path)}")[:16]}
+        if old_path:
+            entry["previous_path"] = old_path
         added_lines: list[tuple[int, str]] = []
         removed_lines: list[tuple[int, str]] = []
         if before is None or after is None:
@@ -487,7 +506,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
                 total_diff_lines += n_lines
         # --- key changes: changed symbols with line counts from the diff -------------------
         t_syms = symbols_by_path["target"].get(path, [])
-        b_syms = symbols_by_path["base"].get(path, [])
+        b_syms = symbols_by_path["base"].get(old_path or path, [])
         per_symbol: dict[str, list[int]] = {}
         for line, _t in added_lines:
             s = _symbol_at(t_syms, line)
@@ -501,6 +520,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         for st, sid in changed_syms_by_path.get(path, []):
             ch = nodes[sid]
             n = ch.node
+            if old_path and ch.reasons and all(r.startswith("moved from") for r in ch.reasons):
+                continue  # moved along with its file, otherwise unchanged
             counts = per_symbol.get(sid, [0, 0])
             key_changes.append({
                 "id": sid, "name": n.name, "qualified_name": n.qualified_name, "kind": n.component_type,
@@ -508,6 +529,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
                 "signature": n.metadata.get("signature"), "signature_before": ch.before.get("signature"),
                 "lines_added": counts[0], "lines_removed": counts[1],
                 "public": n.metadata.get("public", n.metadata.get("exported", True)),
+                "renamed_from": ch.before.get("name") if any(r.startswith("renamed from") for r in ch.reasons) else None,
             })
         key_changes.sort(key=lambda k: (-(k["lines_added"] + k["lines_removed"]), k["qualified_name"]))
         entry["symbols"] = key_changes
@@ -555,8 +577,12 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             add(Finding("large-change", "hygiene", "info", "Large change",
                         f"{entry['lines_added']} lines added in one file; review in detail.", path, component=cname))
 
+    sub_moves = {r["new_path"]: r["old_path"] for r in diff.renames if r["kind"] == "submodule"
+                 and r["old_path"] and r["new_path"]}
     for ch in sub_changes:
-        files.append(_submodule_entry(ch, files, scope, component_of(ch.path), add))
+        if ch.status == "removed" and ch.path in sub_moves.values():
+            continue  # reported once, as a move, at the new path
+        files.append(_submodule_entry(ch, files, scope, component_of(ch.path), add, sub_moves.get(ch.path)))
 
     # --- graph-based findings ---------------------------------------------------------------------
     _graph_findings(add, diff, base_snap, target_snap, target_src, scope, changed_set, path_to_node, component_of,
@@ -564,6 +590,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     if not {"unwired-module", "unwired-symbol", "unreachable-from-entry"} <= disabled:
         _wiring_findings(add, diff, target_snap, target_src, component_of, repo.config.review_wiring_ignore)
     _test_coverage_findings(add, files, impact)
+    _rename_findings(add, diff, target_snap, target_src, component_of)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
         # One commit alone: the companion may be in another commit of the wave, so only mark partners as changed.
@@ -1155,6 +1182,79 @@ def _coupling_findings(add: Any, files: list[dict[str, Any]], coupling: Any, cha
                     path, component=entry.get("component"),
                     suggestion=f"Check whether {first.path} needs the matching change (a migration, test, client "
                                "or configuration update, for example)."), key=path)
+
+
+MAX_STALE_FILES = 60
+
+
+def _rename_findings(add: Any, diff: RepositoryDiff, target: RepositorySnapshot, target_src: TreeSource,
+                     component_of: Any) -> None:
+    """Renamed symbols: fine when every reference was updated, a problem when some code still uses the old name."""
+    renames = [r for r in diff.renames if r["kind"] == "symbol" and r["renamed"]]
+    if not renames:
+        return
+    t_idx = target.node_index()
+    importers: dict[str, set[str]] = {}
+    for e in target.dependency_edges:
+        if e.relationship == REL_IMPORTS and e.source_id in t_idx:
+            importers.setdefault(e.target_id, set()).add(e.source_id)
+    module_of_path = {n.path: n for n in target.modules if n.path}
+    lines_of: dict[str, list[str]] = {}
+
+    def lines(path: str) -> list[str]:
+        if path not in lines_of:
+            lines_of[path] = (target_src.read_text(path) or "").splitlines()
+        return lines_of[path]
+
+    for rn in renames:
+        change = diff.nodes.get(rn["new_id"])
+        if change is None:
+            continue
+        node = change.node
+        old = (change.before.get("name") or rn["old_name"].rsplit(".", 1)[-1])
+        word = re.compile(r"(?<![\w$])" + re.escape(old) + r"(?![\w$])")
+        call = re.compile(r"(?<![\w$])" + re.escape(old) + r"\s*\(")
+        stale: list[tuple[str, int, str]] = []
+        # Calls the base resolved to the old symbol that the target no longer resolves (the caller kept the name).
+        for ec in diff.edges.values():
+            e = ec.edge
+            if ec.status != REMOVED or e.relationship != REL_CALLS or e.target_id != rn["old_id"]:
+                continue
+            caller = t_idx.get(e.source_id) or next((t_idx[r["new_id"]] for r in diff.renames
+                                                     if r["old_id"] == e.source_id and r["new_id"] in t_idx), None)
+            if caller is None or not caller.path:
+                continue
+            src = lines(caller.path)
+            start, end = caller.start_line or 1, caller.end_line or len(src)
+            hit = next((i + 1 for i in range(start - 1, min(end, len(src))) if call.search(src[i])), None)
+            if hit is not None:
+                stale.append((caller.path, hit, caller.qualified_name))
+        # Other references by name (imports, uses as a value) in the module and the modules that import it.
+        if node.component_type != "method":  # methods are called through objects: too ambiguous by name
+            module = module_of_path.get(node.path or "")
+            paths = [node.path] if node.path else []
+            if module is not None:
+                paths += sorted({t_idx[u].path for u in importers.get(module.id, ()) if t_idx[u].path})
+            for path in paths[:MAX_STALE_FILES]:
+                comment = "#" if path.endswith(".py") else "//"
+                for i, text in enumerate(lines(path), 1):
+                    if path == node.path and (node.start_line or 0) <= i <= (node.end_line or 0):
+                        continue
+                    code = text.split(comment, 1)[0]
+                    if word.search(code) and not any(s[0] == path and s[1] == i for s in stale):
+                        stale.append((path, i, text.strip()[:80]))
+        comp = component_of(node.path)[1] if node.path else None
+        stale.sort(key=lambda s: (s[0], s[1]))
+        if stale:
+            where = ", ".join(f"{p}:{ln}" for p, ln, _ in stale[:6]) + (f" (+{len(stale) - 6})" if len(stale) > 6 else "")
+            add(Finding("renamed-symbol-stale-references", "correctness", "high", "Renamed, but the old name is still "
+                        "used", f"{rn['old_name']} was renamed to {node.qualified_name}, but `{old}` is still used at "
+                        f"{where}.", stale[0][0], stale[0][1], _redact(stale[0][2]), node.qualified_name, comp,
+                        f"Update these references to `{node.name}` (or keep `{old}` as an alias)."), key=rn["new_id"])
+        else:
+            add(Finding("renamed-symbol", "architecture", "low", "Symbol renamed",
+                        f"{rn['old_name']} → {node.qualified_name}; no reference to the old name is left.",
+                        node.path, node.start_line, symbol=node.qualified_name, component=comp), key=rn["new_id"])
 
 
 _REGISTER_CALL = {"APIRouter": "app.include_router({var})", "Blueprint": "app.register_blueprint({var})",

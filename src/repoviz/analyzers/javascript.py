@@ -210,6 +210,7 @@ class JsSymbol:
     parent: str | None
     exported: bool = False
     default: bool = False
+    body_fingerprint: str = ""  # the declaration without its own name: survives a rename
 
 
 @dataclass
@@ -345,8 +346,9 @@ def parse_js(text: str) -> JsFileInfo:
         else:
             end = match_brace(code, body_open)
         segment = " ".join(noc[start:end + 1].split())
+        body = re.sub(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])", "_", segment, count=1)
         spans.append(JsSymbol(qual, name, kind, start, end, line_of(start), line_of(end),
-                              stable_hash(segment), parent, exported, default))
+                              stable_hash(segment), parent, exported, default, stable_hash(body)))
 
     for m in _FUNC.finditer(code):
         if depth_at[m.start()] != 0:
@@ -458,7 +460,7 @@ def _next_brace(code: str, start: int) -> int | None:
 
 class JavaScriptAnalyzer(Analyzer):
     name = "javascript"
-    version = "1"
+    version = "2"
     languages = JS_LANGS
     capabilities = (CAP_MODULES, CAP_SYMBOLS, CAP_DEPENDENCIES, CAP_CALLS, CAP_EVIDENCE, CAP_DIAGNOSTICS)
 
@@ -521,7 +523,8 @@ class JavaScriptAnalyzer(Analyzer):
                     path=f, parent_id=b.symbol_id(f, sym.parent) if sym.parent else mod_id, analyzer=self.name,
                     key=f"symbol:{f}:{sym.qualname}", fingerprint=sym.fingerprint, start_line=sym.line,
                     end_line=sym.end_line, tags=(["test"] if ctx.profile.is_test(f) else []),
-                    metadata={"kind": sym.kind, "exported": sym.exported, **({"default_export": True} if sym.default else {})}))
+                    metadata={"kind": sym.kind, "exported": sym.exported, "body_fingerprint": sym.body_fingerprint,
+                              **({"default_export": True} if sym.default else {})}))
                 scope.symbols[sym.qualname] = sid
                 scope.kinds[sym.qualname] = sym.kind
                 if sym.default:

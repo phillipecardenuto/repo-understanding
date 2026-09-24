@@ -31,6 +31,7 @@ import importlib
 import importlib.util
 import os
 import posixpath
+import re
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -107,6 +108,7 @@ class RawSymbol:
     signature: str = ""
     is_async: bool = False
     doc: str = ""
+    body_fingerprint: str = ""  # the definition without its own name: survives a rename
 
 
 @dataclass
@@ -228,6 +230,14 @@ class _Extractor:
         end = getattr(node, "end_lineno", start) or start
         return stable_hash(normalized_source(self.lines[start - 1:end]))
 
+    def body_fingerprint(self, node: Any) -> str:
+        """Like :meth:`fingerprint` with the definition's own name blanked, so a renamed but otherwise
+        identical function or class keeps it."""
+        start = getattr(node, "lineno", 1)
+        end = getattr(node, "end_lineno", start) or start
+        text = normalized_source(self.lines[start - 1:end])
+        return stable_hash(re.sub(r"\b(def|class)\s+" + re.escape(node.name) + r"\b", r"\1 _", text, count=1))
+
     # Imports ---------------------------------------------------------------
 
     def imports(self, tree: ast.Module) -> None:
@@ -329,7 +339,8 @@ class _Extractor:
                         decorators=[".".join(d) for d in (_dotted(x.func if isinstance(x, ast.Call) else x)
                                                           for x in node.decorator_list) if d],
                         signature=_signature(node), is_async=isinstance(node, ast.AsyncFunctionDef),
-                        doc=(ast.get_docstring(node) or "").strip().split("\n")[0][:160]))
+                        doc=(ast.get_docstring(node) or "").strip().split("\n")[0][:160],
+                        body_fingerprint=self.body_fingerprint(node)))
                     walk(node.body, f"{qual}.", qual, class_qual, qual, _local_names(node), False)
                     self._defaults_calls(node, caller, class_qual, locals_)
                 elif isinstance(node, ast.ClassDef):
@@ -341,7 +352,8 @@ class _Extractor:
                         decorators=[".".join(d) for d in (_dotted(x.func if isinstance(x, ast.Call) else x)
                                                           for x in node.decorator_list) if d],
                         bases=[d for d in (_dotted(b) for b in node.bases) if d],
-                        doc=(ast.get_docstring(node) or "").strip().split("\n")[0][:160]))
+                        doc=(ast.get_docstring(node) or "").strip().split("\n")[0][:160],
+                        body_fingerprint=self.body_fingerprint(node)))
                     walk(node.body, f"{qual}.", qual, qual, qual, set(), True)
                 elif isinstance(node, ast.If) and not prefix and _is_main_guard(node.test):
                     qual = unique("__main__")
@@ -489,7 +501,7 @@ _GRIMP_LOCK = threading.Lock()
 
 class PythonAnalyzer(Analyzer):
     name = "python"
-    version = "2"
+    version = "3"
     languages = ("python",)
     capabilities = (CAP_MODULES, CAP_CONTAINMENT, CAP_SYMBOLS, CAP_ENTRY_POINTS, CAP_DEPENDENCIES, CAP_CALLS,
                     CAP_EVIDENCE, CAP_DIAGNOSTICS)
@@ -662,6 +674,8 @@ class PythonAnalyzer(Analyzer):
                     meta["signature_id"] = stable_hash("sig", sig, length=12)
                 if sym.doc:
                     meta["doc"] = sym.doc
+                if sym.body_fingerprint:
+                    meta["body_fingerprint"] = sym.body_fingerprint
                 if sym.is_async:
                     meta["async"] = True
                 if sym.kind == "main-block":

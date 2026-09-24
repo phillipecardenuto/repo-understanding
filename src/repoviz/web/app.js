@@ -333,7 +333,11 @@
     return last;
   }
 
-  function sublabel(n) { return [n.component_type, n.language].filter(Boolean).join(" · "); }
+  function sublabel(n) {
+    const b = n.before || {};
+    const was = b.previous_id ? "↦ was " + (b.path && b.path !== n.path ? b.path : (b.name || b.qualified_name || "")) : null;  // renamed or moved
+    return [n.component_type, n.language, was].filter(Boolean).join(" · ");
+  }
   function displayName(n) { return n.qualified_name || n.name || n.id; }
 
   /* Changes view (mirror of views.changes_view). */
@@ -894,6 +898,7 @@
       item("added", "✚ added"), item("removed", "✖ removed (dashed)"), item("modified", "✎ modified"), item("unchanged", "unchanged"),
       item("added", "+ new edge (thick)", "line"), item("removed", "− removed edge (dashed)", "line"), item("modified", "~ evidence changed", "line"),
       item("unchanged", "unchanged edge", "line"), item("cycle", "⟲ in a cycle (purple, dashed)", "line"),
+      h("span", { class: "item" }, "↦ was …: renamed or moved (one node, not a removal plus an addition)"),
     ];
   }
   function kindLegend() {
@@ -931,6 +936,7 @@
   function stat(value, label, cls) { return h("div", { class: "stat " + (cls || "") }, h("div", { class: "value", text: value }), h("div", { class: "label", text: label })); }
   function pill(text, cls) { return h("span", { class: "pill " + (cls || "") }, text); }
   function statusPill(st) {
+    if (st === "renamed") return pill("↦ renamed", "modified");  // a review file entry: same file, new path
     const w = THEME.status[st] || {};
     return st && st !== "unchanged" ? pill(`${w.icon || ""} ${st}`.trim(), st) : null;
   }
@@ -2105,8 +2111,8 @@
         const fl = this.findingsByPath.get(f.path) || [];
         const high = fl.filter((x) => x.severity === "high").length;
         const extra = f.scope === "protected" ? "scope_protected" : f.scope === "out-of-scope" ? "scope_out" : null;
-        view.nodes.push({ id: ids.get(f.path), label: f.path.split("/").pop(), sublabel: [`+${f.lines_added ?? "?"} −${f.lines_removed ?? "?"}`, f.symbols.length ? plural(f.symbols.length, "symbol") : "", high ? `${ic("alert-circle")}${high} high` : "", f.scope === "protected" ? `${ic("lock")}protected` : f.scope === "out-of-scope" ? `${ic("alert")}out of scope` : ""].filter(Boolean).join(" · "),
-          status: f.status, kind: "module", shape: "box", parent: sg, icon: f.kind === "submodule" ? "link" : f.is_test ? "flask" : "file-code", extraClass: extra, ref: f.path });
+        view.nodes.push({ id: ids.get(f.path), label: f.path.split("/").pop(), sublabel: [f.previous_path ? `↦ was ${f.previous_path}` : "", `+${f.lines_added ?? "?"} −${f.lines_removed ?? "?"}`, f.symbols.length ? plural(f.symbols.length, "symbol") : "", high ? `${ic("alert-circle")}${high} high` : "", f.scope === "protected" ? `${ic("lock")}protected` : f.scope === "out-of-scope" ? `${ic("alert")}out of scope` : ""].filter(Boolean).join(" · "),
+          status: f.status === "renamed" ? "modified" : f.status, kind: "module", shape: "box", parent: sg, icon: f.kind === "submodule" ? "link" : f.is_test ? "flask" : "file-code", extraClass: extra, ref: f.path });
       }
       const extraNodes = new Map(), extraByLabel = new Map();
       for (const f of shown) {
@@ -2293,7 +2299,7 @@
           : [h("button", { class: "btn small", onclick: () => this.setReviewed(f.path, true) }, "✓ Mark reviewed"),
             h("button", { class: "btn small primary", title: "Mark reviewed and open the next unreviewed file (m)", onclick: () => this.setReviewed(f.path, true, true) }, "✓ Reviewed & next ›")]));
       put(this.fileEl, h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
-        h("div", { class: "muted", text: [f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
+        h("div", { class: "muted", text: [f.previous_path ? "↦ moved from " + f.previous_path : null, f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
         h("div", { class: "group actions" },
           h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, iconEl("lock"), " Should not be touched"),
           h("button", { class: "btn small", onclick: (ev) => this.noteForm(ev.target.closest(".actions"), { path: f.path }, "improve") }, "✎ Note on this file…"),
@@ -2304,7 +2310,8 @@
       if (f.symbols.length) {
         this.fileEl.appendChild(table([
           { key: "status", label: "", render: (k) => statusPill(k.status) },
-          { key: "qualified_name", label: "Symbol", render: (k) => [h("span", { class: "mono", text: `${k.kind} ${k.name}` }), k.public === false ? h("span", { class: "faint", text: " (private)" }) : null] },
+          { key: "qualified_name", label: "Symbol", render: (k) => [h("span", { class: "mono", text: `${k.kind} ${k.name}` }),
+            k.renamed_from ? h("span", { class: "faint", title: "renamed", text: ` ↦ was ${k.renamed_from}` }) : null, k.public === false ? h("span", { class: "faint", text: " (private)" }) : null] },
           { key: "signature", label: "Signature", render: (k) => k.signature_before && k.signature_before !== k.signature
             ? h("span", { class: "mono" }, h("del", { text: k.signature_before }), " → ", h("ins", { text: k.signature || "" })) : h("span", { class: "mono faint", text: k.signature || "" }) },
           { key: "lines_added", label: "+/−", num: true, render: (k) => `+${k.lines_added} −${k.lines_removed}`, sort: (k) => k.lines_added + k.lines_removed },
@@ -2547,7 +2554,8 @@
       blocks: [
         { kv: [["✚ added", "green fill, thick border"], ["✖ removed", "red fill, dashed border"], ["✎ modified", "amber fill, thick border"], ["unchanged", "neutral"],
           ["+ new edge", "thick green arrow"], ["− removed edge", "red dashed"], ["~ evidence changed", "amber"], ["⟲ cycle", "purple dashed; *new cycle* when introduced"],
-          ["protected / out of scope", "thick dark-red / orange border (AI Review)"], ["dashed grey border", "external or structural-only (no dependency data)"]] },
+          ["protected / out of scope", "thick dark-red / orange border (AI Review)"], ["dashed grey border", "external or structural-only (no dependency data)"],
+          ["↦ was …", "renamed or moved: one node, not a removal plus an addition; its edges carry over"]] },
         { p: "Icons show the kind of each node: house (repository), package (component), folder (package or directory), code file (module), flask (tests), link (external or submodule), play (entry point), and so on. The Structure legend lists them all." },
         { h: "Navigating" },
         { ul: ["Drag to pan and scroll to zoom; **Fit** and **1:1** reset the view. With the diagram focused, arrows pan, `+` / `-` zoom and `0` fits.",

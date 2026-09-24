@@ -736,3 +736,99 @@ def test_common_file_names_are_not_matched_from_anywhere(make_repo) -> None:
                       "index.js": "module.exports = {};\n"})
     repo.write({"src/feature/index.js": "export function helper() { return 1; }\n"})
     assert [f["path"] for f in by_kind(_review_all(repo))["unwired-module"]] == ["src/feature/index.js"]
+
+
+# --------------------------------------------------------------------------- renames (#3)
+
+
+def test_renamed_symbols_with_every_reference_updated(make_repo) -> None:
+    repo = make_repo({
+        "errs.py": "class ELISException(Exception):\n    pass\n\n\ndef elis_exception_handler(e):\n    return str(e)\n",
+        "app.py": "from errs import ELISException, elis_exception_handler\n\n\ndef run():\n    try:\n        pass\n"
+                  "    except ELISException as e:\n        return elis_exception_handler(e)\n",
+    })
+    for name in ("errs.py", "app.py"):
+        p = Path(repo.path, name)
+        p.write_text(p.read_text().replace("ELIS", "ELIES").replace("elis_", "elies_"))
+    kinds = by_kind(_review_all(repo))
+    assert sorted(f["detail"].split(" →")[0] for f in kinds["renamed-symbol"]) == [
+        "errs.ELISException", "errs.elis_exception_handler"]
+    assert not {"public-api-removed", "dangling-call", "renamed-symbol-stale-references"} & set(kinds)
+
+
+def test_renamed_symbol_still_used_by_an_untouched_module(make_repo) -> None:
+    repo = make_repo({
+        "lib.py": "def compute(x):\n    return x * 2\n",
+        "a.py": "from lib import compute\n\n\ndef first():\n    return compute(1)\n",
+        "b.py": "import lib\n\n\ndef second():\n    return lib.compute(2)\n",
+    })
+    Path(repo.path, "lib.py").write_text("def calculate(x):\n    return x * 2\n")
+    Path(repo.path, "a.py").write_text("from lib import calculate\n\n\ndef first():\n    return calculate(1)\n")
+    report = _review_all(repo)
+    [stale] = by_kind(report)["renamed-symbol-stale-references"]
+    assert stale["severity"] == "high" and "`compute` is still used at b.py:5" in stale["detail"]
+    assert stale["path"] == "b.py" and stale["line"] == 5
+    key = next(f for f in report["files"] if f["path"] == "lib.py")["symbols"][0]
+    assert key["name"] == "calculate" and key["renamed_from"] == "compute" and key["status"] == "modified"
+
+
+def test_moved_file_is_one_entry_with_its_small_edit(make_repo) -> None:
+    repo = make_repo({"pkg/__init__.py": "", "pkg/util.py": "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\n"
+                      "def c():\n    return 3\n", "main.py": "from pkg.util import a\n\nprint(a())\n"})
+    Path(repo.path, "lib").mkdir()
+    Path(repo.path, "lib/__init__.py").write_text("")
+    repo.git("mv", "pkg/util.py", "lib/helpers.py")
+    moved = Path(repo.path, "lib/helpers.py")
+    moved.write_text(moved.read_text().replace("return 3", "return 33"))
+    Path(repo.path, "main.py").write_text("from lib.helpers import a\n\nprint(a())\n")
+    report = _review_all(repo)
+    files = {f["path"]: f for f in report["files"]}
+    entry = files["lib/helpers.py"]
+    assert "pkg/util.py" not in files and entry["status"] == "renamed" and entry["previous_path"] == "pkg/util.py"
+    assert (entry["lines_added"], entry["lines_removed"]) == (1, 1)
+    assert [k["name"] for k in entry["symbols"]] == ["c"]  # a and b only moved with the file
+    assert "public-api-removed" not in by_kind(report)
+
+
+def test_submodule_moved_to_another_path(make_repo) -> None:
+    from test_large_repo_fixes import _git
+
+    lib = make_repo({"src/engine.py": "def run():\n    return 1\n"})
+    main = make_repo({"app/__init__.py": "", "app/main.py": "print('hi')\n"})
+    _git(main.path, "submodule", "add", "-q", lib.path, "modules/engine")
+    _git(main.path, "commit", "-qm", "add engine")
+    Path(main.path, "vendor").mkdir()
+    _git(main.path, "mv", "modules/engine", "vendor/engine")
+    kinds = by_kind(_review_all(main))
+    assert [f["detail"] for f in kinds["submodule-moved"]] and "modules/engine" in kinds["submodule-moved"][0]["detail"]
+    assert not {"submodule-added", "submodule-removed"} & set(kinds)
+
+
+def test_submodule_renamed_upstream_pairs_by_name(make_repo) -> None:
+    from test_large_repo_fixes import _git
+
+    old = make_repo({"src/engine.py": "def run():\n    return 1\n"})
+    new = make_repo({"src/engine.py": "def run():\n    return 2\n"})
+    other = make_repo({"src/search.py": "def find():\n    return 3\n"})
+    main = make_repo({"app/__init__.py": "", "app/main.py": "print('hi')\n"})
+    _git(main.path, "submodule", "add", "-q", old.path, "modules/elis-engine")
+    _git(main.path, "commit", "-qm", "add engine")
+    _git(main.path, "rm", "-q", "modules/elis-engine")
+    _git(main.path, "submodule", "add", "-q", new.path, "modules/elies-engine")  # other URL, other commit
+    _git(main.path, "submodule", "add", "-q", other.path, "modules/search")
+    kinds = by_kind(_review_all(main))
+    [moved] = kinds["submodule-moved"]
+    assert moved["path"] == "modules/elies-engine" and "modules/elis-engine" in moved["detail"]
+    assert [f["path"] for f in kinds["submodule-added"]] == ["modules/search"]
+    assert "submodule-removed" not in kinds
+
+
+def test_renamed_and_edited_function(make_repo) -> None:
+    repo = make_repo({"lib.py": "def compute(x):\n    y = x * 2\n    return y\n", "a.py": "from lib import compute\n"})
+    Path(repo.path, "lib.py").write_text("def calculate(x):\n    y = x * 3\n    return y\n")
+    Path(repo.path, "a.py").write_text("from lib import calculate\n")
+    report = _review_all(repo)
+    [key] = next(f for f in report["files"] if f["path"] == "lib.py")["symbols"]
+    assert key["renamed_from"] == "compute" and key["status"] == "modified"
+    assert "content changed" in key["reasons"] and any(r.startswith("renamed from") for r in key["reasons"])
+    assert "public-api-removed" not in by_kind(report)

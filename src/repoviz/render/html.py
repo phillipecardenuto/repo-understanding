@@ -57,7 +57,7 @@ def dumps(data: Any) -> str:
 
 #: Node fields the web UI never reads (identity keys and change fingerprints are for diffing only).
 _NODE_INTERNAL = ("key", "fingerprint")
-_META_INTERNAL = ("semantic_fingerprint", "qualified_name_authoritative", "signature_id")
+_META_INTERNAL = ("semantic_fingerprint", "qualified_name_authoritative", "signature_id", "body_fingerprint")
 _UNCHANGED_SYMBOL_FIELDS = ("id", "name", "qualified_name", "component_type", "category", "parent_id", "path", "status",
                             "tags", "start_line", "language")
 
