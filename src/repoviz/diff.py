@@ -13,6 +13,8 @@ in the target) or *resolved* (only in the base).
 
 from __future__ import annotations
 
+import dataclasses
+
 from typing import Any, Iterable
 
 from .model import (
@@ -166,7 +168,8 @@ def diff_snapshots(base: RepositorySnapshot, target: RepositorySnapshot) -> Repo
         prior.update({"previous_id": rn.old_id, "qualified_name": before.qualified_name, "name": before.name})
         if before.path != after.path:
             prior["path"] = before.path
-        diff.nodes[rn.new_id] = NodeChange(after, MODIFIED, reasons or [f"renamed from {before.name}"], prior)
+        # No reason left: the same code under the same name, re-parented because its class or module was renamed.
+        diff.nodes[rn.new_id] = NodeChange(after, MODIFIED if reasons else UNCHANGED, reasons, prior)
         del diff.nodes[rn.old_id]
         id_map[rn.old_id] = rn.new_id
         diff.renames.append(rn.to_dict())
@@ -221,9 +224,12 @@ def diff_snapshots(base: RepositorySnapshot, target: RepositorySnapshot) -> Repo
             e = ch.edge
             if ch.status != REMOVED or (e.source_id not in id_map and e.target_id not in id_map):
                 continue
-            new_eid = added_by_ends.get((e.relationship, id_map.get(e.source_id, e.source_id),
-                                         id_map.get(e.target_id, e.target_id)))
+            ends = (id_map.get(e.source_id, e.source_id), id_map.get(e.target_id, e.target_id))
+            new_eid = added_by_ends.get((e.relationship, *ends))
             if new_eid is None:
+                # Really removed: point it at the renamed node (the old ID left the diff) on a copy, since the
+                # base snapshot's edge is shared through the cache.
+                ch.edge = dataclasses.replace(e, source_id=ends[0], target_id=ends[1])
                 continue
             cont = diff.edges[new_eid]
             reasons = _edge_changes(e, cont.edge, evidence=False)  # locations moved with the file
@@ -303,8 +309,9 @@ def symbol_changes(diff: RepositoryDiff) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {ADDED: [], REMOVED: [], MODIFIED: []}
     for nid in sorted(changed):
         c = diff.nodes[nid]
-        # A modified container symbol is explained by its changed children.
-        if c.status == MODIFIED and (nid in parents or c.reasons == ["contents changed"]):
+        # A modified container symbol is explained by its changed children, unless it was renamed itself.
+        renamed = any(r.startswith("renamed from") for r in c.reasons)
+        if c.status == MODIFIED and ((nid in parents and not renamed) or c.reasons == ["contents changed"]):
             continue
         out[c.status].append(nid)
     return out

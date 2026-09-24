@@ -32,7 +32,8 @@ from .model import CATEGORY_MODULE, CATEGORY_SYMBOL, RepositorySnapshot
 EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 MIN_FILE_SIMILARITY = 0.5
 MIN_NAME_SIMILARITY = 0.66
-MAX_CANDIDATES = 2000  # removed or added nodes of one kind considered at most
+MAX_CANDIDATES = 2000
+MIN_SHARED_NAMES = 2  # top-level names two code files must share to be one file moved (unless same file name)  # removed or added nodes of one kind considered at most
 
 
 @dataclass
@@ -84,6 +85,16 @@ def _pick(scored: list[tuple[float, str, str, str]], used_old: set[str], used_ne
         used_new.add(new)
         out.append((old, new, score, how))
     return out
+
+
+def _meaningful_signature(n: Any) -> bool:
+    """A signature with at least one parameter besides ``self`` / ``cls`` (``()`` and ``(self)`` are everywhere)."""
+    if not n.metadata.get("signature_id"):
+        return False
+    sig = str(n.metadata.get("signature") or "")
+    inner = sig[sig.find("(") + 1:sig.rfind(")")] if "(" in sig and ")" in sig else ""
+    params = [p.strip().split(":")[0].split("=")[0].strip(" *") for p in inner.split(",")]
+    return any(p and p not in ("self", "cls", "/") for p in params)
 
 
 def _similar_size(a: Any, b: Any) -> bool:
@@ -142,10 +153,13 @@ def detect_renames(base: RepositorySnapshot, target: RepositorySnapshot, removed
                     shared[aid] += 1
             for aid, n_shared in shared.items():
                 r, a = r_left[rid], a_left[aid]
-                if r.language != a.language:
+                same_base = posixpath.basename(r.path) == posixpath.basename(a.path)
+                # One shared generic name (``class Migration``, ``def main``) says nothing: need two, or the same
+                # file name.
+                if r.language != a.language or (n_shared < MIN_SHARED_NAMES and not same_base):
                     continue
                 sim = n_shared / max(len(names), len(a_names.get(aid, ())))
-                if posixpath.basename(r.path) == posixpath.basename(a.path):
+                if same_base:
                     sim = min(1.0, sim + 0.1)
                 if sim >= MIN_FILE_SIMILARITY:
                     scored.append((sim, rid, aid, "similar content"))
@@ -220,8 +234,13 @@ def detect_renames(base: RepositorySnapshot, target: RepositorySnapshot, removed
         for a in a_syms:
             if a.id not in used_new and depth(a, t_idx) == level:
                 by_parent.setdefault(a.parent_id or "", []).append(a)
+        level_r = [n for n in r_syms if n.id not in used_old and depth(n, b_idx) == level]
+        # "Same signature and size" is a last resort: only when the signature is the only one of its kind on both
+        # sides of the parent, so two unrelated ``(self)`` methods are never taken for one renamed.
+        sig_removed = Counter((id_map.get(r.parent_id or "", r.parent_id or ""), r.component_type,
+                               r.metadata.get("signature_id")) for r in level_r)
         scored = []
-        for r in (n for n in r_syms if n.id not in used_old and depth(n, b_idx) == level):
+        for r in level_r:
             parent = id_map.get(r.parent_id or "", r.parent_id or "")
             group = [a for a in by_parent.get(parent, ()) if a.component_type == r.component_type
                      and a.language == r.language]
@@ -240,8 +259,10 @@ def detect_renames(base: RepositorySnapshot, target: RepositorySnapshot, removed
                         matcher.quick_ratio() >= MIN_NAME_SIMILARITY else 0.0
                     if ratio >= MIN_NAME_SIMILARITY:
                         scored.append((ratio * 0.85, r.id, a.id, "similar name"))
-                    elif r.metadata.get("signature_id") and r.metadata.get("signature_id") == a.metadata.get("signature_id") \
-                            and _similar_size(r, a):
+                    elif _meaningful_signature(r) and r.metadata.get("signature_id") == a.metadata.get("signature_id") \
+                            and _similar_size(r, a) \
+                            and sig_removed[(parent, r.component_type, r.metadata.get("signature_id"))] == 1 \
+                            and sum(1 for x in group if x.metadata.get("signature_id") == a.metadata.get("signature_id")) == 1:
                         scored.append((0.55, r.id, a.id, "same signature and size"))
         picked = _pick(scored, used_old, used_new)
         pairs += [(o, n, s, h, "symbol") for o, n, s, h in picked]

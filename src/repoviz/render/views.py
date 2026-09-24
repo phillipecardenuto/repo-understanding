@@ -145,7 +145,12 @@ def _sublabel(node: ComponentNode, before: dict[str, Any] | None = None) -> str:
     if node.language:
         parts.append(node.language)
     if before and before.get("previous_id"):  # renamed or moved: say what it was
-        was = before.get("path") if before.get("path") and before.get("path") != node.path else before.get("name")
+        if before.get("path") and before.get("path") != node.path:
+            was = before.get("path")
+        elif before.get("name") and before.get("name") != node.name:
+            was = before.get("name")
+        else:  # same name, new parent (its class or module was renamed)
+            was = before.get("qualified_name") or before.get("name")
         parts.append(f"↦ was {was}")
     return " · ".join(parts)
 

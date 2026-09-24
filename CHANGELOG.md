@@ -103,6 +103,26 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Fixed
 
+- A deep review of the rename, risk and branch work fixed:
+  - **Class renames.** A method that only moved with its renamed class was
+    reported as "renamed from" its own name, which hid the class rename.
+  - **Moves with deletions.** A file moved while some of its functions were
+    deleted lost those deletions and their signals.
+  - **Removed dependencies of a moved module** disappeared from the Changes
+    diagram.
+  - **Unrelated files paired as one move.** Files sharing a single generic name
+    (`class Migration`), and methods sharing only a trivial signature such as
+    `(self)`, were paired as renames.
+  - **`renamed-symbol-stale-references`** no longer matches strings,
+    docstrings or `obj.name` attributes. It is *high* only with a resolved
+    call, otherwise *medium*, and its work is bounded.
+  - **Large files.** The code-changes drawer checks blob sizes before reading
+    them.
+  - **One definition of a churn hotspot** is now shared by the Structure tab,
+    its drawer and the risk score. A renamed class now counts the callers of its
+    constructor.
+  - **One diff renderer** is shared by the review's file card and the Structure
+    drawer.
 - Commit subjects and authors are redacted wherever reviews show them, including
   the "Last commit: …" target label.
 

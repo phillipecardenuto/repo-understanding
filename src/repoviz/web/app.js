@@ -335,7 +335,8 @@
 
   function sublabel(n) {
     const b = n.before || {};
-    const was = b.previous_id ? "↦ was " + (b.path && b.path !== n.path ? b.path : (b.name || b.qualified_name || "")) : null;  // renamed or moved
+    const was = b.previous_id ? "↦ was " + (b.path && b.path !== n.path ? b.path  // moved
+      : b.name && b.name !== n.name ? b.name : (b.qualified_name || b.name || "")) : null;  // renamed, or re-parented
     return [n.component_type, n.language, was].filter(Boolean).join(" · ");
   }
   function displayName(n) { return n.qualified_name || n.name || n.id; }
@@ -504,7 +505,7 @@
   }
 
   /* A churn hotspot: a module at or above the 80th percentile of recent commits, and changed at least twice
-     (a file committed once is not churn). Mirrors filechanges.hotspots. */
+     (a file committed once is not churn). Mirrors risk.hotspot_threshold (used by the risk score and the drawer). */
   const MIN_HOT_COMMITS = 2;
   /* Structure view: containment tree or nested boxes. */
   function structureView(si, o) {
@@ -980,17 +981,21 @@
     for (const [v, text] of options) s.appendChild(h("option", { value: v, selected: v === value }, text));
     return s;
   }
-  /* A read-only diff: line numbers, an explicit + / − marker on every changed line (never colour alone), code. */
-  function diffTable(hunks) {
+  /* A diff: line numbers, an explicit + / − marker on every changed line (never colour alone), code.
+     `row(tr, line)` may decorate each line's row and return extra rows to insert after it (the review's notes);
+     line = { t: "+" | "-" | " ", text, oldNo, newNo }. */
+  function diffTable(hunks, row) {
     const tbl = h("table", { class: "diff" });
     for (const hk of hunks) {
       tbl.appendChild(h("tr", { class: "hunk" }, h("td", { colspan: 4, text: `@@ -${hk.old_start},${hk.old_len} +${hk.new_start},${hk.new_len} @@` })));
       let o = hk.old_start, n = hk.new_start;
       for (const raw of hk.lines) {
-        const t = raw[0];
-        tbl.appendChild(h("tr", { class: t === "+" ? "add" : t === "-" ? "del" : "ctx" },
-          h("td", { class: "ln", text: t === "+" ? "" : o }), h("td", { class: "ln", text: t === "-" ? "" : n }),
-          h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), h("td", { class: "code", text: raw.slice(1) })));
+        const t = raw[0], line = { t, text: raw.slice(1), oldNo: t === "+" ? null : o, newNo: t === "-" ? null : n };
+        const tr = h("tr", { class: t === "+" ? "add" : t === "-" ? "del" : "ctx" },
+          h("td", { class: "ln", text: line.oldNo === null ? "" : line.oldNo }), h("td", { class: "ln", text: line.newNo === null ? "" : line.newNo }),
+          h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), h("td", { class: "code", text: line.text }));
+        tbl.appendChild(tr);
+        for (const extra of (row && row(tr, line)) || []) tbl.appendChild(extra);
         if (t !== "+") o++;
         if (t !== "-") n++;
       }
@@ -2589,29 +2594,18 @@
       }
       this.fileEl.appendChild(h("h4", null, "Diff ", h("span", { class: "faint", text: "— click a line to leave a note for the agent" })));
       if (!f.hunks || !f.hunks.length) { this.fileEl.appendChild(h("div", { class: "empty", text: f.diff_omitted ? `Diff not shown: ${f.diff_omitted}.` : "No textual diff." })); return; }
-      const tbl = h("table", { class: "diff" });
       const lineSymbol = (line) => { const k = f.symbols.find((s) => s.line && s.end_line && s.line <= line && line <= s.end_line); return k ? k.qualified_name : null; };
-      for (const hk of f.hunks) {
-        tbl.appendChild(h("tr", { class: "hunk" }, h("td", { colspan: 4, text: `@@ -${hk.old_start},${hk.old_len} +${hk.new_start},${hk.new_len} @@` })));
-        let o = hk.old_start, n = hk.new_start;
-        for (const raw of hk.lines) {
-          const t = raw[0], text = raw.slice(1);
-          const oldNo = t === "+" ? "" : o, newNo = t === "-" ? "" : n;
-          const cls = t === "+" ? "add" : t === "-" ? "del" : "ctx";
-          const anchorLine = t === "-" ? o : n;
-          const lineNotes = t !== "-" ? notesByLine.get(n) || [] : [];
-          const tr = h("tr", { class: cls + (lineNotes.length ? " has-note" : ""), dataset: { line: String(t === "-" ? "" : n) }, title: "Click to add a note on this line" },
-            h("td", { class: "ln", text: oldNo }), h("td", { class: "ln", text: newNo }),
-            h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), h("td", { class: "code", text: text }));
-          tr.addEventListener("click", () => this.noteForm(tr, { path: f.path, line: anchorLine, side: t === "-" ? "old" : "new", symbol: lineSymbol(anchorLine), excerpt: text.trim() }, "logic-error", true));
-          tbl.appendChild(tr);
-          for (const nn of lineNotes) tbl.appendChild(h("tr", { class: "note-row" }, h("td", { colspan: 2 }), h("td", { class: "mk" }, iconEl("comment")),
-            h("td", null, pill(VERDICT_LABELS[nn.verdict] || nn.verdict, nn.verdict === "ok" ? "added" : "modified"), " ", nn.comment || "")));
-          if (t !== "+") o++;
-          if (t !== "-") n++;
-        }
-      }
-      this.fileEl.appendChild(h("div", { class: "diff-wrap" }, tbl));
+      // Every line can take a note for the agent; notes already written show under their line.
+      this.fileEl.appendChild(diffTable(f.hunks, (tr, { t, text, oldNo, newNo }) => {
+        const anchorLine = t === "-" ? oldNo : newNo;
+        const lineNotes = t !== "-" ? notesByLine.get(newNo) || [] : [];
+        tr.dataset.line = t === "-" ? "" : String(newNo);
+        tr.title = "Click to add a note on this line";
+        if (lineNotes.length) tr.classList.add("has-note");
+        tr.addEventListener("click", () => this.noteForm(tr, { path: f.path, line: anchorLine, side: t === "-" ? "old" : "new", symbol: lineSymbol(anchorLine), excerpt: text.trim() }, "logic-error", true));
+        return lineNotes.map((nn) => h("tr", { class: "note-row" }, h("td", { colspan: 2 }), h("td", { class: "mk" }, iconEl("comment")),
+          h("td", null, pill(VERDICT_LABELS[nn.verdict] || nn.verdict, nn.verdict === "ok" ? "added" : "modified"), " ", nn.comment || "")));
+      }));
       if (focusLine) this.scrollToLine(focusLine);
     }
     /* A submodule: where its pointer moved, the commits in between, and the files changed inside it. */

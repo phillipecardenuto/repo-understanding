@@ -145,7 +145,7 @@ Credential-like values are always redacted in excerpts and diffs.
 | `new-package-dependency` | low | architecture | a package now imports a package it never used before |
 | `undeclared-dependency` | medium | architecture | an import of a package not declared in any manifest |
 | `public-api-removed` | medium | architecture | a public function/class/method was removed (a rename is not a removal: see below) |
-| `renamed-symbol-stale-references` | high | correctness | a function or class was renamed, but code still uses the old name (calls, imports, uses as a value), with each location |
+| `renamed-symbol-stale-references` | high / medium | correctness | a function or class was renamed, but code still uses the old name, with each location. *High* when a call the analyzer resolved to the old symbol still uses the old name; *medium* when the old name only appears as a word (an import, a use as a value) |
 | `renamed-symbol` | low | architecture | a function or class was renamed and no reference to the old name is left |
 | `submodule-moved` | medium | architecture | a submodule now lives at another path (same URL or commit, or a similar name in the same folder) |
 | `new-external-dependency` | low | architecture | a new third-party import |
@@ -179,13 +179,37 @@ question: is the old name still used anywhere?
 
 ```text
 [high] Renamed, but the old name is still used: app.errs.ELISException was renamed to
-       app.errs.ELIESException, but `ELISException` is still used at app/api.py:1, app/api.py:5.
+       app.errs.ELIESException, but `ELISException` is still called at app/api.py:5.
 ```
 
-The old name is looked for in calls that no longer resolve and in the renamed
-symbol's module and its importers (imports, calls, uses as a value; comments
-ignored). Methods are only checked through calls, because a method name alone is
-too ambiguous. Moving a protected file counts as touching it.
+The old name is looked for in two places:
+
+- **Calls that no longer resolve.** A call the base resolved to the old symbol
+  that still uses the old name gives *high*.
+- **The renamed symbol's module and its importers,** word by word: imports and
+  uses as a value give *medium* ("may still be used").
+
+  Comments, string literals, docstrings and attribute accesses such as
+  `parser.parse(...)` on another object are ignored. Methods are only checked
+  through calls, because a method name alone is too ambiguous.
+
+The check is bounded: at most 200 renamed symbols per review, and 60 files, each
+read once. Beyond that, the `renamed-symbol` signal says the references were not
+checked.
+
+Pairing is deliberately cautious:
+
+- Two code files are one file moved only when they share at least two top-level
+  names, or have the same file name. Two unrelated migrations that each define
+  `class Migration` stay a removal plus an addition.
+- A symbol pairs with another by "same signature and size" only when that
+  signature has a real parameter and is the only one of its kind on both sides.
+- Symbols that only moved with a renamed class or module (same name, same code)
+  are not changes. The class rename is reported once.
+- A file moved in the same change that deletes some of its functions still lists
+  those deletions, and their signals, on its card.
+
+Moving a protected file counts as touching it.
 
 ### New code that is not wired in
 
@@ -304,7 +328,7 @@ reason.
 | `entry_points` | 0–15 | Entry points (console scripts, `__main__`, route handlers, container commands…) that reach the changed code through calls (log scale, full at 8). |
 | `tests` | 0–10 | Changed behaviour that no test imports or calls (10), or whose tests were not updated in this wave (5). |
 | `sensitive` | 0–10 | A protected path (10); a sensitive file, such as CI, a lock file, a migration, deployment or `.env` (7); a security-related path such as `auth/`, `permissions`, `crypto` or `login` (7); a path outside the allowed scope (5). |
-| `churn` | 0–5 | A hotspot: among the top 10% of files by commits in the churn window before the wave (and at least 3 commits). |
+| `churn` | 0–5 | A churn hotspot before the wave: at or above the 80th percentile of modules by commits in the churn window, and changed at least twice. This is the same rule the Structure tab uses to mark hotspots. |
 | `size` | 0–10 | Lines added and removed (log scale, full at 400). A file too large to diff gets full points. |
 
 - **Levels:** *high* from 40, *medium* from 20, *low* below that.

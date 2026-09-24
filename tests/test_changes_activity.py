@@ -330,3 +330,33 @@ def test_file_changes_never_follows_symlinks(make_repo, tmp_path) -> None:
     (Path(repo.path) / "link.txt").symlink_to(secret)
     with pytest.raises(ValueError, match="unknown file"):
         file_changes(Repository(repo.path), "link.txt")
+
+
+def test_removed_dependency_of_a_moved_module_stays_on_the_diagram(make_repo) -> None:
+    from repoviz.render.views import changes_view
+
+    repo = make_repo({"app/__init__.py": "", "app/x.py": "X = 1\n",
+                      "app/m.py": "from app import x\n\n\ndef a():\n    return x.X\n\n\ndef b():\n    return 2\n"})
+    repo.git("mv", "app/m.py", "app/n.py")
+    Path(repo.path, "app/n.py").write_text("def a():\n    return 1\n\n\ndef b():\n    return 2\n")
+    r = Repository(repo.path)
+    diff = r.diff(r.snapshot("HEAD"), r.snapshot("WORKTREE"))
+    assert [(d["source"], d["target"]) for d in diff.removed_dependencies if d["level"] == "module"] == [("app.n", "app.x")]
+    view = changes_view(diff, level="module")
+    label = {n.id: n.label for n in view.nodes}
+    assert [(label[e.source], label[e.target], e.status) for e in view.edges] == [("app.n", "app.x", "removed")]
+
+
+def test_large_blobs_are_never_read(make_repo, monkeypatch) -> None:
+    import repoviz.filechanges as fc
+    from repoviz.gitutil import Git
+
+    repo = make_repo({"data.txt": "x" * 200 + "\n"})
+    repo.write({"data.txt": "y" * 200 + "\n"}).commit("bigger")
+    monkeypatch.setattr(fc, "MAX_FILE_BYTES", 100)
+    reads: list[str] = []
+    original = Git.show_file
+    monkeypatch.setattr(Git, "show_file", lambda self, rev, path: reads.append(path) or original(self, rev, path))
+    c = fc.file_changes(Repository(repo.path), "data.txt")
+    assert c["omitted"] == "file too large" and reads == []  # sizes are checked first
+    assert not c["uncommitted"]  # two large versions of the same size are not taken for an edit

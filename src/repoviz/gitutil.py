@@ -429,6 +429,19 @@ class Git:
         out = self.try_run("--literal-pathspecs", "ls-files", "-z", "--others", "--exclude-standard", "--", path)
         return path in (out or "").split("\0")
 
+    def blob_sizes(self, specs: list[tuple[str, str]]) -> list[int | None]:
+        """Sizes of the ``(commit, path)`` blobs (``None`` when absent), in one ``git cat-file --batch-check``, so
+        a caller can refuse a huge blob before reading it."""
+        if not specs:
+            return []
+        names = "".join(f"{rev}:{path}\n" for rev, path in specs).encode("utf-8", "surrogateescape")
+        out = self.run_bytes("cat-file", "--batch-check", input=names, check=False)
+        sizes: list[int | None] = []
+        for line in out.decode("utf-8", "replace").splitlines():
+            parts = line.rsplit(" ", 2)
+            sizes.append(int(parts[2]) if len(parts) == 3 and parts[1] == "blob" and parts[2].isdigit() else None)
+        return (sizes + [None] * len(specs))[:len(specs)]
+
     def show_file(self, rev_sha: str, path: str) -> bytes | None:
         try:
             return self.run_bytes("cat-file", "blob", f"{rev_sha}:{path}")

@@ -590,7 +590,10 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             if s is not None:
                 per_symbol.setdefault(s.id, [0, 0])[1] += 1
         key_changes = []
-        for st, sid in changed_syms_by_path.get(path, []):
+        syms = list(changed_syms_by_path.get(path, []))
+        if old_path:  # symbols deleted while the file moved still carry the old path
+            syms += [(st, sid) for st, sid in changed_syms_by_path.get(old_path, []) if st == REMOVED]
+        for st, sid in syms:
             ch = nodes[sid]
             n = ch.node
             if old_path and ch.reasons and all(r.startswith("moved from") for r in ch.reasons):
@@ -675,6 +678,11 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
                               add if not commit else None, commit)
     if exclude:  # e.g. files already modified when the session started: not this step's work
         findings = [f for f in findings if f.path not in exclude]
+    moved_to = {old: new for new, old in file_renames.items()}
+    for f in findings:  # a signal about a moved file's old content belongs on the file's (new) card
+        if f.path in moved_to:
+            f.detail = f"{f.detail} (before the move: {f.path}{':' + str(f.line) if f.line else ''})".strip()
+            f.path, f.line = moved_to[f.path], None
 
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.category, f.path or "", f.line or 0))
     per_file: dict[str, list[str]] = {}
@@ -1268,75 +1276,135 @@ def _coupling_findings(add: Any, files: list[dict[str, Any]], coupling: Any, cha
 
 
 MAX_STALE_FILES = 60
+MAX_RENAME_CHECKS = 200  # renamed symbols checked for leftover references per review
+
+
+_STRING = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`')
+_TRIPLE = re.compile(r'"""|\'\'\'')
+
+
+def _code_only(path: str, lines: list[str]) -> list[str]:
+    """The lines with comments, string literals and (Python) docstrings blanked, for searches by name."""
+    py = path.endswith((".py", ".pyi"))
+    out: list[str] = []
+    in_triple: str | None = None
+    for text in lines:
+        code = ""
+        while text:
+            if in_triple:
+                end = text.find(in_triple)
+                if end < 0:
+                    text = ""
+                    break
+                text, in_triple = text[end + 3:], None
+                continue
+            m = _TRIPLE.search(text) if py else None
+            if m is None:
+                code += text
+                break
+            code += text[:m.start()] + '""'
+            in_triple, text = m.group(0), text[m.end():]
+        code = _STRING.sub('""', code)
+        out.append(code.split("#" if py else "//", 1)[0])
+    return out
 
 
 def _rename_findings(add: Any, diff: RepositoryDiff, target: RepositorySnapshot, target_src: TreeSource,
                      component_of: Any) -> None:
-    """Renamed symbols: fine when every reference was updated, a problem when some code still uses the old name."""
-    renames = [r for r in diff.renames if r["kind"] == "symbol" and r["renamed"]]
+    """Renamed symbols: fine when every reference was updated, a problem when some code still uses the old name.
+
+    *high* when a call the base resolved to the old symbol is still written with the old name; *medium* when
+    the old name only appears as a word in the module or its importers (comments, strings, docstrings and
+    ``obj.name`` attribute accesses are ignored).  Bounded: at most :data:`MAX_RENAME_CHECKS` renames are
+    checked and :data:`MAX_STALE_FILES` files read, each once."""
+    renames = [r for r in diff.renames if r["kind"] == "symbol" and r["renamed"] and r["new_id"] in diff.nodes]
     if not renames:
         return
     t_idx = target.node_index()
+    new_of = {r["old_id"]: r["new_id"] for r in diff.renames}
+    checked, unchecked = renames[:MAX_RENAME_CHECKS], renames[MAX_RENAME_CHECKS:]
+    wanted = {r["new_id"] for r in checked} | {r["old_id"] for r in checked}
+    removed_calls: dict[str, list[str]] = {}  # renamed symbol (new id) -> callers whose call was not resolved anymore
+    for ec in diff.edges.values():
+        e = ec.edge
+        if ec.status == REMOVED and e.relationship == REL_CALLS and e.target_id in wanted:
+            removed_calls.setdefault(new_of.get(e.target_id, e.target_id), []).append(e.source_id)
     importers: dict[str, set[str]] = {}
     for e in target.dependency_edges:
         if e.relationship == REL_IMPORTS and e.source_id in t_idx:
             importers.setdefault(e.target_id, set()).add(e.source_id)
     module_of_path = {n.path: n for n in target.modules if n.path}
-    lines_of: dict[str, list[str]] = {}
+    code_of: dict[str, list[str]] = {}
 
-    def lines(path: str) -> list[str]:
-        if path not in lines_of:
-            lines_of[path] = (target_src.read_text(path) or "").splitlines()
-        return lines_of[path]
+    def code(path: str) -> list[str]:
+        if path not in code_of:
+            code_of[path] = _code_only(path, (target_src.read_text(path) or "").splitlines())
+        return code_of[path]
 
-    for rn in renames:
-        change = diff.nodes.get(rn["new_id"])
-        if change is None:
-            continue
-        node = change.node
-        old = (change.before.get("name") or rn["old_name"].rsplit(".", 1)[-1])
-        word = re.compile(r"(?<![\w$])" + re.escape(old) + r"(?![\w$])")
-        call = re.compile(r"(?<![\w$])" + re.escape(old) + r"\s*\(")
-        stale: list[tuple[str, int, str]] = []
+    stale: dict[str, dict[tuple[str, int], str]] = {r["new_id"]: {} for r in checked}
+    evidence: set[str] = set()
+    by_name: dict[str, list[tuple[dict[str, Any], Any]]] = {}  # old short name -> (rename, node)
+    files: dict[str, set[str]] = {}  # file to search -> old names to look for
+    searched: dict[str, set[str]] = {}  # rename (new id) -> files where its old name counts
+    for rn in checked:
+        node = diff.nodes[rn["new_id"]].node
+        old = diff.nodes[rn["new_id"]].before.get("name") or rn["old_name"].rsplit(".", 1)[-1]
         # Calls the base resolved to the old symbol that the target no longer resolves (the caller kept the name).
-        for ec in diff.edges.values():
-            e = ec.edge
-            if ec.status != REMOVED or e.relationship != REL_CALLS or e.target_id != rn["old_id"]:
-                continue
-            caller = t_idx.get(e.source_id) or next((t_idx[r["new_id"]] for r in diff.renames
-                                                     if r["old_id"] == e.source_id and r["new_id"] in t_idx), None)
+        call = re.compile(r"(?<![\w$])" + re.escape(old) + r"\s*\(")
+        for source_id in removed_calls.get(rn["new_id"], ()):
+            caller = t_idx.get(source_id) or t_idx.get(new_of.get(source_id, ""))
             if caller is None or not caller.path:
                 continue
-            src = lines(caller.path)
+            src = code(caller.path)
             start, end = caller.start_line or 1, caller.end_line or len(src)
             hit = next((i + 1 for i in range(start - 1, min(end, len(src))) if call.search(src[i])), None)
             if hit is not None:
-                stale.append((caller.path, hit, caller.qualified_name))
+                stale[rn["new_id"]][(caller.path, hit)] = caller.qualified_name
+                evidence.add(rn["new_id"])
         # Other references by name (imports, uses as a value) in the module and the modules that import it.
-        if node.component_type != "method":  # methods are called through objects: too ambiguous by name
-            module = module_of_path.get(node.path or "")
-            paths = [node.path] if node.path else []
-            if module is not None:
-                paths += sorted({t_idx[u].path for u in importers.get(module.id, ()) if t_idx[u].path})
-            for path in paths[:MAX_STALE_FILES]:
-                comment = "#" if path.endswith(".py") else "//"
-                for i, text in enumerate(lines(path), 1):
-                    if path == node.path and (node.start_line or 0) <= i <= (node.end_line or 0):
-                        continue
-                    code = text.split(comment, 1)[0]
-                    if word.search(code) and not any(s[0] == path and s[1] == i for s in stale):
-                        stale.append((path, i, text.strip()[:80]))
+        if node.component_type == "method":  # methods are called through objects: too ambiguous by name
+            continue
+        by_name.setdefault(old, []).append((rn, node))
+        module = module_of_path.get(node.path or "")
+        for path in [node.path] + sorted({t_idx[u].path for u in importers.get(module.id, ()) if t_idx[u].path}
+                                         if module is not None else []):
+            if path and (path in files or len(files) < MAX_STALE_FILES):
+                files.setdefault(path, set()).add(old)
+                searched.setdefault(rn["new_id"], set()).add(path)
+    for path, names in files.items():
+        word = re.compile(r"(?<![\w$.])(" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+                          + r")(?![\w$])")
+        raw = None
+        for i, text in enumerate(code(path), 1):
+            for name in {m.group(1) for m in word.finditer(text)}:
+                for rn, node in by_name.get(name, ()):
+                    if path not in searched.get(rn["new_id"], ()):
+                        continue  # another symbol with the same old name, in a module this file does not use
+                    if node.path == path and (node.start_line or 0) <= i <= (node.end_line or 0):
+                        continue  # its own definition
+                    raw = raw if raw is not None else (target_src.read_text(path) or "").splitlines()
+                    stale[rn["new_id"]].setdefault((path, i), raw[i - 1].strip()[:80] if i <= len(raw) else "")
+    for rn in renames:
+        node = diff.nodes[rn["new_id"]].node
+        old = diff.nodes[rn["new_id"]].before.get("name") or rn["old_name"].rsplit(".", 1)[-1]
         comp = component_of(node.path)[1] if node.path else None
-        stale.sort(key=lambda s: (s[0], s[1]))
-        if stale:
-            where = ", ".join(f"{p}:{ln}" for p, ln, _ in stale[:6]) + (f" (+{len(stale) - 6})" if len(stale) > 6 else "")
-            add(Finding("renamed-symbol-stale-references", "correctness", "high", "Renamed, but the old name is still "
-                        "used", f"{rn['old_name']} was renamed to {node.qualified_name}, but `{old}` is still used at "
-                        f"{where}.", stale[0][0], stale[0][1], _redact(stale[0][2]), node.qualified_name, comp,
+        hits = sorted(stale.get(rn["new_id"], {}).items())
+        if hits:
+            where = ", ".join(f"{p}:{ln}" for (p, ln), _ in hits[:6]) + (f" (+{len(hits) - 6})" if len(hits) > 6 else "")
+            sure = rn["new_id"] in evidence
+            (path, line), excerpt = hits[0]
+            add(Finding("renamed-symbol-stale-references", "correctness", "high" if sure else "medium",
+                        "Renamed, but the old name is still used" if sure else "Renamed, but the old name may still be used",
+                        f"{rn['old_name']} was renamed to {node.qualified_name}, but `{old}` is still "
+                        f"{'called' if sure else 'written'} at {where}.", path, line, _redact(excerpt),
+                        node.qualified_name, comp,
                         f"Update these references to `{node.name}` (or keep `{old}` as an alias)."), key=rn["new_id"])
         else:
+            capped = rn in unchecked
             add(Finding("renamed-symbol", "architecture", "low", "Symbol renamed",
-                        f"{rn['old_name']} → {node.qualified_name}; no reference to the old name is left.",
+                        f"{rn['old_name']} → {node.qualified_name}; "
+                        + (f"references were not checked (more than {MAX_RENAME_CHECKS} renames in this review)."
+                           if capped else "no reference to the old name is left."),
                         node.path, node.start_line, symbol=node.qualified_name, component=comp), key=rn["new_id"])
 
 

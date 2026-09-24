@@ -13,7 +13,7 @@ Factor             What counts                                                 D
 ``entry_points``   entry points that reach the changed code, log-scaled        15
 ``tests``          no test reaches the change, or none of them was updated     10
 ``sensitive``      protected, security-related, sensitive or out-of-scope path 10
-``churn``          a hotspot: top 10% of files by recent commits               5
+``churn``          a churn hotspot (see :func:`hotspot_threshold`)             5
 ``size``           lines added and removed, log-scaled                         10
 =================  ==========================================================  =======
 
@@ -43,8 +43,8 @@ SEVERITY_SHARE = {"high": 1.0, "medium": 0.5, "low": 1 / 6}
 FAN_IN_FULL = 32  # places for full fan-in points
 ENTRY_POINTS_FULL = 8
 SIZE_FULL = 400  # lines added + removed for full size points
-HOT_SHARE = 0.10  # top share of files by commits that counts as a hotspot
-MIN_HOT_COMMITS = 3
+HOT_PERCENTILE = 0.8  # a churn hotspot is at or above the 80th percentile of commits among modules,
+MIN_HOT_COMMITS = 2  # and changed at least twice (a file committed once is not churn)
 MAX_WALK = 200_000  # nodes visited, over all files of a review, when following callers
 MAX_WALK_PER_FILE = 5_000
 
@@ -82,6 +82,13 @@ def _reverse_graphs(diff: RepositoryDiff) -> tuple[dict[str, set[str]], dict[str
     return result
 
 
+def hotspot_threshold(counts: Iterable[int]) -> int | None:
+    """The commit count from which a module is a churn hotspot.  The one definition shared by the risk score, the
+    Structure tab (mirrored in ``app.js``) and its code-changes drawer (:func:`repoviz.filechanges.hotspots`)."""
+    ordered = sorted(c for c in counts if c > 0)
+    return max(MIN_HOT_COMMITS, ordered[int(len(ordered) * HOT_PERCENTILE)]) if ordered else None
+
+
 def _churn(snap: RepositorySnapshot) -> tuple[dict[str, int], int | None]:
     """Commits per file path in the churn window, and the count from which a file is a hotspot (memoised)."""
     cached = snap.__dict__.get("_risk_churn")
@@ -92,8 +99,8 @@ def _churn(snap: RepositorySnapshot) -> tuple[dict[str, int], int | None]:
         c = n.metadata.get("churn")
         if n.path and c and n.component_type != "directory" and "commits" in c and "last_commit" in c:
             churn[n.path] = max(churn.get(n.path, 0), int(c["commits"]))
-    counts = sorted(churn.values(), reverse=True)
-    hot = max(MIN_HOT_COMMITS, counts[max(0, math.ceil(len(counts) * HOT_SHARE) - 1)]) if counts else None
+    hot = hotspot_threshold(int(n.metadata["churn"]["commits"]) for n in snap.modules
+                            if n.path and isinstance(n.metadata.get("churn"), dict) and n.metadata["churn"].get("commits"))
     snap.__dict__["_risk_churn"] = (churn, hot)
     return churn, hot
 
@@ -135,6 +142,9 @@ class RiskContext:
             if f.get("path"):
                 self.findings_by_path.setdefault(f["path"], []).append(f)
         self.callers, self.importers, self.call_languages = _reverse_graphs(diff)
+        # Calls to a class resolve to its constructor: a changed (or renamed) class reaches the constructor's callers.
+        self.constructors = {c.node.parent_id: nid for nid, c in self.nodes.items()
+                             if c.node.name in ("__init__", "constructor") and c.node.parent_id}
         # Churn before the wave (the wave's own commits do not make a file a hotspot).
         self.window = base.metadata.get("churn_window_commits") or target.metadata.get("churn_window_commits")
         self.churn, self.hot_threshold = _churn(base)
@@ -205,6 +215,7 @@ class RiskContext:
         # Blast radius: callers (or importers) of the changed code, and the entry points and tests reaching it.
         code = entry.get("kind") != "submodule" and not entry.get("is_test")
         roots = [s["id"] for s in entry.get("symbols") or [] if s["id"] in self.nodes]
+        roots += [self.constructors[r] for r in roots if r in self.constructors and self.constructors[r] not in roots]
         module_id = entry.get("module_id")
         module = self.nodes.get(module_id) if module_id else None
         if not roots and module is not None and module.status in (ADDED, MODIFIED, REMOVED) \
@@ -276,7 +287,8 @@ class RiskContext:
         if commits and self.hot_threshold is not None and commits >= self.hot_threshold:
             window = f" of the last {self.window}" if self.window else ""
             self._factor(factors, "churn", 1.0,
-                         f"hotspot: changed in {commits}{window} commits (top {round(HOT_SHARE * 100)}% of files)")
+                         f"churn hotspot: changed in {commits}{window} commits (hotspots: {self.hot_threshold} "
+                         f"or more, the busiest {round((1 - HOT_PERCENTILE) * 100)}% of modules)")
 
         # Size of the change.
         if entry.get("kind") == "submodule":

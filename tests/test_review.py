@@ -766,7 +766,7 @@ def test_renamed_symbol_still_used_by_an_untouched_module(make_repo) -> None:
     Path(repo.path, "a.py").write_text("from lib import calculate\n\n\ndef first():\n    return calculate(1)\n")
     report = _review_all(repo)
     [stale] = by_kind(report)["renamed-symbol-stale-references"]
-    assert stale["severity"] == "high" and "`compute` is still used at b.py:5" in stale["detail"]
+    assert stale["severity"] == "high" and "`compute` is still called at b.py:5" in stale["detail"]
     assert stale["path"] == "b.py" and stale["line"] == 5
     key = next(f for f in report["files"] if f["path"] == "lib.py")["symbols"][0]
     assert key["name"] == "calculate" and key["renamed_from"] == "compute" and key["status"] == "modified"
@@ -945,7 +945,10 @@ def test_risk_hotspot_security_path_and_stale_tests(make_repo) -> None:
                 "app/auth/login.py": "def login(user):\n    return bool(user) and user != 'root'\n"})
     risk = {f["path"]: f["risk"] for f in _review_all(repo)["files"]}
     texts = {p: [x["text"] for x in r["factors"]] for p, r in risk.items()}
-    assert "hotspot: changed in 5 of the last 300 commits (top 10% of files)" in texts["app/hot.py"]
+    assert ("churn hotspot: changed in 5 of the last 300 commits (hotspots: 2 or more, the busiest 20% of modules)"
+            in texts["app/hot.py"])
+    from repoviz.filechanges import hotspots
+    assert hotspots(Repository(repo.path).snapshot("HEAD")) == ["app/hot.py"]  # one definition: Structure agrees
     assert "security-related path" in texts["app/auth/login.py"]
     assert "1 test file covers it; none was updated" in texts["app/auth/login.py"]
     assert not any(t.startswith("hotspot") for t in texts["app/auth/login.py"])
@@ -1028,3 +1031,93 @@ def test_recent_unmerged_branches_are_review_targets(make_repo) -> None:
     repo.git("checkout", "-q", "feature")  # the current branch is already offered as "Branch feature vs main"
     ids = [t.id for t in review_targets(Repository(repo.path))]
     assert "branch" in ids and "range:main...feature" not in ids and "range:main...other" in ids
+
+
+# --------------------------------------------------------------------------- deep review of #3 / #5 (regressions)
+
+
+def test_class_rename_keeps_its_unchanged_methods_out_of_key_changes(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/m.py": "class Foo:\n    def a(self):\n        return 1\n\n"
+                      "    def b(self):\n        return 2\n", "app/use.py": "from app.m import Foo\n"})
+    Path(repo.path, "app/m.py").write_text(Path(repo.path, "app/m.py").read_text().replace("Foo", "Bar"))
+    Path(repo.path, "app/use.py").write_text("from app.m import Bar\n")
+    report = _review_all(repo)
+    [key] = next(f for f in report["files"] if f["path"] == "app/m.py")["symbols"]
+    assert (key["name"], key["renamed_from"]) == ("Bar", "Foo")  # the rename, not "a renamed from a"
+
+
+def test_moved_file_keeps_its_deleted_symbols_and_their_signals(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/m.py": "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\n"
+                      "def c():\n    return 3\n", "app/use.py": "from app.m import a\n\nprint(a())\n"})
+    repo.git("mv", "app/m.py", "app/n.py")
+    Path(repo.path, "app/n.py").write_text("def a():\n    return 1\n\n\ndef c():\n    return 3\n")
+    Path(repo.path, "app/use.py").write_text("from app.n import a\n\nprint(a())\n")
+    report = _review_all(repo)
+    entry = next(f for f in report["files"] if f["path"] == "app/n.py")
+    assert entry["status"] == "renamed" and [(k["name"], k["status"]) for k in entry["symbols"]] == [("b", "removed")]
+    removed = by_kind(report).get("public-api-removed", [])
+    assert removed and all(f["path"] == "app/n.py" and "before the move: app/m.py" in f["detail"] for f in removed)
+    assert set(entry["findings"]) >= {f["id"] for f in removed}  # on the file's card
+
+
+def test_one_shared_generic_name_is_not_a_moved_file(make_repo) -> None:
+    repo = make_repo({"app/mig/__init__.py": "", "app/mig/0002_b.py": "class Migration:\n    ops = ['b']\n"})
+    repo.delete("app/mig/0002_b.py")
+    repo.write({"app/mig/0003_c.py": "class Migration:\n    ops = ['c', 'd']\n"})
+    files = {f["path"]: f["status"] for f in _review_all(repo)["files"]}
+    assert files == {"app/mig/0002_b.py": "removed", "app/mig/0003_c.py": "added"}
+
+
+def test_common_signature_alone_does_not_pair_methods(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/s.py": "class S:\n    def close(self):\n        self.x = 0\n"
+                      "        self.y = 0\n        return None\n"})
+    Path(repo.path, "app/s.py").write_text("class S:\n    def reset(self):\n        self.a = []\n        self.b = {}\n"
+                                           "        self.c = 1\n        return self\n")
+    report = _review_all(repo)
+    assert "renamed-symbol" not in by_kind(report) and "renamed-symbol-stale-references" not in by_kind(report)
+    assert sorted((k["name"], k["status"]) for k in report["files"][0]["symbols"]) == [("close", "removed"), ("reset", "added")]
+
+
+def test_old_name_in_strings_docstrings_and_attributes_is_not_stale(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/p.py": "def parse(text):\n    return text.split()\n",
+                      "app/cli.py": 'import logging\nfrom app.p import parse\n\n\ndef run(parser, args):\n'
+                                    '    """Calls parse on the input."""\n    logging.info("parse failed")\n'
+                                    '    parser.parse(args)  # parse again\n    return parse(args)\n'})
+    Path(repo.path, "app/p.py").write_text("def parse_text(text):\n    return text.split()\n")
+    Path(repo.path, "app/cli.py").write_text(Path(repo.path, "app/cli.py").read_text()
+                                             .replace("from app.p import parse", "from app.p import parse_text")
+                                             .replace("return parse(args)", "return parse_text(args)"))
+    kinds = by_kind(_review_all(repo))
+    assert "renamed-symbol-stale-references" not in kinds and len(kinds["renamed-symbol"]) == 1
+
+
+def test_stale_name_without_a_resolved_call_is_medium(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/p.py": "def parse(text):\n    return text\n",
+                      "app/reg.py": "from app import p\n\nHANDLERS = [parse]\n"})
+    Path(repo.path, "app/p.py").write_text("def parse_text(text):\n    return text\n")
+    [stale] = by_kind(_review_all(repo))["renamed-symbol-stale-references"]
+    assert stale["severity"] == "medium" and "may still be used" in stale["title"] and "app/reg.py:3" in stale["detail"]
+
+
+def test_rename_reference_check_is_capped(make_repo, monkeypatch) -> None:
+    import repoviz.review as review_mod
+
+    monkeypatch.setattr(review_mod, "MAX_RENAME_CHECKS", 1)
+    repo = make_repo({"app/__init__.py": "", "app/p.py": "def alpha_one(x):\n    return x\n\n\n"
+                      "def beta_two(y):\n    return y * 2\n"})
+    Path(repo.path, "app/p.py").write_text("def alpha_uno(x):\n    return x\n\n\ndef beta_dos(y):\n    return y * 2\n")
+    details = sorted(f["detail"] for f in by_kind(_review_all(repo))["renamed-symbol"])
+    assert len(details) == 2 and sum("were not checked (more than 1 renames" in d for d in details) == 1
+
+
+def test_renamed_class_counts_the_callers_of_its_constructor(make_repo) -> None:
+    repo = make_repo({"app/__init__.py": "", "app/errs.py": "class AppError(Exception):\n    def __init__(self, msg):\n"
+                      "        super().__init__(msg)\n",
+                      "app/a.py": "from app.errs import AppError\n\n\ndef f():\n    raise AppError('a')\n",
+                      "app/b.py": "from app.errs import AppError\n\n\ndef g():\n    raise AppError('b')\n"})
+    Path(repo.path, "app/errs.py").write_text(Path(repo.path, "app/errs.py").read_text().replace("AppError", "ServiceError"))
+    for name in ("app/a.py", "app/b.py"):
+        p = Path(repo.path, name)
+        p.write_text(p.read_text().replace("AppError", "ServiceError"))
+    risk = next(f for f in _review_all(repo)["files"] if f["path"] == "app/errs.py")["risk"]
+    assert "called from 2 places" in [x["text"] for x in risk["factors"]]  # calls to the class hit its __init__
