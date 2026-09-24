@@ -152,6 +152,21 @@ class TreeSource(ABC):
             self._text_cache[path] = text
         return text
 
+    #: Git submodule paths (gitlinks) present in this state.
+    submodules: list[str] = []
+
+    def submodule_commits(self) -> dict[str, str]:
+        """Commit each submodule points to in this state (for a working tree: the checked-out commit)."""
+        return {}
+
+    def submodule_dirty(self, path: str) -> list[str]:
+        """Files inside a submodule whose content differs from its commit in this state (relative paths)."""
+        return []
+
+    def submodule_file(self, path: str, rel: str) -> bytes | None:
+        """Content of such a file (``None`` when it was deleted)."""
+        return None
+
     def directories(self) -> list[str]:
         dirs: set[str] = set()
         for f in self.files():
@@ -195,10 +210,12 @@ class GitRevisionSource(TreeSource):
         self.sha = sha
         self._entries: dict[str, tuple[str, int | None]] = {}
         self.submodules: list[str] = []
+        self._sub_commits: dict[str, str] = {}
         self.symlinks: list[str] = []
         for mode, typ, obj, size, path in git.ls_tree(sha):
             if typ == "commit":
                 self.submodules.append(path)
+                self._sub_commits[path] = obj
             elif typ == "blob":
                 if mode == "120000":
                     self.symlinks.append(path)
@@ -221,6 +238,9 @@ class GitRevisionSource(TreeSource):
         entry = self._entries.get(path)
         return entry[1] if entry else None
 
+    def submodule_commits(self) -> dict[str, str]:
+        return dict(self._sub_commits)
+
     @property
     def revision_id(self) -> str:
         return self.sha
@@ -236,10 +256,12 @@ class GitIndexSource(TreeSource):
         self.git = git
         self._entries: dict[str, str] = {}
         self.submodules: list[str] = []
+        self._sub_commits: dict[str, str] = {}
         self.conflicted: list[str] = []
         for mode, obj, stage, path in git.ls_index():
             if mode == "160000":
                 self.submodules.append(path)
+                self._sub_commits[path] = obj
                 continue
             if mode == "120000":
                 continue
@@ -249,7 +271,10 @@ class GitIndexSource(TreeSource):
                 self._entries.setdefault(path, obj)
                 self.conflicted.append(path)
         self._files = sorted(self._entries)
-        self._id = stable_hash("index", *(f"{p}\0{o}" for p, o in sorted(self._entries.items())))
+        self._id = stable_hash("index", *(f"{p}\0{o}" for p, o in sorted({**self._entries, **self._sub_commits}.items())))
+
+    def submodule_commits(self) -> dict[str, str]:
+        return dict(self._sub_commits)
 
     def files(self) -> list[str]:
         return list(self._files)
@@ -321,6 +346,52 @@ class WorkingTreeSource(_DiskMixin, TreeSource):
                 files.append(path)
         self._files = sorted(files)
         self._id: str | None = None
+        # Submodules: the index records them; their checked-out commit and dirty files come from git inside them.
+        self.submodules = []
+        self._index_sub: dict[str, str] = {}
+        self._sub_state: dict[str, tuple[str | None, list[str]]] = {}
+        if (self.root / ".gitmodules").is_file():
+            for mode, obj, _stage, path in git.ls_index():
+                if mode == "160000":
+                    self.submodules.append(path)
+                    self._index_sub[path] = obj
+
+    def _submodule_state(self, path: str) -> tuple[str | None, list[str]]:
+        state = self._sub_state.get(path)
+        if state is None:
+            from .submodules import open_submodule  # local import: submodules imports this module
+
+            sub = open_submodule(self.root, path)
+            if sub is None:  # not initialised: the recorded commit is all we know
+                state = (self._index_sub.get(path), [])
+            else:
+                try:
+                    dirty = sorted({e.path for e in sub.status()})
+                except Exception:
+                    dirty = []
+                state = (sub.head() or self._index_sub.get(path), dirty)
+            self._sub_state[path] = state
+        return state
+
+    def submodule_commits(self) -> dict[str, str]:
+        out = {}
+        for path in self.submodules:
+            commit = self._submodule_state(path)[0]
+            if commit:
+                out[path] = commit
+        return out
+
+    def submodule_dirty(self, path: str) -> list[str]:
+        return list(self._submodule_state(path)[1]) if path in self.submodules else []
+
+    def submodule_file(self, path: str, rel: str) -> bytes | None:
+        p = self.root / path / rel
+        try:
+            if p.is_symlink() or not p.is_file():
+                return None
+            return p.read_bytes()
+        except OSError:
+            return None
 
     def files(self) -> list[str]:
         return list(self._files)
@@ -351,6 +422,11 @@ class WorkingTreeSource(_DiskMixin, TreeSource):
     def revision_id(self) -> str:
         if self._id is None:
             parts = [f"{p}\0{self.content_hash(p)}" for p in self._files]
+            # Work inside submodules (commits or uncommitted edits) changes the state too.
+            for sub in self.submodules:
+                commit, dirty = self._submodule_state(sub)
+                parts.append(f"{sub}\0{commit}")
+                parts += [f"{sub}/{d}\0{self._hash_disk(f'{sub}/{d}')}" for d in dirty]
             self._id = f"worktree:{stable_hash('worktree', *parts)}"
         return self._id
 
@@ -405,11 +481,15 @@ class OverlaySource(TreeSource):
     kind = "overlay"
 
     def __init__(self, base: TreeSource, overrides: dict[str, bytes | None], label: str, kind: str = "overlay",
-                 revision_id: str | None = None) -> None:
+                 revision_id: str | None = None, submodule_commits: dict[str, str] | None = None,
+                 submodule_files: dict[str, bytes | None] | None = None) -> None:
         super().__init__(label)
         self.base = base
         self.kind = kind
         self.overrides = dict(overrides)
+        self.submodules = list(base.submodules)
+        self._sub_commits = submodule_commits
+        self._sub_files = dict(submodule_files or {})
         files = set(base.files())
         for path, data in self.overrides.items():
             if data is None:
@@ -433,6 +513,16 @@ class OverlaySource(TreeSource):
             data = self.overrides[path]
             return None if data is None else content_hash(data)
         return self.base.content_hash(path)
+
+    def submodule_commits(self) -> dict[str, str]:
+        return dict(self._sub_commits) if self._sub_commits is not None else self.base.submodule_commits()
+
+    def submodule_dirty(self, path: str) -> list[str]:
+        prefix = path + "/"
+        return sorted(p[len(prefix):] for p in self._sub_files if p.startswith(prefix))
+
+    def submodule_file(self, path: str, rel: str) -> bytes | None:
+        return self._sub_files.get(f"{path}/{rel}")
 
     @property
     def revision_id(self) -> str:

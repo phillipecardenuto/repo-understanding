@@ -36,6 +36,11 @@
     }
     return el;
   }
+  /* Element.append() would print "null" for skipped optional children; this skips them like h() does. */
+  function put(el, ...children) {
+    for (const c of children.flat(Infinity)) if (c !== null && c !== undefined && c !== false) el.append(c);
+    return el;
+  }
   const push = (map, key, value) => { if (!map.has(key)) map.set(key, []); map.get(key).push(value); };
   const tagsOf = (n) => (n && n.tags) || [];
   const hasTag = (n, t) => tagsOf(n).includes(t);
@@ -982,7 +987,7 @@
   }
 
   // --------------------------------------------------------- details panel
-  const HIDDEN_META = new Set(["component_id", "project_id", "underlying_edges", "semantic_fingerprint", "qualified_name_authoritative", "roles"]);
+  const HIDDEN_META = new Set(["component_id", "project_id", "underlying_edges", "semantic_fingerprint", "qualified_name_authoritative", "roles", "signature_id"]);
   let APP = null;
   /* Compact (embedded) diffs omit evidence of unchanged edges; the working-tree snapshot has the same edge IDs. */
   function evidenceOf(e) {
@@ -1024,8 +1029,8 @@
         [h("dt", { text: "analyzers" }), h("dd", { text: (n.analyzers || [n.analyzer]).join(", ") })],
         [h("dt", { text: "id" }), h("dd", { class: "mono faint", text: n.id })]));
       const m = metaTable(n.metadata);
-      if (m) this.el.append(h("h4", { text: "Metadata" }), m);
-      if (n.before && Object.keys(n.before).length) this.el.append(h("h4", { text: "Before" }), metaTable(n.before));
+      if (m) put(this.el, h("h4", { text: "Metadata" }), m);
+      if (n.before && Object.keys(n.before).length) put(this.el, h("h4", { text: "Before" }), metaTable(n.before));
       const actions = h("div", { class: "group", style: { marginTop: "8px" } });
       if (this.app.tabs.dependencies) actions.appendChild(h("button", { class: "btn small", onclick: () => this.app.focusDependencies(id) }, "Focus in Dependencies"));
       if (this.app.tabs.structure && idx.kind === "snapshot") actions.appendChild(h("button", { class: "btn small", onclick: () => this.app.showInStructure(id) }, "Show in Structure"));
@@ -1062,7 +1067,7 @@
         this.el.appendChild(h("h4", null, `${us ? displayName(us) : u.source_id} → ${ut ? displayName(ut) : u.target_id} `, statusPill(u.status),
           (u.change_reasons || []).length ? h("span", { class: "faint" }, " " + u.change_reasons.join("; ")) : null));
         this.el.appendChild(evidenceList(evidenceOf(u), 5));
-        if (u.base_evidence && u.base_evidence.length) this.el.append(h("div", { class: "muted", text: "Before:" }), evidenceList(u.base_evidence, 3));
+        if (u.base_evidence && u.base_evidence.length) put(this.el, h("div", { class: "muted", text: "Before:" }), evidenceList(u.base_evidence, 3));
       }
     }
     showActivity(ev, activity) {
@@ -1100,7 +1105,7 @@
       this.app = app; this.root = root;
       const cfg = app.bundle.config || {};
       this.opts = Object.assign({ level: "auto", scope: "neighbors", relationships: ["imports", "depends-on"], external: !!cfg.external_dependencies, hideCosmetic: true,
-        maxNodes: cfg.max_diagram_nodes || 150, cluster: true, comparison: null, mode: "all", base: "HEAD", target: "WORKTREE", mbRef: "" }, storage.get("rv.changes", {}));
+        maxNodes: cfg.max_diagram_nodes || 150, cluster: true, comparison: null, mode: app.bundle.session ? "session" : "all", base: "HEAD", target: "WORKTREE", mbRef: "" }, storage.get("rv.changes", {}));
     }
     save() { storage.set("rv.changes", this.opts); }
     async init() {
@@ -1122,16 +1127,17 @@
         const presets = [["all", "HEAD vs working tree (staged + unstaged + untracked)"], ["staged", "Staged changes only"], ["unstaged", "Unstaged changes only"],
           ["session", "Current work session"], ["merge-base", "Merge base vs working tree"], ["custom", "Custom: revision vs revision…"]];
         const sync = () => { custom.hidden = o.mode !== "custom"; mb.hidden = o.mode !== "merge-base"; };
-        bar.append(field("Comparison", select(presets, o.mode, (v) => { o.mode = v; sync(); if (v !== "custom" && v !== "merge-base") this.load(); })), custom, mb,
+        put(bar, field("Comparison", select(presets, o.mode, (v) => { o.mode = v; sync(); if (v !== "custom" && v !== "merge-base") this.load(); })), custom, mb,
           h("button", { class: "btn primary", onclick: () => { o.base = baseIn.value.trim() || "HEAD"; o.target = targetIn.value.trim() || "WORKTREE"; o.mbRef = mbIn.value.trim(); this.load(); } }, "Compare"), dl);
         sync();
       } else {
         const comps = app.bundle.comparisons || [];
-        if (!comps.some((c) => c.id === o.comparison)) o.comparison = comps.length ? comps[0].id : null;
-        bar.append(field("Comparison (precomputed)", select(comps.map((c) => [c.id, c.label]), o.comparison, (v) => { o.comparison = v; this.load(); })));
+        // Default to the active work session: that is what the agent changed.
+        if (!comps.some((c) => c.id === o.comparison)) o.comparison = (comps.find((c) => c.mode === "session") || comps[0] || {}).id || null;
+        put(bar, field("Comparison (precomputed)", select(comps.map((c) => [c.id, c.label]), o.comparison, (v) => { o.comparison = v; this.load(); })));
       }
       const redraw = () => { this.save(); this.draw(); };
-      bar.append(
+      put(bar, 
         field("Level", select([["auto", "Auto"], ["component", "Components"], ["project", "Projects"], ["package", "Packages / directories"], ["module", "Modules / files"]], o.level, (v) => { o.level = v; redraw(); })),
         field("Show", select([["changed", "Changed only"], ["neighbors", "Changed + neighbours"], ["all", "Everything"]], o.scope, (v) => { o.scope = v; redraw(); })),
         field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
@@ -1142,13 +1148,13 @@
           checkbox("hide formatting-only", o.hideCosmetic, (c) => { o.hideCosmetic = c; redraw(); }),
           checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
         this.statusEl);
-      this.root.append(bar, this.statsEl, h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el), this.listsEl);
+      put(this.root, bar, this.statsEl, h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el), this.listsEl);
       await this.load();
     }
     async load() {
       this.save();
       const app = this.app, o = this.opts;
-      this.statusEl.innerHTML = ""; this.statusEl.append(h("span", { class: "spinner" }), " analyzing…");
+      this.statusEl.innerHTML = ""; put(this.statusEl, h("span", { class: "spinner" }), " analyzing…");
       try {
         let comp;
         if (app.api.live) {
@@ -1173,7 +1179,7 @@
       const d = this.comp.diff, o = this.opts;
       const sum = d.summary;
       this.statsEl.innerHTML = "";
-      this.statsEl.append(
+      put(this.statsEl, 
         stat(sum.nodes.added, "nodes added", "added"), stat(sum.nodes.removed, "nodes removed", "removed"), stat(sum.nodes.modified, "nodes modified", "modified"),
         stat(sum.edges.added, "relationships added", "added"), stat(sum.edges.removed, "relationships removed", "removed"), stat(sum.edges.modified, "relationships changed", "modified"),
         stat(d.new_dependencies.length, "new dependencies", d.new_dependencies.length ? "added" : ""),
@@ -1203,7 +1209,7 @@
         (c.example_path && c.example_path.length ? c.example_path : c.members).map(name).join(" → "))));
       const changedNodes = d.nodes.filter((n) => n.status !== "unchanged" && !(this.opts.hideCosmetic && (n.change_reasons || []).join() === "formatting or comments only"));
       this.listsEl.innerHTML = "";
-      this.listsEl.append(
+      put(this.listsEl, 
         h("div", { class: "two-col" },
           h("div", { class: "card" }, h("h3", { text: `New dependencies (${d.new_dependencies.length})` }),
             table(depCols, d.new_dependencies, { onRow: onDep, empty: "No new dependencies." })),
@@ -1251,7 +1257,7 @@
       this.details = new DetailsPanel(app);
       this.crumbs = h("div", { class: "crumbs" });
       const redraw = () => { this.save(); this.draw(); };
-      this.root.append(h("div", { class: "toolbar" },
+      put(this.root, h("div", { class: "toolbar" },
         h("div", { class: "field" }, h("span", { text: "Root" }), this.crumbs),
         field("Depth", numberInput(o.depth, 1, 12, (v) => { o.depth = v; redraw(); })),
         field("Layout", select([["tree", "Tree"], ["nested", "Nested boxes"]], o.layout, (v) => { o.layout = v; redraw(); })),
@@ -1323,6 +1329,11 @@
           list((p.generated || []).concat((p.vendored || []).map((v) => Object.assign({ vendored: true }, v))), (g) => [h("span", { class: "mono", text: g.path }), " ", pill(g.vendored ? "vendored" : "generated"), h("span", { class: "faint", text: " " + (g.reason || "") })], "None detected.")),
         h("div", { class: "card" }, h("h3", { text: `Entry points (${(p.entry_points || []).length})` }),
           list((p.entry_points || []).slice(0, 100), (e) => [h("b", { text: e.name }), " ", pill(e.kind), h("div", { class: "mono faint", text: `${e.target} · ${e.declared_in}${e.line ? ":" + e.line : ""}` })])),
+        (p.submodule_info || []).length ? h("div", { class: "card" }, h("h3", null, iconEl("link"), ` Git submodules (${p.submodule_info.length})`),
+          h("div", { class: "muted small", text: "Separate repositories pinned to a commit. Reviews look inside them; the graphs do not analyze their code." }),
+          list(p.submodule_info, (m) => [h("span", { class: "mono", text: m.path }), " ", h("span", { class: "mono faint", text: "@ " + (m.commit || "?").slice(0, 10) }),
+            m.checked_out === false ? pill("not checked out", "medium") : null, m.uncommitted_files ? pill(`${m.uncommitted_files} uncommitted`, "modified") : null,
+            m.url ? h("div", { class: "faint", text: m.url }) : null])) : null,
         h("div", { class: "card" }, h("h3", { text: "Containers, deployment & CI" }),
           h("h4", { text: "Containers" }), list(p.containers, (c) => [h("span", { class: "mono", text: c.path }), " ", pill(c.kind), c.services && c.services.length ? " services: " + c.services.join(", ") : "", c.base_images && c.base_images.length ? " from " + c.base_images.join(", ") : ""]),
           h("h4", { text: "Deployment" }), list(p.deployment, (d) => [h("span", { class: "mono", text: d.path }), " ", pill(d.kind)]),
@@ -1363,7 +1374,7 @@
       const redraw = () => { this.save(); this.draw(); };
       this.cyclesEl = h("div", { class: "card" });
       this.fanEl = h("div", { class: "card" });
-      this.root.append(h("div", { class: "toolbar" },
+      put(this.root, h("div", { class: "toolbar" },
         field("Level", select([["auto", "Auto"], ["component", "Components"], ["project", "Projects"], ["package", "Packages / directories"], ["module", "Modules / files"], ["symbol", "Symbols (use with focus)"]], o.level, (v) => {
           o.level = v; if (v === "symbol" && !o.relationships.includes("calls")) o.relationships = [...o.relationships, "calls"]; redraw(); })),
         h("div", { class: "field" }, h("span", { text: "Focus" }), h("div", { class: "group" }, this.focusInput, this.datalist,
@@ -1415,7 +1426,7 @@
       const name = (id) => { const n = si.nodes.get(id); return n ? displayName(n) : id; };
       const snapCycles = (this.app.bundle.snapshot.cycles || []);
       this.cyclesEl.innerHTML = "";
-      this.cyclesEl.append(h("h3", { text: `Cycles (${snapCycles.length} in snapshot)` }),
+      put(this.cyclesEl, h("h3", { text: `Cycles (${snapCycles.length} in snapshot)` }),
         (view.cycles || []).length ? [h("h4", { text: `In this view (${view.cycles.length})` }), h("ul", { class: "plain" }, view.cycles.map((c) => h("li", null,
           h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); o.cycleMembers = c; o.focus = null; this.draw(); } }, c.map(name).join(" ⇄ ")))))] : null,
         h("h4", { text: "Detected by analysis" }),
@@ -1429,7 +1440,7 @@
         fan.get(e.source).out++; fan.get(e.target).in++;
       }
       this.fanEl.innerHTML = "";
-      this.fanEl.append(h("h3", { text: "Fan-in / fan-out in this view" }), table([
+      put(this.fanEl, h("h3", { text: "Fan-in / fan-out in this view" }), table([
         { key: "name", label: "Node", render: (r) => name(r.id), sort: (r) => name(r.id) },
         { key: "in", label: "Used by", num: true }, { key: "out", label: "Depends on", num: true }], [...fan.values()],
       { sort: "in", dir: -1, onRow: (r) => { this.details.showNode(si, r.id); this.diagram.select(r.id); } }));
@@ -1451,7 +1462,7 @@
       this.statsEl = h("div", { class: "stats" });
       this.tableEl = h("div", { class: "card" });
       this.flowSide = h("div", { class: "card" });
-      this.root.append(this.headEl, this.statsEl, h("div", { class: "split" }, h("div", null, this.mapDiagram.el, this.tableEl), this.details.el),
+      put(this.root, this.headEl, this.statsEl, h("div", { class: "split" }, h("div", null, this.mapDiagram.el, this.tableEl), this.details.el),
         h("h2", { text: "Execution / call flow that may be affected", style: { fontSize: "16px", margin: "16px 0 8px" } }),
         h("div", { class: "split" }, h("div", null, this.flowDiagram.el), this.flowSide));
       await this.load();
@@ -1488,13 +1499,13 @@
     drawHead() {
       const app = this.app, d = this.data, b = d.baseline || {};
       this.headEl.innerHTML = "";
-      this.headEl.append(h("div", { class: "field" }, h("span", { text: "Baseline" }), h("div", null, h("b", { text: b.label || "" }),
+      put(this.headEl, h("div", { class: "field" }, h("span", { text: "Baseline" }), h("div", null, h("b", { text: b.label || "" }),
         b.kind === "session" ? pill("work session", "cycle") : pill(b.kind || ""), " ",
         h("span", { class: "muted", text: b.kind === "session" ? `baseline commit ${(b.session.baseline_head || "").slice(0, 10)} · ${b.session.dirty_files_at_start} file(s) were already dirty` : "uncommitted changes relative to HEAD" }))));
       if (app.api.live) {
         // Kept across redraws so a label being typed survives the auto-refresh.
         const label = this.labelInput || (this.labelInput = h("input", { placeholder: "session label (optional)", size: 18, "aria-label": "Session label" }));
-        this.headEl.append(h("div", { class: "field" }, h("span", { text: "Work session" }), h("div", { class: "group" }, label,
+        put(this.headEl, h("div", { class: "field" }, h("span", { text: "Work session" }), h("div", { class: "group" }, label,
           h("button", { class: "btn", title: "Record the current working tree as the baseline; everything changed afterwards (including commits) is attributed to the session.",
             onclick: () => this.act(async () => { await app.api.sessionStart(label.value); label.value = ""; }) }, b.kind === "session" ? "Restart session" : "Start session"),
           b.kind === "session" ? h("button", { class: "btn", onclick: () => this.act(() => app.api.sessionEnd()) }, "End session") : null)),
@@ -1503,12 +1514,12 @@
           h("button", { class: "btn small", onclick: () => this.load() }, "Refresh now"))));
       }
       this.updatedEl = h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` });
-      this.headEl.append(h("button", { class: "btn small", onclick: () => this.app.show("review") }, "Review this work →"), this.updatedEl);
+      put(this.headEl, h("button", { class: "btn small", onclick: () => this.app.show("review") }, "Review this work →"), this.updatedEl);
     }
     async draw() {
       const d = this.data, s = d.summary || {};
       this.statsEl.innerHTML = "";
-      this.statsEl.append(stat(s.files || 0, "files changed", "modified"), stat(`+${s.lines_added || 0} / −${s.lines_removed || 0}`, "lines"),
+      put(this.statsEl, stat(s.files || 0, "files changed", "modified"), stat(`+${s.lines_added || 0} / −${s.lines_removed || 0}`, "lines"),
         stat(s.new_dependencies || 0, "new dependencies", s.new_dependencies ? "added" : ""), stat(s.cycles_introduced || 0, "cycles introduced", s.cycles_introduced ? "cycle" : ""),
         stat((s.by_impact || {}).high || 0, "high-impact files", (s.by_impact || {}).high ? "removed" : ""), stat(s.tests_changed || 0, "test files changed"),
         stat(s.config_changed || 0, "config files changed"), stat(s.entry_points_affected || 0, "entry points reaching changes"), stat(s.tests_reaching_changes || 0, "tests reaching changes"));
@@ -1518,8 +1529,8 @@
         onEdge: (e) => di && this.details.showEdge(di, Object.assign({}, e, { underlying: di.edges.filter((x) => x.source_id === e.source && x.target_id === e.target && x.direct).map((x) => x.id) })),
       });
       this.tableEl.innerHTML = "";
-      this.tableEl.append(h("h3", { text: `Modified files (${(d.events || []).length})` }), table([
-        { key: "path", label: "File", render: (r) => h("span", { class: "mono", text: r.path }) },
+      put(this.tableEl, h("h3", { text: `Modified files (${(d.events || []).length})` }), table([
+        { key: "path", label: "File", render: (r) => [h("span", { class: "mono", text: r.path }), r.submodule ? [" ", pill([iconEl("link", true), " in submodule"], "cycle")] : null] },
         { key: "git_status", label: "Status", render: (r) => [pill(r.git_status, r.git_status === "deleted" ? "removed" : ["added", "untracked"].includes(r.git_status) ? "added" : "modified"), r.staged ? pill("staged") : null] },
         { key: "owning_component_name", label: "Component" },
         { key: "lines_added", label: "+/−", num: true, render: (r) => r.lines_added === null || r.lines_added === undefined ? "bin" : `+${r.lines_added} −${r.lines_removed}` },
@@ -1536,7 +1547,7 @@
       const pathList = (items) => h("ul", { class: "plain" }, items.slice(0, 50).map((x) => h("li", null, h("b", { text: x.name }), " ", pill(x.kind),
         x.path && x.path.length > 1 ? h("div", { class: "faint", text: x.path.map(name).join(" → ") }) : null)));
       this.flowSide.innerHTML = "";
-      this.flowSide.append(h("h3", { text: "What may be affected" }), h("div", { class: "muted", text: flow.mode === "modules" ? "Module-level analysis (no call data)." : flow.mode === "none" ? "" : "Static call-graph analysis (heuristic; dynamic dispatch is not resolved)." }),
+      put(this.flowSide, h("h3", { text: "What may be affected" }), h("div", { class: "muted", text: flow.mode === "modules" ? "Module-level analysis (no call data)." : flow.mode === "none" ? "" : "Static call-graph analysis (heuristic; dynamic dispatch is not resolved)." }),
         (flow.notes || []).map((n) => h("div", { class: "notice", text: n })),
         h("h4", { text: `Entry points reaching the change (${(flow.entry_points || []).length})` }), (flow.entry_points || []).length ? pathList(flow.entry_points) : h("div", { class: "empty", text: "None found." }),
         h("h4", { text: `Tests reaching the change (${(flow.tests || []).length})` }), (flow.tests || []).length ? pathList(flow.tests) : h("div", { class: "empty", text: "None found." }),
@@ -1655,7 +1666,7 @@
     get repoKey() { return this.app.bundle.snapshot.repository_id; }
     async init() {
       const app = this.app;
-      this.targetSelect = h("select", { "aria-label": "Review target", onchange: () => { this.opts.targetId = this.targetSelect.value; this.save(); this.load(); } });
+      this.targetSelect = h("select", { "aria-label": "Review target", onchange: () => { this.opts.targetId = this.targetSelect.value; this.opts.targetPinned = true; this.save(); this.load(); } });
       this.allowedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/billing/**, tests/billing/**", "aria-label": "Allowed paths" });
       this.protectedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/auth/**, migrations/**", "aria-label": "Protected paths" });
       for (const input of [this.allowedInput, this.protectedInput]) {
@@ -1671,13 +1682,13 @@
         const dl = h("datalist", { id: "rv-revs-review" }, ["WORKTREE", "INDEX", "HEAD", ...(rev.branches || []), ...(rev.tags || [])].map((v) => h("option", { value: v })));
         const go = () => { if (!base.value && !head.value) return; this.custom = { base: base.value.trim() || "HEAD", target: head.value.trim() || "WORKTREE" }; this.load(); };
         for (const input of [base, head]) input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
-        bar.append(h("div", { class: "field" }, h("span", { text: "…or any range" }), h("div", { class: "group" }, base, head, dl,
+        put(bar, h("div", { class: "field" }, h("span", { text: "…or any range" }), h("div", { class: "group" }, base, head, dl,
           h("button", { class: "btn", onclick: go }, "Review"),
           h("button", { class: "btn", title: "Re-analyze the repository and keep your place (also happens when you come back to this tab)", onclick: () => this.refresh() }, "↻ Refresh"))));
       }
       this.saveScopeBtn = h("button", { class: "btn small", hidden: true, title: "Store this scope with the work session (used by the CLI too)", onclick: () => this.saveScopeToSession() }, "Save to session");
       this.resetScopeBtn = h("button", { class: "btn small", title: "Discard your edits and use the scope from the configuration / session", onclick: () => this.resetScope() }, "Reset");
-      bar.append(
+      put(bar, 
         field("Allowed to change (globs)", this.allowedInput),
         field("Must not touch (globs)", this.protectedInput),
         h("div", { class: "field" }, h("span", { text: "Scope" }), h("div", { class: "group" },
@@ -1699,7 +1710,7 @@
         h("h2", { class: "section-title" }, "Changed modules ", h("span", { class: "faint small", text: "keys: j / k next / previous file · m mark reviewed" })),
         h("div", { class: "split files-split" }, this.filesEl, this.fileEl),
         h("h2", { class: "section-title", text: "Feedback for the agent" }), this.feedbackEl);
-      this.root.append(bar, this.emptyEl, this.bodyEl);
+      put(this.root, bar, this.emptyEl, this.bodyEl);
       document.addEventListener("keydown", (ev) => this.onKey(ev));
       await this.loadTargets();
       await this.load();
@@ -1713,14 +1724,19 @@
       catch (err) { this.targets = []; this.statusEl.textContent = "Could not list review targets: " + err.message; }
       this.targetSelect.innerHTML = "";
       for (const t of this.targets) this.targetSelect.appendChild(h("option", { value: t.id, title: t.description || "" }, t.label));
-      if (!this.targets.some((t) => t.id === this.opts.targetId)) this.opts.targetId = this.targets.length ? this.targets[0].id : null;
+      if (!this.targets.some((t) => t.id === this.opts.targetId)) { this.opts.targetId = this.targets.length ? this.targets[0].id : null; this.opts.targetPinned = false; }
+      if (!this.opts.targetPinned && !app.api.live) {
+        // Open the first review that has something in it (a clean working tree has nothing uncommitted).
+        const withChanges = (app.bundle.reviews || []).find((r) => r.files.length);
+        if (withChanges) this.opts.targetId = withChanges.target.id;
+      }
       if (this.opts.targetId) this.targetSelect.value = this.opts.targetId;
     }
     /* `keep` reloads the same review and keeps the selection; `announce` reports "up to date" when nothing changed. */
     async load(keep, announce) {
       const app = this.app;
       const prev = keep && this.report ? { file: this.selectedFile, comp: this.selectedComponent, dir: this.selectedDir, sig: this.signature } : null;
-      if (!prev) { this.statusEl.innerHTML = ""; this.statusEl.append(h("span", { class: "spinner" }), " reviewing…"); }
+      if (!prev) { this.statusEl.innerHTML = ""; put(this.statusEl, h("span", { class: "spinner" }), " reviewing…"); }
       this.loading = true;
       let r;
       try {
@@ -1765,6 +1781,13 @@
       this.findingsShown = 200;
       this.applyScope(scope, false);
       if (!r.files.length) {
+        // Not chosen by the user: move on to the next target (e.g. from "uncommitted" to "last commit").
+        const i = this.targets.findIndex((t) => t.id === this.opts.targetId);
+        if (app.api.live && !prev && !this.opts.targetPinned && i >= 0 && i < this.targets.length - 1 && !this.lastParams.base) {
+          this.opts.targetId = this.targets[i + 1].id;
+          this.targetSelect.value = this.opts.targetId;
+          return this.load();
+        }
         this.showEmpty(`Nothing to review in “${r.target.label}”`, `No file differs between ${r.base.label} and ${r.head.label}.`);
         return;
       }
@@ -1777,7 +1800,7 @@
       this.emptyEl.hidden = false;
       this.emptyEl.innerHTML = "";
       const cmd = (text) => h("code", { class: "mono", text });
-      this.emptyEl.append(h("h3", { text: title }), h("div", { class: isError ? "notice error" : "muted", text: detail }),
+      put(this.emptyEl, h("h3", { text: title }), h("div", { class: isError ? "notice error" : "muted", text: detail }),
         h("h4", { text: "To review what a coding agent does" }),
         h("ol", null,
           h("li", null, "Before the agent starts, record a baseline: ", cmd('repoviz session start --label "wave 1" --allow "src/feature/**" --protect "src/auth/**"'),
@@ -1816,6 +1839,8 @@
       const findings = this.serverFindings.slice();
       for (const f of r.files) {
         f.scope = scopeOf(f.path, scope);
+        // A submodule whose changed files are listed: those files are flagged, not their container (as on the server).
+        if (f.kind === "submodule" && ((f.submodule || {}).files || []).length) continue;
         if (f.scope === "protected") findings.push({ id: "f_scope_p_" + f.path, kind: "protected-touched", category: "scope", severity: "high",
           title: "Protected area modified", detail: `${f.path} matches a protected pattern.`, path: f.path, component: f.component,
           suggestion: "Revert this change unless it was explicitly requested." });
@@ -1872,7 +1897,7 @@
       if (!this.progressEl) return;
       const total = this.report.files.length, done = this.report.files.filter((f) => this.isReviewed(f)).length;
       this.progressEl.innerHTML = "";
-      this.progressEl.append(h("progress", { max: total, value: done, "aria-label": "Files reviewed" }), ` ${done} / ${total} reviewed`);
+      put(this.progressEl, h("progress", { max: total, value: done, "aria-label": "Files reviewed" }), ` ${done} / ${total} reviewed`);
       if (this.reviewedStat) this.reviewedStat.querySelector(".value").textContent = `${done} / ${total}`;
     }
     legend() {
@@ -1893,7 +1918,7 @@
       for (const f of r.findings) if (counts[f.severity] !== undefined) counts[f.severity]++;
       const prot = r.files.filter((f) => f.scope === "protected").length, out = r.files.filter((f) => f.scope === "out-of-scope").length;
       this.statsEl.innerHTML = "";
-      this.statsEl.append(stat(s.files, "files touched", "modified"), stat(s.components, "components touched"),
+      put(this.statsEl, stat(s.files, "files touched", "modified"), stat(s.components, "components touched"),
         stat(`+${s.lines_added} / −${s.lines_removed}`, "lines"), stat(s.symbols_changed, "functions / classes changed"),
         stat(prot, "protected files touched", prot ? "removed" : ""), stat(out, "files outside scope", out ? "modified" : ""),
         stat(counts.high, "high-severity signals", counts.high ? "removed" : ""), stat(counts.medium, "medium signals", counts.medium ? "modified" : ""),
@@ -1966,7 +1991,7 @@
         const high = fl.filter((x) => x.severity === "high").length;
         const extra = f.scope === "protected" ? "scope_protected" : f.scope === "out-of-scope" ? "scope_out" : null;
         view.nodes.push({ id: ids.get(f.path), label: f.path.split("/").pop(), sublabel: [`+${f.lines_added ?? "?"} −${f.lines_removed ?? "?"}`, f.symbols.length ? plural(f.symbols.length, "symbol") : "", high ? `${ic("alert-circle")}${high} high` : "", f.scope === "protected" ? `${ic("lock")}protected` : f.scope === "out-of-scope" ? `${ic("alert")}out of scope` : ""].filter(Boolean).join(" · "),
-          status: f.status, kind: "module", shape: "box", parent: sg, icon: f.is_test ? "flask" : "file-code", extraClass: extra, ref: f.path });
+          status: f.status, kind: "module", shape: "box", parent: sg, icon: f.kind === "submodule" ? "link" : f.is_test ? "flask" : "file-code", extraClass: extra, ref: f.path });
       }
       const extraNodes = new Map(), extraByLabel = new Map();
       for (const f of shown) {
@@ -2064,7 +2089,7 @@
       const cats = [...new Set(r.findings.map((f) => f.category))].sort();
       const list = r.findings.filter((f) => (o.severity === "all" || f.severity === o.severity) && (o.category === "all" || f.category === o.category));
       this.findingsEl.innerHTML = "";
-      this.findingsEl.append(h("h3", { text: `Review signals (${r.findings.length})` }),
+      put(this.findingsEl, h("h3", { text: `Review signals (${r.findings.length})` }),
         h("div", { class: "muted small", text: "Heuristic signals to guide your review — not proof of a bug. Triage each: dismiss, annotate, or send to the agent." }),
         h("div", { class: "group", style: { margin: "6px 0" } },
           select([["all", "all severities"], ["high", "high"], ["medium", "medium"], ["low", "low"], ["info", "info"]], o.severity, (v) => { o.severity = v; this.save(); this.drawFindings(); }),
@@ -2102,16 +2127,17 @@
       const scopeName = comp ? comp.name : (this.selectedDir !== null && this.selectedDir !== undefined ? (this.selectedDir || "(repository root)") : null);
       this.filesEl.innerHTML = "";
       this.progressEl = h("div", { class: "progress muted" });
-      this.filesEl.append(h("h3", null, scopeName ? `Files in ${scopeName} (${rows.length})` : `All changed files (${rows.length})`, " ",
+      put(this.filesEl, h("h3", null, scopeName ? `Files in ${scopeName} (${rows.length})` : `All changed files (${rows.length})`, " ",
         scopeName ? h("button", { class: "btn small", onclick: () => { this.selectedComponent = null; this.selectedDir = null; this.drawFiles(); } }, "Show all") : null),
         this.progressEl,
         table([
           { key: "reviewed", label: "✓", sort: (f) => (this.isReviewed(f) ? 1 : 0), render: (f) => this.isReviewed(f) ? h("span", { class: "reviewed-mark", title: "reviewed" }, iconEl("check"))
             : this.reviewed[f.path] ? h("span", { class: "faint", title: "changed since you reviewed it", text: "↻" }) : "" },
-          { key: "path", label: "File", render: (f) => h("span", { class: "mono", text: f.path }) },
+          { key: "path", label: "File", render: (f) => f.kind === "submodule" ? h("span", { class: "mono", title: "Git submodule" }, iconEl("link"), " " + f.path) : h("span", { class: "mono", text: f.path }) },
           { key: "status", label: "Change", render: (f) => statusPill(f.status) || pill("modified", "modified") },
           { key: "scope", label: "Scope", render: (f) => scopePill(f.scope) || h("span", { class: "faint", text: "–" }), sort: (f) => ({ protected: 0, "out-of-scope": 1, unscoped: 2, allowed: 3 })[f.scope] },
-          { key: "lines_added", label: "+/−", num: true, render: (f) => f.lines_added === null || f.lines_added === undefined ? "bin" : `+${f.lines_added} −${f.lines_removed}`, sort: (f) => (f.lines_added || 0) + (f.lines_removed || 0) },
+          { key: "lines_added", label: "+/−", num: true, render: (f) => f.kind === "submodule" ? h("span", { class: "faint", title: "lines changed in the files inside" }, `+${(f.inner_lines || [0, 0])[0]} −${(f.inner_lines || [0, 0])[1]}`)
+            : f.lines_added === null || f.lines_added === undefined ? "bin" : `+${f.lines_added} −${f.lines_removed}`, sort: (f) => (f.lines_added || 0) + (f.lines_removed || 0) },
           { key: "symbols", label: "Symbols", num: true, render: (f) => String(f.symbols.length), sort: (f) => f.symbols.length },
           { key: "findings", label: "Signals", sort: (f) => -(this.findingsByPath.get(f.path) || []).reduce((a, x) => a + (3 - SEV[x.severity]) * 10, 0),
             render: (f) => { const fl = this.findingsByPath.get(f.path) || []; const hi = fl.filter((x) => x.severity === "high").length; return fl.length ? [hi ? pill(`${hi} high`, "high") : null, ` ${fl.length}`] : ""; } },
@@ -2142,7 +2168,7 @@
       const notesByLine = new Map();
       for (const n of fileNotes) if (n.line) push(notesByLine, n.line, n);
       const order = this.navOrder(), pos = order.indexOf(f.path), done = this.isReviewed(f);
-      this.fileEl.append(h("div", { class: "file-nav group" },
+      put(this.fileEl, h("div", { class: "file-nav group" },
         h("button", { class: "btn small", disabled: pos <= 0, title: "Previous file (k)", onclick: () => this.stepFile(-1) }, "‹ Prev"),
         h("span", { class: "muted", text: pos >= 0 ? `${pos + 1} / ${order.length}` : "" }),
         h("button", { class: "btn small", disabled: pos < 0 || pos >= order.length - 1, title: "Next file (j)", onclick: () => this.stepFile(1) }, "Next ›"),
@@ -2150,12 +2176,13 @@
         done ? h("button", { class: "btn small", title: "Mark as not reviewed (m)", onclick: () => this.setReviewed(f.path, false) }, "✓ Reviewed — undo")
           : [h("button", { class: "btn small", onclick: () => this.setReviewed(f.path, true) }, "✓ Mark reviewed"),
             h("button", { class: "btn small primary", title: "Mark reviewed and open the next unreviewed file (m)", onclick: () => this.setReviewed(f.path, true, true) }, "✓ Reviewed & next ›")]));
-      this.fileEl.append(h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
+      put(this.fileEl, h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
         h("div", { class: "muted", text: [f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
         h("div", { class: "group actions" },
           h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, iconEl("lock"), " Should not be touched"),
           h("button", { class: "btn small", onclick: (ev) => this.noteForm(ev.target.closest(".actions"), { path: f.path }, "improve") }, "✎ Note on this file…"),
           f.module_id && this.app.snapshotIndex.nodes.has(f.module_id) ? h("button", { class: "btn small", onclick: () => this.app.focusDependencies(f.module_id) }, "Show dependencies") : null));
+      if (f.kind === "submodule") { this.drawSubmodule(f); return; }
       // Key changes: which functions / classes changed and how much.
       this.fileEl.appendChild(h("h4", { text: `Key changes (${f.symbols.length})` }));
       if (f.symbols.length) {
@@ -2209,6 +2236,28 @@
       this.fileEl.appendChild(h("div", { class: "diff-wrap" }, tbl));
       if (focusLine) this.scrollToLine(focusLine);
     }
+    /* A submodule: where its pointer moved, the commits in between, and the files changed inside it. */
+    drawSubmodule(f) {
+      const m = f.submodule || {}, short = (x) => (x ? x.slice(0, 10) : "–");
+      const what = { added: "added as a submodule", removed: "removed", updated: "moved to another commit", modified: "has uncommitted changes inside",
+        "updated+modified": "moved to another commit and has uncommitted changes inside" }[m.status] || m.status;
+      put(this.fileEl, h("h4", null, iconEl("link"), ` Submodule ${what}`),
+        h("div", { class: "mono" }, `${short(m.old)} → ${short(m.new)}`, m.commit_count !== null && m.commit_count !== undefined ? h("span", { class: "faint", text: `  (${plural(m.commit_count, "commit")})` }) : null),
+        m.note ? h("div", { class: "notice warn", text: m.note }) : null);
+      if ((m.commits || []).length) {
+        put(this.fileEl, h("h4", { text: "Commits" }), h("ul", { class: "plain mono" }, m.commits.map((c) => h("li", null, h("b", { text: c.sha }), " " + c.subject))),
+          m.commit_count > m.commits.length ? h("div", { class: "faint", text: `… ${m.commit_count - m.commits.length} more` }) : null);
+      }
+      if ((m.dirty || []).length) put(this.fileEl, h("div", { class: "notice warn" }, `${plural(m.dirty.length, "file")} changed inside and not committed in the submodule: this repository cannot record them until they are committed there and the pointer is updated.`));
+      const inner = (m.files || []).map((path) => this.report.files.find((x) => x.path === path)).filter(Boolean);
+      put(this.fileEl, h("h4", { text: `Files changed inside (${(m.files || []).length}${m.truncated ? "+" : ""})` }),
+        inner.length ? table([
+          { key: "path", label: "File", render: (x) => h("span", { class: "mono", text: x.path.slice(f.path.length + 1) }) },
+          { key: "status", label: "Change", render: (x) => statusPill(x.status) || pill("modified", "modified") },
+          { key: "lines_added", label: "+/−", num: true, render: (x) => x.lines_added === null || x.lines_added === undefined ? "bin" : `+${x.lines_added} −${x.lines_removed}` },
+          { key: "findings", label: "Signals", render: (x) => String((this.findingsByPath.get(x.path) || []).length || "") },
+        ], inner, { onRow: (x) => this.selectFile(x.path), scroll: false }) : h("div", { class: "empty", text: m.note ? "Not available (see above)." : "No file content changed." }));
+    }
     scrollToLine(line) {
       if (!line) return;
       const rows = $$("table.diff tr", this.fileEl).filter((tr) => tr.dataset.line);
@@ -2261,7 +2310,7 @@
       };
       const copyBtn = h("button", { class: "btn primary", onclick: copy }, "Copy prompt");
       this.feedbackEl.innerHTML = "";
-      this.feedbackEl.append(
+      put(this.feedbackEl, 
         h("div", { class: "muted", text: "Your notes become a numbered, file:line-referenced prompt you can paste back to the coding agent." }),
         h("h4", { text: `Notes (${this.notes.length})` }),
         this.notes.length ? h("ul", { class: "plain" }, this.notes.map((n) => h("li", null,

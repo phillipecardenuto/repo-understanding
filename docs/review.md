@@ -39,6 +39,22 @@ keep working. Without sessions you can review:
 - the last commit (`last-commit`);
 - any range (`main...HEAD`, `v1..v2`, or `--base/--head`).
 
+### Submodules
+
+Each Git submodule is a component of its own. Reviews look inside checked-out
+submodules:
+
+- **Moved to another commit:** the review lists the commits in between and the
+  files they changed.
+- **Uncommitted edits inside:** the review lists those files.
+
+Either way, every changed file appears with its full path, for example
+`system_modules/cbir/src/config.py`. Scope rules, signals, notes and diffs apply
+to it like any other file. A session also records each submodule's commit and any
+files already modified inside it, so earlier work is not attributed to the agent.
+When the previous commit is not available locally (shallow clone) or the submodule
+is not checked out, the review says so instead of listing files.
+
 ## Scope
 
 The scope says which paths the agent was **allowed** to change and which it
@@ -111,6 +127,9 @@ Credential-like values are always redacted in excerpts and diffs.
 | `todo` | low | hygiene | TODO / FIXME / XXX / HACK added |
 | `commented-code` | low | hygiene | three or more commented-out code lines |
 | `large-change` | info | hygiene | more than 400 lines added to one file |
+| `submodule-added` / `submodule-removed` | medium | architecture | a Git submodule was added or removed |
+| `submodule-updated` | medium | architecture | a submodule now points to another commit (commits listed when available) |
+| `submodule-uncommitted` | medium | correctness | files changed inside a submodule are not committed there, so the superproject cannot record them |
 
 ## Working through a review
 

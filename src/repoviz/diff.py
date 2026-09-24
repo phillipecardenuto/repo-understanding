@@ -38,7 +38,8 @@ from .pipeline import utcnow
 #: Metadata keys whose change makes a node "modified".
 SIGNIFICANT_NODE_METADATA = (
     "version", "role", "entry_kind", "target", "signature", "decorators", "base_images", "image", "ports", "jobs",
-    "workspace", "ecosystem", "kind", "exported", "is_package", "async", "manifest", "go_package",
+    "workspace", "ecosystem", "kind", "exported", "is_package", "async", "manifest", "go_package", "commit",
+    "uncommitted_files",
 )
 EDGE_FLAGS = ("type_checking_only", "conditional_only", "lazy_only", "dynamic_only", "test_only", "scope", "spec")
 
@@ -63,7 +64,10 @@ def _node_changes(before: ComponentNode, after: ComponentNode) -> tuple[list[str
         reasons.append("renamed")
         prior["qualified_name"] = before.qualified_name
     for key in SIGNIFICANT_NODE_METADATA:
-        if before.metadata.get(key) != after.metadata.get(key):
+        b, a = before.metadata.get(key), after.metadata.get(key)
+        if key == "signature" and "signature_id" in before.metadata and "signature_id" in after.metadata:
+            b, a = before.metadata["signature_id"], after.metadata["signature_id"]  # display text may be truncated
+        if b != a:
             reasons.append(f"{key} changed")
             prior[key] = before.metadata.get(key)
     roles = {"entry-point", "test", "generated", "unsupported", "project", "component"}

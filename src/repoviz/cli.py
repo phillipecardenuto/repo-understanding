@@ -191,6 +191,10 @@ def cmd_discover(args: argparse.Namespace) -> int:
     section("Generated / vendored", prof.generated + prof.vendored, lambda g: f"{g['path']}  ({g.get('reason', '')})")
     section("Documentation", prof.docs, lambda d: f"{d['path']}  ({d['reason']})")
     section("Entry points", prof.entry_points, lambda e: f"{e['name']} [{e['kind']}] → {e['target']}")
+    section("Submodules", prof.submodule_info, lambda m: f"{m['path']}  @ {(m.get('commit') or '?')[:10]}"
+            + ("" if m.get("checked_out", True) else "  (not checked out)")
+            + (f"  {m['uncommitted_files']} uncommitted file(s)" if m.get("uncommitted_files") else "")
+            + (f"  ← {m['url']}" if m.get("url") else ""))
     section("Containers", prof.containers, lambda c: f"{c['path']} [{c['kind']}]")
     section("Deployment", prof.deployment, lambda d: f"{d['path']} [{d['kind']}]")
     section("CI", prof.ci, lambda c: f"{c['path']} [{c['provider']}] {len(c.get('jobs') or [])} job(s)")

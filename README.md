@@ -283,7 +283,8 @@ PLAYWRIGHT_BROWSERS_PATH=/path/to/browsers pytest tests/test_browser.py
 ```
 
 Documentation: [reviewing agent work](docs/review.md) · [architecture](docs/architecture.md) ·
-[configuration](docs/configuration.md) · [data model](docs/data-model.md).
+[configuration](docs/configuration.md) · [data model](docs/data-model.md) ·
+[evaluation on a large multi-module system](docs/evaluation-elies.md).
 
 Mermaid 11.17.2 is vendored in `src/repoviz/web/vendor/` under the MIT licence
 (`LICENSE-mermaid.txt`).

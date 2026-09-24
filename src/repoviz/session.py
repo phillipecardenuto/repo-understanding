@@ -32,7 +32,7 @@ from typing import Any
 
 from .gitutil import Git
 from .ids import content_hash, stable_hash
-from .sources import EmptySource, GitRevisionSource, OverlaySource, TreeSource
+from .sources import EmptySource, GitRevisionSource, OverlaySource, TreeSource, WorkingTreeSource
 
 MAX_BASELINE_FILE_BYTES = 5_000_000
 
@@ -108,11 +108,17 @@ class Session:
     end_head: str | None = None
     end_branch: str | None = None
     end_overrides: dict[str, str | None] = field(default_factory=dict)
+    # Submodules: checked-out commit per submodule, and copies of files modified inside them
+    # (superproject path -> stored blob hash, or None when deleted), at start and at end.
+    submodules: dict[str, str] = field(default_factory=dict)
+    submodule_overrides: dict[str, str | None] = field(default_factory=dict)
+    end_submodules: dict[str, str] = field(default_factory=dict)
+    end_submodule_overrides: dict[str, str | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data.pop("overrides")
-        data.pop("end_overrides")
+        for key in ("overrides", "end_overrides", "submodule_overrides", "end_submodule_overrides"):
+            data.pop(key)
         data["dirty_files_at_start"] = len(self.overrides)
         data["dirty_files_at_end"] = len(self.end_overrides)
         data["active"] = self.active
@@ -179,6 +185,8 @@ class StateStore:
                 if path in overrides:
                     continue
                 p = root / path
+                if p.is_dir():  # a submodule whose checked-out commit moved: recorded separately
+                    continue
                 if p.is_file() and not p.is_symlink():
                     try:
                         if p.stat().st_size > MAX_BASELINE_FILE_BYTES:
@@ -197,6 +205,27 @@ class StateStore:
                     overrides[path] = None
         return overrides, skipped
 
+    def _capture_submodules(self, git: Git, root: Path, sid: str) -> tuple[dict[str, str], dict[str, str | None]]:
+        """Checked-out commit of every submodule, and copies of the files modified inside them."""
+        if not (root / ".gitmodules").is_file():
+            return {}, {}
+        worktree = WorkingTreeSource(git)
+        files_dir = self._session_dir(sid) / "files"
+        _mkdir_private(files_dir)
+        overrides: dict[str, str | None] = {}
+        for sub in worktree.submodules:
+            for rel in worktree.submodule_dirty(sub):
+                data = worktree.submodule_file(sub, rel)
+                if data is None:
+                    overrides[f"{sub}/{rel}"] = None
+                    continue
+                digest = content_hash(data)
+                target = files_dir / digest
+                if not target.exists():
+                    _write_private(target, data)
+                overrides[f"{sub}/{rel}"] = digest
+        return worktree.submodule_commits(), overrides
+
     def start_session(self, git: Git | None, root: Path, label: str = "", allowed: list[str] | None = None,
                       protected: list[str] | None = None) -> Session:
         with self.lock:
@@ -212,6 +241,7 @@ class StateStore:
             _mkdir_private(self._session_dir(sid))
             if git is not None:
                 session.overrides, session.skipped = self._capture_dirty(git, root, sid)
+                session.submodules, session.submodule_overrides = self._capture_submodules(git, root, sid)
             self.save_session(session)
             _atomic_write(self.dir / "current", sid)
             return session
@@ -222,6 +252,7 @@ class StateStore:
             session.end_head = git.head()
             session.end_branch = git.branch()
             session.end_overrides, skipped = self._capture_dirty(git, root, session.id)
+            session.end_submodules, session.end_submodule_overrides = self._capture_submodules(git, root, session.id)
             session.skipped = sorted(set(session.skipped) | set(skipped))
         self.save_session(session)
 
@@ -248,7 +279,8 @@ class StateStore:
             return session
 
     def _overlay(self, session: Session, git: Git | None, head: str | None, overrides_map: dict[str, str | None],
-                 label: str, kind: str, revision_id: str) -> TreeSource:
+                 label: str, kind: str, revision_id: str, submodules: dict[str, str] | None = None,
+                 submodule_overrides: dict[str, str | None] | None = None) -> TreeSource:
         base: TreeSource
         if git is not None and head:
             try:
@@ -257,28 +289,33 @@ class StateStore:
                 base = EmptySource()
         else:
             base = EmptySource()
-        overrides: dict[str, bytes | None] = {}
         files_dir = self._session_dir(session.id) / "files"
-        for path, digest in overrides_map.items():
-            if digest is None:
-                overrides[path] = None
-            else:
-                try:
-                    overrides[path] = (files_dir / digest).read_bytes()
-                except OSError:
-                    continue
-        return OverlaySource(base, overrides, label=label, kind=kind, revision_id=revision_id)
+
+        def load(mapping: dict[str, str | None]) -> dict[str, bytes | None]:
+            out: dict[str, bytes | None] = {}
+            for path, digest in mapping.items():
+                if digest is None:
+                    out[path] = None
+                else:
+                    try:
+                        out[path] = (files_dir / digest).read_bytes()
+                    except OSError:
+                        continue
+            return out
+
+        return OverlaySource(base, load(overrides_map), label=label, kind=kind, revision_id=revision_id,
+                             submodule_commits=submodules or None, submodule_files=load(submodule_overrides or {}))
 
     def baseline_source(self, session: Session, git: Git | None) -> TreeSource:
         return self._overlay(session, git, session.baseline_head, session.overrides,
                              f"session baseline ({session.label or session.started_at})", "session-baseline",
-                             f"session:{session.id}")
+                             f"session:{session.id}", session.submodules, session.submodule_overrides)
 
     def end_source(self, session: Session, git: Git | None) -> TreeSource:
         """State at the end of a finished session."""
         return self._overlay(session, git, session.end_head, session.end_overrides,
                              f"session end ({session.label or session.ended_at})", "session-end",
-                             f"session-end:{session.id}")
+                             f"session-end:{session.id}", session.end_submodules, session.end_submodule_overrides)
 
     # -- review notes -----------------------------------------------------------------
 

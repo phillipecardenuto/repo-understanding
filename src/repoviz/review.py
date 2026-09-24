@@ -20,16 +20,18 @@ any range) into a review report designed for supervising coding agents:
 
 from __future__ import annotations
 
+import ast
 import difflib
 import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from . import classify, globs
-from .activity import _ImpactIndex, _tests_affected
+from .activity import _ImpactIndex, _tests_affected, nodes_by_path
 from .config import DependencyRule
 from .diff import symbol_changes
 from .flow import affected_flow
+from .ids import content_hash as _blob_hash
 from .ids import make_id, stable_hash
 from .model import (
     ADDED,
@@ -48,6 +50,7 @@ from .pipeline import utcnow
 from .redact import contains_secret as _secret_in
 from .redact import redact as _redact
 from .sources import TreeSource, is_binary
+from .submodules import WithSubmoduleFiles, submodule_changes
 
 if TYPE_CHECKING:  # pragma: no cover
     from .repo import Repository
@@ -318,6 +321,59 @@ def _text(source: TreeSource, path: str, limit: int = 2_000_000) -> tuple[str | 
     return data.decode("utf-8", "replace"), False
 
 
+def _submodule_entry(ch: Any, files: list[dict[str, Any]], scope: ScopePolicy, component: tuple[str | None, str | None],
+                     add: Any) -> dict[str, Any]:
+    """A review entry (and findings) for a submodule whose pointer or contents changed."""
+    inner = {p for p, _b, _a in ch.files}
+    inner_entries = [f for f in files if f["path"] in inner]
+    cid, cname = component
+    scope_status = scope.classify(ch.path)
+    status = {"added": ADDED, "removed": REMOVED}.get(ch.status, MODIFIED)
+    entry: dict[str, Any] = {
+        "path": ch.path, "status": status, "language": None, "component_id": cid, "component": cname,
+        "module_id": None, "is_test": False, "scope": scope_status, "binary": False, "config_kind": None,
+        "kind": "submodule", "submodule": ch.to_dict(), "hunks": [], "symbols": [], "dependencies": [],
+        "tests_affected": [], "diff_omitted": "a submodule: see its commits and the files changed inside it",
+        # The files inside carry the line counts; the submodule entry only summarises them (not counted twice).
+        "lines_added": None, "lines_removed": None,
+        "inner_lines": [sum(f.get("lines_added") or 0 for f in inner_entries),
+                        sum(f.get("lines_removed") or 0 for f in inner_entries)],
+        "version": stable_hash("submodule", ch.new or "-", *(f"{p}:{_blob_hash(a) if a else '-'}"
+                                                           for p, _b, a in ch.files), length=16),
+    }
+    short = lambda sha: sha[:10] if sha else "?"  # noqa: E731
+    log = "\n".join(f"{c['sha']} {c['subject']}" for c in (ch.commits or [])[:8]) or None
+    if ch.status == "added":
+        add(Finding("submodule-added", "architecture", "medium", "Submodule added",
+                    f"{ch.path} was added as a submodule (at {short(ch.new)}).", ch.path, excerpt=log,
+                    component=cname, suggestion="Confirm the new dependency on this repository is intended."))
+    elif ch.status == "removed":
+        add(Finding("submodule-removed", "architecture", "medium", "Submodule removed",
+                    f"{ch.path} (at {short(ch.old)}) was removed.", ch.path, component=cname,
+                    suggestion="Check nothing still builds, runs or imports it."))
+    if "updated" in ch.status:
+        count = f"{ch.commit_count} commit(s)" if ch.commit_count is not None else "an unknown number of commits"
+        add(Finding("submodule-updated", "architecture", "medium", "Submodule moved to another commit",
+                    f"{ch.path} moved {short(ch.old)} → {short(ch.new)} ({count})." + (f" Note: {ch.note}." if ch.note else ""),
+                    ch.path, excerpt=log, component=cname,
+                    suggestion="Check the submodule's commits belong to this task and were tested together."))
+    if ch.dirty:
+        add(Finding("submodule-uncommitted", "correctness", "medium", "Uncommitted changes inside a submodule",
+                    f"{len(ch.dirty)} file(s) changed inside {ch.path} are not committed in the submodule, so this "
+                    "repository cannot record them.", ch.path, excerpt=", ".join(ch.dirty[:10]), component=cname,
+                    suggestion="Commit (and push) inside the submodule, then update the pointer here, or revert."))
+    if not inner:  # changed files inside are flagged one by one; otherwise flag the submodule itself
+        if scope_status == "protected":
+            add(Finding("protected-touched", "scope", "high", "Protected area modified",
+                        f"{ch.path} matches a protected pattern ({_first_match(ch.path, scope.protected)}).", ch.path,
+                        component=cname, suggestion="Revert this change unless it was explicitly requested."))
+        elif scope_status == "out-of-scope":
+            add(Finding("out-of-scope", "scope", "medium", "Change outside the agreed scope",
+                        f"{ch.path} is not covered by the allowed patterns.", ch.path, component=cname,
+                        suggestion="Confirm the change was necessary or revert it."))
+    return entry
+
+
 def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy | None = None,
                  max_file_diff_lines: int = 800, max_total_diff_lines: int = 40000,
                  sources: tuple[Any, Any] | None = None) -> dict[str, Any]:
@@ -332,6 +388,13 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
 
     changed_paths = sorted(p for p in set(base_src.files()) | set(target_src.files())
                            if base_src.content_hash(p) != target_src.content_hash(p))
+    # Work inside submodules: pointer moves, and files changed inside them (committed or not).
+    sub_changes = (submodule_changes(repo.root, base_src, target_src)
+                   if base_src.submodules or target_src.submodules else [])
+    if sub_changes:
+        base_src = WithSubmoduleFiles(base_src, {p: b for ch in sub_changes for p, b, _a in ch.files})
+        target_src = WithSubmoduleFiles(target_src, {p: a for ch in sub_changes for p, _b, a in ch.files})
+        changed_paths = sorted(set(changed_paths) | {p for ch in sub_changes for p, _b, _a in ch.files})
     changed_set = set(changed_paths)
     impact = _ImpactIndex(diff, target_snap)
     sym_changes = symbol_changes(diff)
@@ -347,16 +410,16 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             if n.path in changed_set:
                 symbols_by_path[which].setdefault(n.path, []).append(n)
 
-    path_to_node: dict[str, Any] = {}
-    for snap in (base_snap, target_snap):
-        for n in snap.nodes():
-            if n.path and n.category != CATEGORY_SYMBOL and n.component_type not in (
-                    "directory", "repository", "package", "namespace-package", "project", "workspace-member"):
-                path_to_node.setdefault(n.path, n)
+    path_to_node: dict[str, Any] = {**nodes_by_path(base_snap), **nodes_by_path(target_snap)}
+
+    submodule_paths = sorted(set(base_src.submodules) | set(target_src.submodules), key=len, reverse=True)
 
     def component_of(path: str) -> tuple[str | None, str | None]:
         n = path_to_node.get(path)
-        cid = n.metadata.get("component_id") if n else None
+        if n is None:  # a file inside a submodule belongs to the submodule's component
+            sub = next((s for s in submodule_paths if path.startswith(s + "/")), None)
+            n = path_to_node.get(sub) if sub else None
+        cid = (n.metadata.get("component_id") or (n.id if "component" in n.tags else None)) if n else None
         if cid is None:  # a file without its own node (e.g. docs): use the nearest directory
             parts = path.split("/")[:-1]
             for i in range(len(parts), -1, -1):
@@ -482,8 +545,12 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             add(Finding("large-change", "hygiene", "info", "Large change",
                         f"{entry['lines_added']} lines added in one file; review in detail.", path, component=cname))
 
+    for ch in sub_changes:
+        files.append(_submodule_entry(ch, files, scope, component_of(ch.path), add))
+
     # --- graph-based findings ---------------------------------------------------------------------
-    _graph_findings(add, diff, base_snap, target_snap, target_src, scope, changed_set, path_to_node, component_of)
+    _graph_findings(add, diff, base_snap, target_snap, target_src, scope, changed_set, path_to_node, component_of,
+                    base_src)
     _test_coverage_findings(add, files, impact)
 
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.category, f.path or "", f.line or 0))
@@ -504,6 +571,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "lines_removed": sum(f.get("lines_removed") or 0 for f in files),
         "symbols_changed": sum(len(f["symbols"]) for f in files),
         "tests_changed": sum(1 for f in files if f["is_test"]),
+        "submodules_changed": len(sub_changes),
         "protected": sum(1 for f in files if f["scope"] == "protected"),
         "out_of_scope": sum(1 for f in files if f["scope"] == "out-of-scope"),
         "findings": severity_counts,
@@ -526,6 +594,43 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "introduced_cycles": [c.to_dict() for c in diff.introduced_cycles],
         "verdicts": VERDICTS,
     }
+
+
+def _python_params(source: Any, path: str | None, name: str, line: int | None) -> list[str] | None:
+    """Parameter names (with ``*``/``**`` markers) of the Python function ``name`` nearest to ``line``."""
+    if source is None or not path or not path.endswith((".py", ".pyi")):
+        return None
+    text = source.read_text(path)
+    if not text:
+        return None
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+    if not defs:
+        return None
+    node = min(defs, key=lambda n: abs(n.lineno - (line or n.lineno)))
+    a = node.args
+    names = [x.arg for x in a.posonlyargs + a.args]
+    names += [f"*{a.vararg.arg}"] if a.vararg else []
+    names += [x.arg for x in a.kwonlyargs] + ([f"**{a.kwarg.arg}"] if a.kwarg else [])
+    return names
+
+
+def _parameter_change(base_src: Any, target_src: Any, ch: Any) -> str | None:
+    """'parameters removed: limit; added: page_size' for a modified Python function, if it can be computed."""
+    before = _python_params(base_src, ch.node.path, ch.node.name, ch.node.start_line)
+    after = _python_params(target_src, ch.node.path, ch.node.name, ch.node.start_line)
+    if before is None or after is None:
+        return None
+    removed = [p for p in before if p not in after]
+    added = [p for p in after if p not in before]
+    parts = ([f"parameters removed: {', '.join(removed)}"] if removed else []) + \
+            ([f"added: {', '.join(added)}"] if added else [])
+    if not parts and before != after:
+        parts = ["parameters reordered"]
+    return "; ".join(parts) or None
 
 
 def _first_match(path: str, patterns: list[str]) -> str:
@@ -615,8 +720,12 @@ def _line_findings(add: Any, path: str, component: str | None, is_test: bool, ad
 
 def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, target: RepositorySnapshot,
                     target_src: TreeSource, scope: ScopePolicy, changed: set[str], path_to_node: dict[str, Any],
-                    component_of: Any) -> None:
+                    component_of: Any, base_src: Any = None) -> None:
     nodes = diff.nodes
+    b_index = base.node_index()
+    external_uses = {(b_index[e.source_id].metadata.get("component_id"), e.target_id)
+                     for e in base.dependency_edges if e.source_id in b_index and e.target_id in b_index
+                     and "external" in b_index[e.target_id].tags}
     name = lambda i: nodes[i].node.qualified_name if i in nodes else i  # noqa: E731
 
     def where(nid: str) -> tuple[str | None, int | None]:
@@ -675,10 +784,17 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
                             suggestion="Check the layering: should this package know about that one?"),
                     key=f"{src_pkg}->{dst_pkg}")
         elif dep["level"] == "external" and not dep["stdlib"]:
-            add(Finding("new-external-dependency", "architecture", "low", "New third-party dependency",
-                        f"{dep['source']} now uses {dep['target']}", loc_path, loc_line, ev.excerpt if ev else None,
-                        component=component_of(loc_path)[1] if loc_path else None),
-                key=f"{dep['source']}->{dep['target']}")
+            # Only news: a package the repository never used, or one this component never used.
+            comp_id = src.node.metadata.get("component_id") if src else None
+            if (comp_id, e.target_id) not in external_uses:
+                new_to_repo = dst is None or dst.status == ADDED
+                add(Finding("new-external-dependency", "architecture", "low", "New third-party dependency",
+                            f"{dep['source']} now uses {dep['target']}"
+                            + ("" if new_to_repo else f" (already used elsewhere in the repository, new to "
+                                                      f"{component_of(loc_path)[1] or 'this component'})"),
+                            loc_path, loc_line, ev.excerpt if ev else None,
+                            component=component_of(loc_path)[1] if loc_path else None),
+                    key=f"{dep['source']}->{dep['target']}")
         dst_path = dst.node.path if dst else None
         if src_path is not None and dst_path is not None and e.direct:
             for rule in scope.rules:
@@ -689,12 +805,18 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
                                 component=component_of(src_path)[1]), key=f"{dep['source']}->{dep['target']}")
     # Calls to removed symbols that are still present in the (unchanged or modified) caller.
     t_lines: dict[str, list[str]] = {}
+    # A caller that now calls a *different* symbol of the same name was redirected (e.g. a renamed base
+    # class reached through super().__init__), not left dangling.
+    current_calls = {(c.edge.source_id, nodes[c.edge.target_id].node.name) for c in diff.edges.values()
+                     if c.edge.relationship == REL_CALLS and c.status != REMOVED and c.edge.target_id in nodes}
     for ch in diff.edges.values():
         e = ch.edge
         if e.relationship != REL_CALLS or ch.status != REMOVED:
             continue
         callee, caller = nodes.get(e.target_id), nodes.get(e.source_id)
         if callee is None or caller is None or callee.status != REMOVED or caller.status == REMOVED:
+            continue
+        if (caller.node.id, callee.node.name) in current_calls:
             continue
         path = caller.node.path
         if path is None:
@@ -724,9 +846,10 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
         stale = sorted({t_idx[c].qualified_name for c in callers.get(nid, [])
                         if c in t_idx and t_idx[c].path not in changed and t_idx[c].path != ch.node.path})
         if stale:
+            change = _parameter_change(base_src, target_src, ch) or (
+                f"{ch.before.get('signature') or ''} → {ch.node.metadata.get('signature') or ''}")
             add(Finding("stale-callers", "correctness", "medium", "Signature changed; callers not updated",
-                        f"{ch.node.qualified_name}{ch.before.get('signature') or ''} → "
-                        f"{ch.node.metadata.get('signature') or ''}; called from unchanged code: "
+                        f"{ch.node.qualified_name}: {change}; called from unchanged code: "
                         + ", ".join(stale[:6]) + (f" (+{len(stale) - 6})" if len(stale) > 6 else ""),
                         ch.node.path, ch.node.start_line, symbol=ch.node.qualified_name,
                         component=component_of(ch.node.path)[1] if ch.node.path else None,

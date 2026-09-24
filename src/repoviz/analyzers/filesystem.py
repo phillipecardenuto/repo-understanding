@@ -10,6 +10,7 @@ supports become structural nodes tagged ``unsupported``.
 from __future__ import annotations
 
 from .. import classify
+from ..submodules import gitmodules_urls
 from ..model import CATEGORY_COMPONENT, ComponentNode
 from .base import CAP_COMPONENTS, CAP_CONTAINMENT, CAP_DIAGNOSTICS, AnalysisContext, Analyzer, Detection, SnapshotBuilder
 
@@ -100,9 +101,20 @@ class FilesystemAnalyzer(Analyzer):
                               files=g.get("files"))
         for v in prof.vendored:
             self._tag_dir(ctx, b, v["path"], "vendored", v.get("reason", ""), create=True, files=v.get("files"))
+        commits = ctx.source.submodule_commits() if prof.submodules else {}
+        urls = gitmodules_urls(ctx.source.read_text(".gitmodules") or "") if prof.submodules else {}
         for sub in prof.submodules:
-            node = b.ensure_file(sub, self.name, component_type="submodule", tags=["submodule"],
-                                 metadata={"dependency_details": "unavailable (Git submodule)"})
+            # A submodule is a separate repository: it is its own component, pinned to a commit.
+            meta: dict[str, object] = {"dependency_details": "unavailable (Git submodule)"}
+            if commits.get(sub):
+                meta["commit"] = commits[sub]
+            if urls.get(sub):
+                meta["url"] = urls[sub]
+            dirty = ctx.source.submodule_dirty(sub)
+            if dirty:
+                meta["uncommitted_files"] = len(dirty)
+            node = b.ensure_file(sub, self.name, component_type="submodule", tags=["submodule", "component"],
+                                 metadata=meta)
             node.category = CATEGORY_COMPONENT
 
     def _tag_dir(self, ctx: AnalysisContext, b: SnapshotBuilder, path: str, tag: str, reason: str,
@@ -120,3 +132,4 @@ class FilesystemAnalyzer(Analyzer):
         node.metadata.setdefault("roles", {})[tag] = reason
         if files is not None:
             node.metadata["files"] = files
+

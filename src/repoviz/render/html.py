@@ -57,7 +57,7 @@ def dumps(data: Any) -> str:
 
 #: Node fields the web UI never reads (identity keys and change fingerprints are for diffing only).
 _NODE_INTERNAL = ("key", "fingerprint")
-_META_INTERNAL = ("semantic_fingerprint", "qualified_name_authoritative")
+_META_INTERNAL = ("semantic_fingerprint", "qualified_name_authoritative", "signature_id")
 _UNCHANGED_SYMBOL_FIELDS = ("id", "name", "qualified_name", "component_type", "category", "parent_id", "path", "status",
                             "tags", "start_line", "language")
 
@@ -252,6 +252,7 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "reviews": reviews,
         "review_targets": [t.to_dict() for t in targets],
         "theme": theme(),
+        "session": _current_session(repo),
         "config": {"sources": repo.config.sources, "max_diagram_nodes": repo.config.max_diagram_nodes,
                    "external_dependencies": repo.config.external_dependencies},
         "errors": errors,
@@ -261,6 +262,14 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         snap["diagnostics"] = snap["diagnostics"] + errors
         bundle["snapshot"] = snap
     return bundle
+
+
+def _current_session(repo: Repository) -> dict[str, Any] | None:
+    try:
+        session = repo.current_session()
+    except Exception:
+        return None
+    return session.to_dict() if session else None
 
 
 def _revisions(repo: Repository) -> dict[str, Any]:

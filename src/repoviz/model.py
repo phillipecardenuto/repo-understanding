@@ -564,6 +564,7 @@ class ActivityEvent:
     changed_symbols: list[str] = field(default_factory=list)
     last_modified: str | None = None
     previous_path: str | None = None
+    submodule: str | None = None  # set for a file inside a Git submodule
 
     def to_dict(self) -> dict[str, Any]:
         return _compact(

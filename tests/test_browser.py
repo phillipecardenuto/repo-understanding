@@ -239,3 +239,29 @@ def test_live_review_refreshes_and_keeps_selection(page, make_repo) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_review_shows_work_inside_submodules(page, make_repo, tmp_path: Path) -> None:
+    from test_large_repo_fixes import _git
+
+    lib = make_repo({"src/engine.py": "def run():\n    return 1\n"})
+    main = make_repo({"app/__init__.py": "", "app/main.py": "print('hi')\n"})
+    _git(main.path, "submodule", "add", "-q", lib.path, "modules/engine")
+    _git(main.path, "commit", "-qm", "add engine")
+    r = Repository(main.path)
+    r.state.start_session(r.git, r.root, "wave", protected=["modules/**"])
+    Path(main.path, "modules/engine/src/engine.py").write_text("def run():\n    return 2\n")
+    report = tmp_path / "sub.html"
+    report.write_text(render_static_html(build_bundle(Repository(main.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    # One protected signal for the file inside (not a second one for the submodule itself).
+    protected = page.evaluate("repoviz.app.tabs.review.report.findings.filter(f => f.kind === 'protected-touched').map(f => f.path)")
+    assert protected == ["modules/engine/src/engine.py"]
+    page.evaluate("repoviz.app.tabs.review.selectFile('modules/engine')")
+    card = page.inner_text("#tab-review .file-card")
+    assert "Submodule has uncommitted changes inside" in card and "src/engine.py" in card
+    page.click("#tab-review .file-card tbody tr >> text=src/engine.py")
+    assert page.evaluate("repoviz.app.tabs.review.selectedFile") == "modules/engine/src/engine.py"
+    assert page.locator("#tab-review table.diff tr.add").count() >= 1
+    assert page.errors == []  # type: ignore[attr-defined]

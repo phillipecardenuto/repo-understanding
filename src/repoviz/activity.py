@@ -38,6 +38,7 @@ from .model import (
     RepositorySnapshot,
 )
 from .sources import is_binary
+from .submodules import WithSubmoduleFiles, submodule_changes
 
 if TYPE_CHECKING:  # pragma: no cover
     from .repo import Repository
@@ -232,16 +233,23 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
             candidates |= set(repo.git.changed_paths(session.baseline_head, "HEAD"))
     changed_paths = sorted(p for p in candidates
                            if base_source.content_hash(p) != target_source.content_hash(p))
+    # Files changed inside submodules (git status of the superproject does not list them).
+    sub_of: dict[str, str] = {}
+    sub_dirty: dict[str, set[str]] = {}
+    if base_source.submodules or target_source.submodules:
+        sub_changes = submodule_changes(repo.root, base_source, target_source)
+        if sub_changes:
+            base_source = WithSubmoduleFiles(base_source, {p: b for ch in sub_changes for p, b, _a in ch.files})
+            target_source = WithSubmoduleFiles(target_source, {p: a for ch in sub_changes for p, _b, a in ch.files})
+            sub_of = {p: ch.path for ch in sub_changes for p, _b, _a in ch.files}
+            sub_dirty = {ch.path: set(ch.dirty) for ch in sub_changes}
+            changed_paths = sorted(set(changed_paths) | set(sub_of))
 
     observations = repo.state.load_observations(session)
     b_index = base_snap.node_index()
     t_index = target_snap.node_index()
-    t_by_path = {n.path: n for n in target_snap.nodes() if n.path and n.category != CATEGORY_SYMBOL
-                 and n.component_type not in ("directory", "repository", "package", "namespace-package", "project",
-                                              "workspace-member")}
-    b_by_path = {n.path: n for n in base_snap.nodes() if n.path and n.category != CATEGORY_SYMBOL
-                 and n.component_type not in ("directory", "repository", "package", "namespace-package", "project",
-                                              "workspace-member")}
+    t_by_path = nodes_by_path(target_snap)
+    b_by_path = nodes_by_path(base_snap)
     events: list[ActivityEvent] = []
     impact_index = _ImpactIndex(diff, target_snap)
     for path in changed_paths:
@@ -254,14 +262,21 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
         elif obs.get("hash") != current_hash:
             obs["last_observed"] = now
             obs["hash"] = current_hash
-        node = t_by_path.get(path) or b_by_path.get(path)
-        index = t_index if path in t_by_path else b_index
-        comp_id = node.metadata.get("component_id") if node else None
+        sub = sub_of.get(path)
+        key = sub or path  # a file inside a submodule is attributed to the submodule's node
+        node = t_by_path.get(key) or b_by_path.get(key)
+        index = t_index if key in t_by_path else b_index
+        comp_id = (node.metadata.get("component_id") or (node.id if "component" in node.tags else None)) if node else None
         comp = index.get(comp_id) if comp_id else None
+        if sub:
+            node = None
+            dirty = path[len(sub) + 1:] in sub_dirty.get(sub, ())
         before = base_source.read_bytes(path)
         after = target_source.read_bytes(path)
         added, removed = _count_lines(before, after)
-        if entry is not None:
+        if sub and before is not None and after is not None:
+            git_status = "modified" if dirty else "committed"
+        elif entry is not None:
             git_status = entry.label
         elif after is None:
             git_status = "deleted"
@@ -283,7 +298,7 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
             configuration_affected=cfg is not None, configuration_kind=cfg, in_session=session is not None,
             staged=bool(entry and entry.staged), unstaged=bool(entry and entry.unstaged), changed_symbols=changed_syms,
             last_modified=_dt.datetime.fromtimestamp(mtime, _dt.timezone.utc).isoformat(timespec="seconds") if mtime else None,
-            previous_path=entry.orig_path if entry is not None and entry.orig_path else None,
+            previous_path=entry.orig_path if entry is not None and entry.orig_path else None, submodule=sub,
         )
         if cfg is not None and level == "none":
             ev.impact_level = "low"
@@ -324,6 +339,22 @@ def observe(repo: "Repository", *, use_session: bool = True, record: bool = True
         cache.clear()
         cache.update(etag=etag, result=result)
     return result
+
+
+NON_FILE_TYPES = ("directory", "repository", "package", "namespace-package", "project", "workspace-member")
+
+
+def nodes_by_path(snap: RepositorySnapshot) -> dict[str, Any]:
+    """The node representing each file.  Several nodes can share a path (a compose file and the services it
+    declares); the file's own node wins."""
+    out: dict[str, Any] = {}
+    for n in snap.nodes():
+        if not n.path or n.category == CATEGORY_SYMBOL or n.component_type in NON_FILE_TYPES:
+            continue
+        current = out.get(n.path)
+        if current is None or (current.key != f"path:file:{n.path}" and n.key == f"path:file:{n.path}"):
+            out[n.path] = n
+    return out
 
 
 def _count(values: Any) -> dict[str, int]:

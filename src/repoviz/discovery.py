@@ -13,6 +13,7 @@ from __future__ import annotations
 import posixpath
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from . import classify, globs
@@ -20,6 +21,7 @@ from .config import Config
 from .manifests import ManifestData, parse_project_file
 from .model import Diagnostic
 from .sources import TreeSource
+from .submodules import gitmodules_urls
 
 PROJECT_MANIFEST_KINDS = {
     "pyproject", "setup.py", "setup.cfg", "pipfile", "package.json", "cargo", "go.mod", "maven", "gradle",
@@ -70,6 +72,7 @@ class RepositoryProfile:
     architecture_config: list[dict[str, Any]] = field(default_factory=list)
     dependency_tools: list[dict[str, Any]] = field(default_factory=list)
     submodules: list[str] = field(default_factory=list)
+    submodule_info: list[dict[str, Any]] = field(default_factory=list)
     excluded_count: int = 0
     config_sources: list[str] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
@@ -131,6 +134,17 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
             if key in git_info:
                 setattr(prof, key, git_info[key])
     prof.submodules = list(getattr(source, "submodules", []))
+    if prof.submodules:
+        commits = source.submodule_commits()
+        urls = gitmodules_urls(source.read_text(".gitmodules") or "")
+        for sub in prof.submodules:
+            info: dict[str, Any] = {"path": sub, "commit": commits.get(sub), "url": urls.get(sub)}
+            if root:
+                info["checked_out"] = (Path(root) / sub / ".git").exists()
+            dirty = source.submodule_dirty(sub)
+            if dirty:
+                info["uncommitted_files"] = len(dirty)
+            prof.submodule_info.append(info)
 
     all_files = source.files()
     prof.file_count = len(all_files)
@@ -321,8 +335,9 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
             elif proj["ecosystem"] == "go":
                 roots.setdefault(proj["path"], {"path": proj["path"], "language": "go", "origin": "go.mod"})
         for conventional in ("src", "lib", "app", "source", "sources"):
-            if conventional in cand_dirs and not any(r == conventional or conventional.startswith(r + "/") and r
-                                                     for r in roots):
+            # A conventional name that is itself a Python package ("app/__init__.py") is not an import root.
+            if conventional in cand_dirs and conventional not in python_packages and \
+                    not any(r == conventional or conventional.startswith(r + "/") and r for r in roots):
                 roots.setdefault(conventional, {"path": conventional, "language": None,
                                                 "origin": "heuristic: conventional directory"})
     prof.source_roots = sorted(roots.values(), key=lambda r: r["path"])
@@ -446,9 +461,13 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
                 f"{lang['display']}, so these files are shown as structural nodes only.",
                 "discovery", details={"language": lang["language"], "files": lang["files"]}))
     if prof.submodules:
-        prof.diagnostics.append(Diagnostic("info", "submodules", f"{len(prof.submodules)} Git submodule(s) are shown "
-                                           "as structural nodes; their content is not analyzed.", "discovery",
-                                           details={"submodules": prof.submodules}))
+        missing = [i["path"] for i in prof.submodule_info if i.get("checked_out") is False]
+        prof.diagnostics.append(Diagnostic(
+            "info", "submodules", f"{len(prof.submodules)} Git submodule(s): each is a component pinned to a commit. "
+            "Reviews and comparisons look inside them (commits and changed files); the structure and dependency "
+            "graphs do not analyze their code." + (f" Not checked out: {', '.join(missing)} (run 'git submodule "
+                                                   "update --init')." if missing else ""),
+            "discovery", details={"submodules": prof.submodules}))
     prof.duration_ms = (time.perf_counter() - started) * 1000
     return prof
 

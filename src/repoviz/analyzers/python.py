@@ -396,6 +396,16 @@ class _Extractor:
             stack.extend(ast.iter_child_nodes(cur))
 
 
+def _nearest_package_ancestor(directory: str, packages: set[str]) -> str | None:
+    """The closest proper ancestor of ``directory`` that is a regular package, if any."""
+    d = posixpath.dirname(directory)
+    while d:
+        if d in packages:
+            return d
+        d = posixpath.dirname(d)
+    return None
+
+
 def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     try:
         args = ast.unparse(fn.args)
@@ -407,8 +417,10 @@ def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
             ret = " -> " + ast.unparse(fn.returns)
         except Exception:  # pragma: no cover
             ret = ""
-    sig = f"({args}){ret}"
-    return sig if len(sig) <= 200 else sig[:197] + "..."
+    return f"({args}){ret}"
+
+
+MAX_SIGNATURE_DISPLAY = 200
 
 
 def parse_python(text: str, path: str = "<file>") -> PyFileInfo:
@@ -477,7 +489,7 @@ _GRIMP_LOCK = threading.Lock()
 
 class PythonAnalyzer(Analyzer):
     name = "python"
-    version = "1"
+    version = "2"
     languages = ("python",)
     capabilities = (CAP_MODULES, CAP_CONTAINMENT, CAP_SYMBOLS, CAP_ENTRY_POINTS, CAP_DEPENDENCIES, CAP_CALLS,
                     CAP_EVIDENCE, CAP_DIAGNOSTICS)
@@ -513,9 +525,17 @@ class PythonAnalyzer(Analyzer):
             if root is None:
                 # Walk up while the directory is a regular package; the first directory
                 # without ``__init__.py`` is the import root (flat, src and script layouts).
+                # A directory without ``__init__.py`` *inside* a regular package is an implicit
+                # namespace subpackage (``app/config/settings.py`` imports as ``app.config.settings``).
                 d = directory
-                while d and d in dirs_with_init:
-                    d = posixpath.dirname(d)
+                while d:
+                    if d in dirs_with_init:
+                        d = posixpath.dirname(d)
+                        continue
+                    ancestor = _nearest_package_ancestor(d, dirs_with_init)
+                    if ancestor is None:
+                        break
+                    d = ancestor
                 root = d
             rel = f[len(root) + 1:] if root else f
             stem = rel.rsplit(".", 1)[0]
@@ -636,7 +656,10 @@ class PythonAnalyzer(Analyzer):
                 if sym.decorators:
                     meta["decorators"] = sym.decorators
                 if sym.signature:
-                    meta["signature"] = sym.signature
+                    sig = sym.signature
+                    meta["signature"] = sig if len(sig) <= MAX_SIGNATURE_DISPLAY else sig[:MAX_SIGNATURE_DISPLAY - 3] + "..."
+                    # The displayed text may be truncated; changes are detected on the full signature.
+                    meta["signature_id"] = stable_hash("sig", sig, length=12)
                 if sym.doc:
                     meta["doc"] = sym.doc
                 if sym.is_async:
