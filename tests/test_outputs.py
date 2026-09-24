@@ -194,6 +194,25 @@ def test_server_security_checks(server) -> None:
     assert status == 200
 
 
+def test_server_ignores_clients_that_disconnect(server, capfd, caplog) -> None:
+    """A reload or closed tab drops connections mid-response; that is routine, not an error."""
+    import socket
+    import struct
+    import time
+
+    srv, _repo = server
+    for path in ("/api/bundle", "/assets/mermaid.min.js", "/api/activity"):
+        s = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+        s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Repoviz: 1\r\n\r\n".encode())
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # reset, like a cancelled fetch
+        s.close()
+    time.sleep(1.5)
+    assert request(srv, "GET", "/api/health")[0] == 200
+    err = capfd.readouterr().err
+    assert "Traceback" not in err and "Broken pipe" not in err
+    assert not [r for r in caplog.records if r.levelno >= 30 and r.name == "repoviz.server"]
+
+
 # --------------------------------------------------------------------------- CLI
 
 

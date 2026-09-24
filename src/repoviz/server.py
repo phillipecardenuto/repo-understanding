@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 import time
 import traceback
@@ -57,6 +58,8 @@ ASSETS = {
     "/assets/theme.json": ("theme.json", "application/json; charset=utf-8"),
 }
 LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
+#: The browser went away mid-request (page reload, tab closed, cancelled fetch): nothing to answer, nothing to report.
+CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 FAVICON = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" '
            b'fill="#4f46e5"/><circle cx="9" cy="10" r="4" fill="#fff"/><circle cx="23" cy="10" r="4" fill="#fff"/>'
            b'<circle cx="16" cy="23" r="4" fill="#fff"/><path d="M9 10L16 23L23 10" stroke="#fff" stroke-width="2" '
@@ -264,6 +267,7 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
             return name in allowed_hosts
 
         def _send(self, status: int, body: bytes, content_type: str, extra: dict[str, str] | None = None) -> None:
+            self._responded = True  # from here on, a second (error) response would corrupt the stream
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -277,6 +281,20 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
         def _json(self, status: int, payload: Any) -> None:
             body = payload if isinstance(payload, bytes) else dumps(payload).encode("utf-8")
             self._send(status, body, "application/json; charset=utf-8")
+
+        def _error(self, status: int, message: str) -> None:
+            """Answer with an error unless a response already started or the client is gone."""
+            if getattr(self, "_responded", False):
+                self.close_connection = True
+                return
+            try:
+                self._json(status, {"error": message})
+            except CLIENT_GONE:
+                self.close_connection = True
+
+        def _client_gone(self, path: str) -> None:
+            self.close_connection = True
+            log.debug("client closed the connection during %s", path)
 
         def _query(self) -> dict[str, str]:
             q = parse_qs(urlparse(self.path).query, max_num_fields=50)
@@ -299,8 +317,13 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
             self.do_GET()
 
         def do_GET(self) -> None:
+            self._responded = False
             path = urlparse(self.path).path
-            if not self._guard(path):
+            try:
+                if not self._guard(path):
+                    return
+            except CLIENT_GONE:
+                self._client_gone(path)
                 return
             try:
                 if path in ("/", "/index.html"):
@@ -338,14 +361,21 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:
-                self._json(exc.status, {"error": str(exc)})
+                self._error(exc.status, str(exc))
+            except CLIENT_GONE:
+                self._client_gone(path)
             except Exception as exc:  # never leak a traceback page; log it instead
                 log.error("error handling %s: %s\n%s", path, exc, traceback.format_exc())
-                self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+                self._error(500, f"{type(exc).__name__}: {exc}")
 
         def do_POST(self) -> None:
+            self._responded = False
             path = urlparse(self.path).path
-            if not self._guard(path):
+            try:
+                if not self._guard(path):
+                    return
+            except CLIENT_GONE:
+                self._client_gone(path)
                 return
             try:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -353,7 +383,7 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 length = -1
             if length < 0 or length > 2_000_000:
                 self.close_connection = True
-                self._json(413 if length > 0 else 400, {"error": "invalid or too large request body"})
+                self._error(413 if length > 0 else 400, "invalid or too large request body")
                 return
             try:
                 body = json.loads(self.rfile.read(length) or b"{}") if length else {}
@@ -370,22 +400,34 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:
-                self._json(exc.status, {"error": str(exc)})
+                self._error(exc.status, str(exc))
             except (json.JSONDecodeError, UnicodeDecodeError):
-                self._json(400, {"error": "invalid JSON"})
+                self._error(400, "invalid JSON")
+            except CLIENT_GONE:
+                self._client_gone(path)
             except Exception as exc:
-                log.error("error handling POST %s: %s", path, exc)
-                self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+                log.error("error handling POST %s: %s\n%s", path, exc, traceback.format_exc())
+                self._error(500, f"{type(exc).__name__}: {exc}")
 
     return Handler
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A client that disconnects is routine for a browser app; anything else keeps the default report.
+        if isinstance(sys.exc_info()[1], CLIENT_GONE):
+            log.debug("client %s closed the connection", client_address)
+            return
+        super().handle_error(request, client_address)
 
 
 def create_server(repo: Repository, host: str = "127.0.0.1", port: int = 8765, *, auto_session: bool = False,
                   allowed_hosts: list[str] | None = None) -> ThreadingHTTPServer:
     state = AppState(repo, auto_session=auto_session)
     allowed = set(LOOPBACK_NAMES) | {host.lower()} | {h.lower() for h in allowed_hosts or []}
-    server = ThreadingHTTPServer((host, port), make_handler(state, allowed))
-    server.daemon_threads = True
+    server = _Server((host, port), make_handler(state, allowed))
     bound_port = server.server_address[1]
     server.repoviz_url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{bound_port}/"  # type: ignore[attr-defined]
     return server
