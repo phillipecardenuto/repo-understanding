@@ -1,11 +1,22 @@
-# Publishes a GitHub Release when a version tag (v1.2.3) is pushed:
-# tests, checks the tag matches the package version, builds the wheel and sdist,
-# and attaches them with the matching CHANGELOG section as release notes.
+# Publishes a GitHub Release for a version tag (v1.2.3): tests, checks the tag
+# matches the package version, builds the wheel and sdist, and attaches them with
+# the matching CHANGELOG section as release notes.
+#
+# Triggered by pushing the tag, or manually (Actions > Release > Run workflow)
+# with the tag name, in which case the tag is created on the selected commit.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to release, e.g. v0.1.0 (created on the selected branch's commit if missing)"
+        required: true
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -23,8 +34,8 @@ jobs:
       - name: Tag matches the package version
         run: |
           version=$(python -c "import sys; sys.path.insert(0, 'src'); import repoviz; print(repoviz.__version__)")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match the package version $version" >&2
+          if [ "v$version" != "$TAG" ]; then
+            echo "Tag $TAG does not match the package version $version" >&2
             exit 1
           fi
 
@@ -42,7 +53,7 @@ jobs:
         run: |
           python - <<'EOF' > notes.md
           import os, re
-          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          version = os.environ["TAG"].lstrip("v")
           text = open("CHANGELOG.md", encoding="utf-8").read()
           match = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|^\[[^\]]+\]: |\Z)", text, re.S | re.M)
           print(match.group(1).strip() if match else f"repoviz {version}")
@@ -51,4 +62,4 @@ jobs:
       - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "repoviz $GITHUB_REF_NAME" --notes-file notes.md
+        run: gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "repoviz $TAG" --notes-file notes.md

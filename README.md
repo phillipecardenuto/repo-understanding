@@ -287,7 +287,8 @@ See [docs/configuration.md](docs/configuration.md) for every option.
 
 Releases: bump `version` in `pyproject.toml` and `src/repoviz/__init__.py`, add a
 `CHANGELOG.md` section, then push a tag (`git tag -a v0.2.0 -m "repoviz 0.2.0" &&
-git push origin v0.2.0`). The *Release* workflow tests, builds and publishes the
+git push origin v0.2.0`), or run the *Release* workflow manually (Actions → Release
+→ Run workflow) with the tag name. The workflow tests, builds and publishes the
 GitHub Release with the wheel, the sdist and the changelog section as notes.
 
 ```bash
