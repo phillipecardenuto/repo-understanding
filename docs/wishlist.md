@@ -30,8 +30,9 @@ Labels:
 
 ## The list
 
-**Status:** 6 items done (#2, #3, #4, #5, #6, and #35, added later from user
-feedback), which completes the core agent review group; #19 is not planned. The tracking issue
+**Status:** 8 items done: #2, #3, #4, #5 and #6, which complete the core agent
+review group, plus three added later from user feedback: #35, and #36 and #37,
+written by the maintainer. #19 is not planned. The tracking issue
 [#1](https://github.com/phillipecardenuto/repo-understanding/issues/1) is always up to date.
 
 ### Supervising AI agents
@@ -86,6 +87,8 @@ feedback), which completes the core agent review group; #19 is not planned. The 
 | [#31](https://github.com/phillipecardenuto/repo-understanding/issues/31) | History-based comparisons for clean checkouts on the Changes tab | P2 | S |
 | [#32](https://github.com/phillipecardenuto/repo-understanding/issues/32) | Architecture over time: a drift timeline across tags, releases or waves | P3 | M |
 | [#33](https://github.com/phillipecardenuto/repo-understanding/issues/33) | Moved-code detection and word-level highlights in diffs | P3 | M |
+| [#36](https://github.com/phillipecardenuto/repo-understanding/issues/36) | Inspect the code changes of churn hotspots in the Structure tab (maintainer's issue) · **✓ done** | P1 | M |
+| [#37](https://github.com/phillipecardenuto/repo-understanding/issues/37) | Spotlight a module and its direct links on click in Dependencies (maintainer's issue) · **✓ done** | P1 | S |
 
 ### Performance
 
