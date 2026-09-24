@@ -83,6 +83,17 @@ sensitive = true                  # flag CI / lock files / deployment / migratio
 disabled_checks = []              # e.g. ["todo", "debug-output"]
 wiring_ignore = []                # new files that need no importer (loaded by a framework), e.g. ["src/plugins/**"]
 
+[review.risk]                     # weights of the risk score (normalised to 100; 0 ignores a factor)
+signals = 30                      # most severe signal on the file
+fan_in = 20                       # places calling (or importing) the changed code
+entry_points = 15                 # entry points reaching the changed code
+tests = 10                        # no test reaches it, or none was updated
+sensitive = 10                    # protected, sensitive, security-related or out-of-scope path
+churn = 5                         # churn hotspot (top 10% of files by recent commits)
+size = 10                         # lines added and removed
+high = 40                         # score from which a file is "high" risk
+medium = 20                       # score from which it is "medium"
+
 [[review.rules]]                  # forbidden dependencies
 from = ["src/ui/**"]
 to = ["src/db/**"]

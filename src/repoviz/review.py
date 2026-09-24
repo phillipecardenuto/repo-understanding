@@ -50,6 +50,7 @@ from .model import (
 from .pipeline import utcnow
 from .redact import contains_secret as _secret_in
 from .redact import redact as _redact
+from .risk import RiskContext
 from .sources import TreeSource, is_binary
 from .submodules import WithSubmoduleFiles, submodule_changes
 from .wiring import unwired_code
@@ -610,6 +611,15 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             per_file.setdefault(f.path, []).append(f.id)
     for entry in files:
         entry["findings"] = per_file.get(entry["path"], [])
+    # --- risk: which files to read first, and why ---------------------------------------------------
+    risk_ctx = RiskContext(diff, base_snap, target_snap,
+                           [{"path": f.path, "severity": f.severity, "title": f.title} for f in findings],
+                           weights=repo.config.review_risk_weights, thresholds=repo.config.review_risk_thresholds,
+                           component_of=component_of, sensitive_of=_sensitive_kind if scope.sensitive else None,
+                           changed_tests={f["path"] for f in files if f["is_test"]})
+    for entry in files:
+        entry["risk"] = risk_ctx.score_file(entry)
+    risk = risk_ctx.wave(files)
     for item in commits["items"]:
         item["signals"] = sum(len(per_file.get(f["path"], [])) for f in item["files"])
 
@@ -636,6 +646,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "generated_at": utcnow(),
         "scope": scope.to_dict(),
         "summary": summary,
+        "risk": risk,
         "components": components,
         "component_edges": comp_edges,
         "files": files,
@@ -1434,6 +1445,10 @@ def feedback_markdown(report: dict[str, Any], notes: list[dict[str, Any]], *, in
                              + (f" Suggestion: {f['suggestion']}" if f.get("suggestion") else ""))
                 if f.get("excerpt"):
                     lines += ["   ```", "   " + f["excerpt"], "   ```"]
+    risky = [t for t in (report.get("risk") or {}).get("top", []) if t["level"] in ("high", "medium")]
+    if include_findings and risky:
+        lines += ["", "## Riskiest files (double-check them)", ""]
+        lines += [f"- `{t['path']}`: {t['level']} risk ({t['score']}/100): {'; '.join(t['factors'])}" for t in risky]
     if n == 0:
         lines += ["", "No issues to report."]
     lines += ["", "Please address every numbered item, stay within the allowed scope, and reply with one line per "
@@ -1481,6 +1496,17 @@ def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
     if scope["allowed"] or scope["protected"]:
         out.append(f"  scope: allowed {scope['allowed'] or '(any)'}; protected {scope['protected'] or '(none)'} "
                    f"→ {s['protected']} protected, {s['out_of_scope']} out-of-scope file(s)")
+    risk = report.get("risk") or {}
+    if risk.get("path"):
+        out.append(f"  risk: {risk['level']} ({risk['score']}/100), because of {risk['path']}")
+        out.append("\nReview first (riskiest files):")
+        by_path = {f["path"]: f for f in report["files"]}
+        for t in risk["top"]:
+            out.append(f"  {t['score']:>3} {t['level']:<6}  {t['path']}")
+            for x in (by_path.get(t["path"], {}).get("risk") or {}).get("factors", []):
+                out.append(f"             +{x['points']:<3} {x['text']}")
+        for note in risk.get("notes") or []:
+            out.append(f"  note: {note}")
     out.append("\nTouched components:")
     for c in report["components"]:
         flags = []

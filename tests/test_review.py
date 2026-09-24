@@ -832,3 +832,120 @@ def test_renamed_and_edited_function(make_repo) -> None:
     assert key["renamed_from"] == "compute" and key["status"] == "modified"
     assert "content changed" in key["reasons"] and any(r.startswith("renamed from") for r in key["reasons"])
     assert "public-api-removed" not in by_kind(report)
+
+
+# --------------------------------------------------------------------------- risk (#5)
+
+RISK_APP = {
+    ".repoviz.toml": '[review]\nprotected = ["app/auth/**"]\n',
+    "pyproject.toml": '[project]\nname = "app"\nversion = "1"\n\n[project.scripts]\napp = "app.cli:main"\n',
+    "app/__init__.py": "",
+    "app/core.py": "def price(x):\n    return x * 2\n",
+    "app/cli.py": "from app.core import price\n\n\ndef main():\n    return price(1)\n",
+    "app/api.py": "from app.core import price\n\n\ndef quote():\n    return price(2)\n\n\ndef invoice():\n    return price(3)\n",
+    "app/report.py": "from app import core\n\n\ndef summary():\n    return core.price(4)\n",
+    "app/auth/__init__.py": "",
+    "app/auth/tokens.py": "def check(token):\n    return token == 'ok'\n",
+    "tests/test_auth.py": "from app.auth.tokens import check\n\n\ndef test_check():\n    assert check('ok')\n",
+    "README.md": "# app\n",
+}
+
+
+def risk_wave(repo) -> None:
+    """A widely used function changes signature, a protected file is edited, a test and the docs grow."""
+    Path(repo.path, "app/core.py").write_text("def price(x, rate):\n    return x * rate\n")
+    Path(repo.path, "app/auth/tokens.py").write_text("def check(token):\n    return token in ('ok', 'yes')\n")
+    Path(repo.path, "tests/test_auth.py").write_text(RISK_APP["tests/test_auth.py"]
+                                                     + "\n\ndef test_yes():\n    assert check('yes')\n")
+    Path(repo.path, "README.md").write_text("# app\n\n" + "".join(f"Line {i}.\n" for i in range(30)))
+
+
+def test_risk_orders_the_wave_and_explains_each_factor(make_repo) -> None:
+    repo = make_repo(RISK_APP)
+    risk_wave(repo)
+    report = _review_all(repo)
+    risk = {f["path"]: f["risk"] for f in report["files"]}
+    assert {p: (r["score"], r["level"]) for p, r in risk.items()} == {
+        "app/auth/tokens.py": (42, "high"), "app/core.py": (42, "high"),
+        "README.md": (6, "low"), "tests/test_auth.py": (3, "low")}
+    assert [(x["factor"], x["points"], x["text"]) for x in risk["app/core.py"]["factors"]] == [
+        ("signals", 15, "medium signal: Signature changed; callers not updated and 1 more signal"),
+        ("tests", 10, "no test imports or calls this code"),
+        ("fan_in", 9, "called from 4 places"),
+        ("entry_points", 5, "reached from 1 entry point (app [console-script])"),
+        ("size", 3, "4 lines changed")]
+    assert [x["text"] for x in risk["app/auth/tokens.py"]["factors"]] == [
+        "high signal: Protected area modified", "protected area", "2 lines changed"]
+    assert [x["factor"] for x in risk["README.md"]["factors"]] == ["size"]
+    wave = report["risk"]
+    assert (wave["score"], wave["level"], wave["path"]) == (42, "high", "app/auth/tokens.py")
+    assert wave["summary"] == ("high risk, because of app/auth/tokens.py "
+                               "(high signal: Protected area modified; protected area)")
+    assert [t["path"] for t in wave["top"]] == ["app/auth/tokens.py", "app/core.py", "README.md"]
+    assert wave["counts"] == {"high": 2, "medium": 0, "low": 2}
+    assert _review_all(repo)["risk"] == wave  # deterministic
+
+
+def test_risk_in_prompt_text_and_gate(make_repo, capsys) -> None:
+    repo = make_repo(RISK_APP)
+    risk_wave(repo)
+    prompt = feedback_markdown(_review_all(repo), [])
+    riskiest = prompt.split("## Riskiest files (double-check them)")[1]
+    assert "- `app/auth/tokens.py`: high risk (42/100): high signal: Protected area modified" in riskiest
+    assert "- `app/core.py`: high risk (42/100)" in riskiest and "README.md" not in riskiest  # low risk: not listed
+    assert "Riskiest" not in feedback_markdown(_review_all(repo), [], include_findings=False)
+    capsys.readouterr()
+    assert main(["review", "-C", repo.path]) == 0
+    out = capsys.readouterr().out
+    assert "risk: high (42/100), because of app/auth/tokens.py" in out
+    assert "Review first (riskiest files):" in out and "+9   called from 4 places" in out
+    assert main(["review", "-C", repo.path, "--fail-on", "risk:high"]) == 3
+    assert "wave risk is high (42/100, app/auth/tokens.py)" in capsys.readouterr().err
+    assert main(["review", "-C", repo.path, "--fail-on", "risk:bogus"]) == 1
+    Path(repo.path, "app/auth/tokens.py").write_text(RISK_APP["app/auth/tokens.py"])
+    Path(repo.path, "app/core.py").write_text(RISK_APP["app/core.py"])
+    assert main(["review", "-C", repo.path, "--fail-on", "risk:high"]) == 0  # docs and tests only: low
+    capsys.readouterr()
+    assert main(["review", "-C", repo.path, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["risk"]["level"] == "low"
+
+
+def test_risk_weights_are_configurable_and_validated(make_repo) -> None:
+    import pytest
+
+    from repoviz.config import ConfigError, load_config
+
+    repo = make_repo(dict(RISK_APP, **{".repoviz.toml": RISK_APP[".repoviz.toml"]
+                                       + "\n[review.risk]\nsignals = 0\nsensitive = 0\nhigh = 30\nbogus = 1\n"}))
+    risk_wave(repo)
+    cfg = Repository(repo.path).config
+    assert cfg.review_risk_weights == {"signals": 0.0, "sensitive": 0.0} and cfg.review_risk_thresholds == {"high": 30.0}
+    assert any("review.risk.bogus" in s for s in cfg.sources)  # unknown key: a configuration diagnostic
+    risk = {f["path"]: f["risk"] for f in _review_all(repo)["files"]}
+    # Signals and sensitive paths no longer count; the rest is rescaled so that the maximum is still 100.
+    assert (risk["app/core.py"]["score"], risk["app/core.py"]["level"]) == (44, "high")
+    assert [x["factor"] for x in risk["app/auth/tokens.py"]["factors"]] == ["size"]
+    for bad in ("signals = -1", "size = 'big'", "high = 120", "medium = 50\nhigh = 40",
+                "signals = 0\nfan_in = 0\nentry_points = 0\ntests = 0\nsensitive = 0\nchurn = 0\nsize = 0"):
+        Path(repo.path, ".repoviz.toml").write_text(f"[review.risk]\n{bad}\n")
+        with pytest.raises(ConfigError):
+            load_config(Path(repo.path))
+
+
+def test_risk_hotspot_security_path_and_stale_tests(make_repo) -> None:
+    files = {f"app/m{i}.py": f"def f{i}():\n    return {i}\n" for i in range(10)}
+    repo = make_repo(dict(files, **{
+        "app/__init__.py": "", "app/hot.py": "def rate():\n    return 1\n",
+        "app/auth/__init__.py": "", "app/auth/login.py": "def login(user):\n    return bool(user)\n",
+        "tests/test_login.py": "from app.auth.login import login\n\n\ndef test_login():\n    assert login('a')\n"}))
+    for i in range(4):  # a hotspot: changed far more often than the other files
+        repo.write({"app/hot.py": f"def rate():\n    return {i + 2}\n"})
+        repo.commit(f"tune rate {i}")
+    repo.write({"app/hot.py": "def rate():\n    return 9\n",
+                "app/auth/login.py": "def login(user):\n    return bool(user) and user != 'root'\n"})
+    risk = {f["path"]: f["risk"] for f in _review_all(repo)["files"]}
+    texts = {p: [x["text"] for x in r["factors"]] for p, r in risk.items()}
+    assert "hotspot: changed in 5 of the last 300 commits (top 10% of files)" in texts["app/hot.py"]
+    assert "security-related path" in texts["app/auth/login.py"]
+    assert "1 test file covers it; none was updated" in texts["app/auth/login.py"]
+    assert not any(t.startswith("hotspot") for t in texts["app/auth/login.py"])

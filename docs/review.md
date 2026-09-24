@@ -261,11 +261,71 @@ it keeps the partners that changed in at least half of that file's commits:
 Thresholds are in [`[history]`](configuration.md). On Django, learning from 300
 commits takes about 0.05 s, and a cached lookup takes a few milliseconds.
 
+## Risk score
+
+On a 50-file wave your attention is the scarce resource. Every changed file gets
+a **risk score** from 0 to 100 and a level, so you know which files to read
+first and why. It is a small deterministic model (the same input always gives
+the same score), not a verdict: each factor that adds points is listed with its
+reason.
+
+| Factor | Default points | What counts |
+|---|---:|---|
+| `signals` | 0–30 | The most severe signal on the file: high 30, medium 15, low 5 (info 0). |
+| `fan_in` | 0–20 | Places outside the file that call the changed functions or classes (log scale, full at 32). Callers inside the file pass the change on, so their outside callers count. Test code does not count. For languages without call data, and for module-level changes, modules that import the file count instead. |
+| `entry_points` | 0–15 | Entry points (console scripts, `__main__`, route handlers, container commands…) that reach the changed code through calls (log scale, full at 8). |
+| `tests` | 0–10 | Changed behaviour that no test imports or calls (10), or whose tests were not updated in this wave (5). |
+| `sensitive` | 0–10 | A protected path (10); a sensitive file, such as CI, a lock file, a migration, deployment or `.env` (7); a security-related path such as `auth/`, `permissions`, `crypto` or `login` (7); a path outside the allowed scope (5). |
+| `churn` | 0–5 | A hotspot: among the top 10% of files by commits in the churn window before the wave (and at least 3 commits). |
+| `size` | 0–10 | Lines added and removed (log scale, full at 400). A file too large to diff gets full points. |
+
+- **Levels:** *high* from 40, *medium* from 20, *low* below that.
+- **Wave risk:** the score and level of the riskiest file. For example, "high
+  risk, because of `app/auth/tokens.py` (high signal: Protected area modified;
+  protected area)".
+- **Bounded:** callers are followed for at most 5,000 nodes per file and
+  200,000 per review. When the cap applies, the review says so, and the
+  entry-point count is a lower bound.
+
+Where the score shows up:
+
+| Place | What you get |
+|---|---|
+| AI Review tab | A **wave risk** badge (icon, level and score; click it to open that file), a **Risk** column that sorts the files table by default, and the factors on hover and in each file card. `j` / `k` follow the table order. |
+| `repoviz review` | A `risk:` line and "Review first (riskiest files)" with each factor's points. |
+| `--format markdown` | The wave risk and a table of the top three files. |
+| `--format json` | `risk` for the wave (`score`, `level`, `path`, `summary`, `top`, `counts`, `notes`) and `files[].risk` (`score`, `level`, `factors[]` with `factor`, `points` and `text`). |
+| Feedback prompt | "Riskiest files (double-check them)": the top three files at *medium* or *high*, when untriaged signals are included. |
+| Automation | `--fail-on risk:high` exits with 3 when the wave risk is high; `risk:medium` when it is medium or high. |
+
+The weights live in `[review.risk]`. They are normalised, so the maximum score is
+always 100; set a weight to 0 to ignore a factor. `high` and `medium` move the
+level thresholds.
+
+```toml
+[review.risk]
+signals = 30
+fan_in = 20
+entry_points = 15
+tests = 10
+sensitive = 10
+churn = 5
+size = 10
+high = 40      # score from which a file is "high" risk
+medium = 20
+```
+
+Weights must be numbers ≥ 0, and at least one must be above 0. Thresholds must
+be between 0 and 100, with `medium` not above `high`. Unknown keys are reported
+in the configuration line of `repoviz discover` and the Structure tab.
+
 ## Working through a review
 
-- **Files are ranked for attention.** The file table sorts files with signals
-  first. The map shows the most relevant files or directories (scope
-  violations, high-severity signals, then the largest changes). The rest are
+- **Files are ranked for attention.** The file table sorts files by
+  [risk](#risk-score), riskiest first. Click a column header to sort by
+  something else; your choice is kept while you work. The map shows the most
+  relevant files or directories (scope violations, high-severity signals, then
+  the largest changes). The rest are
   folded into a "… N more" node, which lists them when clicked.
 - **Keyboard:** `j` / `k` open the next / previous file in table order, and `m`
   marks the open file reviewed and moves to the next unreviewed one. The file
@@ -348,6 +408,7 @@ above a chosen severity, and restates the allowed and protected scope.
 
 ```bash
 repoviz review session --fail-on protected --fail-on high      # exit 3 on violations
+repoviz review session --fail-on risk:high                     # exit 3 when the wave risk is high
 repoviz review main...HEAD --format markdown > review.md       # for a PR description
 repoviz diff session --fail-on new-cycle --fail-on new-component-dependency
 ```

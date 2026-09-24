@@ -23,6 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .risk import DEFAULT_THRESHOLDS as RISK_THRESHOLDS
+from .risk import FACTORS as RISK_FACTORS
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - exercised only on Python 3.10
@@ -93,6 +96,8 @@ class Config:
     review_sensitive: bool = True
     review_disabled_checks: list[str] = field(default_factory=list)
     review_wiring_ignore: list[str] = field(default_factory=list)  # new files that need no importer
+    review_risk_weights: dict[str, float] = field(default_factory=dict)  # [review.risk] factor weights
+    review_risk_thresholds: dict[str, float] = field(default_factory=dict)  # [review.risk] high / medium
     # Change coupling from Git history ("these files usually change together").
     history_commits: int = 300  # how many recent commits to learn from (0 disables)
     history_min_revs: int = 5  # a file needs this many commits before its habits count
@@ -145,6 +150,7 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
     """Apply a ``[tool.repoviz]``-shaped mapping onto ``cfg`` (returns a copy)."""
     cfg = copy.deepcopy(cfg)
     known = set()
+    unknown_nested: list[str] = []
 
     def take(key: str) -> Any:
         known.add(key)
@@ -244,6 +250,25 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
             cfg.review_disabled_checks = _as_list(review["disabled_checks"], "review.disabled_checks")
         if "wiring_ignore" in review:
             cfg.review_wiring_ignore = _as_list(review["wiring_ignore"], "review.wiring_ignore")
+        risk = review.get("risk")
+        if risk is not None:
+            if not isinstance(risk, dict):
+                raise ConfigError("'review.risk' must be a table")
+            weights, thresholds = dict(cfg.review_risk_weights), dict(cfg.review_risk_thresholds)
+            for key, value in risk.items():
+                if key not in RISK_FACTORS and key not in ("high", "medium"):
+                    unknown_nested.append(f"review.risk.{key}")
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 \
+                        or (key in ("high", "medium") and value > 100):
+                    raise ConfigError(f"review.risk.{key} must be a number" + (" from 0 to 100" if key in
+                                                                               ("high", "medium") else " ≥ 0"))
+                (thresholds if key in ("high", "medium") else weights)[key] = float(value)
+            if weights and not any(weights.get(k, 1) for k in RISK_FACTORS):
+                raise ConfigError("review.risk: at least one weight must be above 0")
+            if thresholds.get("medium", RISK_THRESHOLDS["medium"]) > thresholds.get("high", RISK_THRESHOLDS["high"]):
+                raise ConfigError("review.risk.medium must not be above review.risk.high")
+            cfg.review_risk_weights, cfg.review_risk_thresholds = weights, thresholds
         rules = review.get("rules")
         if rules is not None:
             if not isinstance(rules, list):
@@ -258,7 +283,7 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
                 cfg.review_rules.append(DependencyRule(_as_list(r["from"], "review.rules.from"),
                                                        _as_list(r["to"], "review.rules.to"),
                                                        str(r.get("message", "")), sev))
-    unknown = sorted(set(data) - known)
+    unknown = sorted(set(data) - known) + unknown_nested
     if unknown:
         cfg.sources.append(f"{origin} (ignored unknown keys: {', '.join(unknown)})")
     else:

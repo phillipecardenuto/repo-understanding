@@ -101,6 +101,10 @@ the last commit or any range.
 - **"Where the agent went" map:** touched components, packages or files, with
   lines changed. Protected and out-of-scope areas are highlighted.
 - **Review signals:** triage each one (dismiss, annotate, or send to the agent).
+- **Risk:** a wave risk badge and a Risk column (0–100, *high* / *medium* /
+  *low*) that orders the files, riskiest first, and lists why: signal severity,
+  callers, entry points reached, missing tests, sensitive paths, churn hotspots
+  and size. `j` / `k` follow that order.
 - **Changed-modules table.** Each file opens a change card:
   - key changes: functions and classes with before/after signatures;
   - dependency changes;
@@ -185,6 +189,7 @@ repoviz review                          # where it went, scope violations, revie
 repoviz review --format prompt          # numbered file:line feedback to paste back to the agent
 repoviz review --by-commit              # the same, step by step (the UI's Commits panel)
 repoviz review --fail-on protected --fail-on high   # guardrail for scripted loops (exit 3)
+repoviz review --fail-on risk:high      # exit 3 when the wave risk is high
 repoviz session end                     # freezes the wave; later: repoviz review session:<id>
 ```
 
@@ -202,8 +207,14 @@ Review signals flag likely problems for a human to check:
 - untested changes and weakened tests (skips, removed assertions);
 - swallowed exceptions, debugger statements and possible secrets.
 
+Each changed file also gets an explainable **risk score**, and the wave's risk is
+its riskiest file. The text output starts with "Review first (riskiest files)",
+the feedback prompt lists the riskiest files to double-check, and
+`--fail-on risk:high` (or `risk:medium`) gates on it. Weights live in
+`[review.risk]`.
+
 See [docs/review.md](docs/review.md) for the full list and the configuration
-(`[review]` scope and forbidden-dependency rules).
+(`[review]` scope, forbidden-dependency rules and risk weights).
 
 `repoviz serve --session` starts a session automatically, and the Activity tab
 can start or restart sessions. Session data lives in `~/.cache/repoviz`

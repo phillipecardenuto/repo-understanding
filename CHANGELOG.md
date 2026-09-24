@@ -6,6 +6,19 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Explainable risk score per file and per wave** ([#5](https://github.com/phillipecardenuto/repo-understanding/issues/5)).
+  - Every changed file gets a score from 0 to 100 and a level (high, medium,
+    low), with each factor and its points: signal severity, callers of the
+    changed code, entry points reaching it, missing or stale tests, protected or
+    sensitive paths, churn hotspots and size. The wave's risk is its riskiest
+    file.
+  - The AI Review tab shows a wave risk badge and a Risk column that sorts the
+    files by default; `j` / `k` follow that order and each file card lists the
+    factors.
+  - `repoviz review` prints "Review first (riskiest files)"; JSON and Markdown
+    include the risk; the feedback prompt lists the riskiest files.
+  - New gate `--fail-on risk:high` (or `risk:medium`); weights and thresholds
+    in `[review.risk]`, validated.
 - **Renames and moves are recognised** ([#3](https://github.com/phillipecardenuto/repo-understanding/issues/3)).
   - The diff pairs removed and added files, folders, submodules and
     functions/classes that are the same thing under a new name or path. They

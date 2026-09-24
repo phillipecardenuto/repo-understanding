@@ -1616,6 +1616,26 @@
       unscoped: null }[scope] || null;
   }
   function sevPill(sev) { return pill(sev, sev === "high" ? "high" : sev === "medium" ? "medium" : "low"); }
+  /* Risk (review.risk): shown as icon + score + word, never colour alone. */
+  const RISK_ICON = { high: "alert-circle", medium: "alert" };
+  function riskPill(risk, suffix) {
+    if (!risk) return null;
+    const icon = RISK_ICON[risk.level];
+    return pill([icon ? iconEl(icon, true) : null, `${icon ? " " : ""}${risk.score} ${risk.level}${suffix || ""}`], risk.level);
+  }
+  const riskFactorsText = (risk) => ((risk && risk.factors) || []).map((x) => `+${x.points} ${x.text}`).join("\n") || "no risk factor";
+  const byRisk = (a, b) => ((b.risk || {}).score || 0) - ((a.risk || {}).score || 0) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  /* Mirror of risk.wave_risk: a set of files is as risky as its riskiest file. */
+  function waveRiskOf(files) {
+    const scored = files.filter((f) => f.risk).sort(byRisk);
+    const counts = { high: 0, medium: 0, low: 0 };
+    for (const f of scored) counts[f.risk.level]++;
+    const top = scored.slice(0, 3).map((f) => ({ path: f.path, score: f.risk.score, level: f.risk.level, factors: f.risk.factors.map((x) => x.text) }));
+    if (!scored.length) return { score: 0, level: "low", path: null, summary: "No changed files.", top, counts, notes: [] };
+    const first = scored[0], reasons = first.risk.factors.slice(0, 2).map((x) => x.text).join("; ");
+    return { score: first.risk.score, level: first.risk.level, path: first.path, top, counts, notes: [],
+      summary: `${first.risk.level} risk, because of ${first.path}${reasons ? " (" + reasons + ")" : ""}` };
+  }
   const locText = (path, line) => path ? `${path}${line ? ":" + line : ""}` : "";
 
   /* Feedback prompt (mirror of review.feedback_markdown). */
@@ -1661,6 +1681,11 @@
         }
       }
     }
+    const risky = ((report.risk || {}).top || []).filter((t) => t.level === "high" || t.level === "medium");
+    if (includeFindings && risky.length) {
+      L.push("", "## Riskiest files (double-check them)", "");
+      for (const t of risky) L.push(`- \`${t.path}\`: ${t.level} risk (${t.score}/100): ${t.factors.join("; ")}`);
+    }
     if (!n) L.push("", "No issues to report.");
     L.push("", "Please address every numbered item, stay within the allowed scope, and reply with one line per item describing what you changed (or why no change was needed).");
     return L.join("\n") + "\n";
@@ -1682,7 +1707,7 @@
     const summary = Object.assign({}, wave.summary, { files: files.length, components: components.length,
       lines_added: files.reduce((a, f) => a + (f.lines_added || 0), 0), lines_removed: files.reduce((a, f) => a + (f.lines_removed || 0), 0),
       symbols_changed: files.reduce((a, f) => a + f.symbols.length, 0), tests_changed: files.filter((f) => f.is_test).length });
-    return Object.assign({}, wave, { files, components, summary, commit: item, filtered: true,
+    return Object.assign({}, wave, { files, components, summary, commit: item, filtered: true, risk: waveRiskOf(files),
       findings: wave.findings.filter((f) => f.path && paths.has(f.path)),
       component_edges: (wave.component_edges || []).filter((e) => ids.has(e.source) && ids.has(e.target)) });
   }
@@ -1693,7 +1718,7 @@
       this.opts = Object.assign({ targetId: null, severity: "all", category: "all", mapLevel: "auto", minSeverity: "medium", includeFindings: true },
         storage.get("rv.review", {}));
       this.selectedComponent = null; this.selectedFile = null;
-      this.filesTable = { sort: "findings", dir: 1 };
+      this.filesTable = { sort: "risk", dir: 1 };  // riskiest first; the user's choice is kept across redraws
       this.findingsShown = 200;
       this.reviewed = {};
     }
@@ -1996,7 +2021,7 @@
       }
       this.drawFiles(); this.drawFile(path); this.drawProgress();
     }
-    navOrder() { return this.fileOrder && this.fileOrder.length ? this.fileOrder : this.report.files.map((f) => f.path); }
+    navOrder() { return this.fileOrder && this.fileOrder.length ? this.fileOrder : this.report.files.slice().sort(byRisk).map((f) => f.path); }
     stepFile(delta) {
       const order = this.navOrder();
       if (!order.length) return;
@@ -2039,7 +2064,13 @@
       for (const f of r.findings) if (counts[f.severity] !== undefined) counts[f.severity]++;
       const prot = r.files.filter((f) => f.scope === "protected").length, out = r.files.filter((f) => f.scope === "out-of-scope").length;
       this.statsEl.innerHTML = "";
-      put(this.statsEl, stat(s.files, "files touched", "modified"), stat(s.components, "components touched"),
+      const risk = r.risk;
+      const riskStat = risk && risk.path ? h("div", { class: "stat risk " + ({ high: "removed", medium: "modified" }[risk.level] || ""), role: "button", tabindex: "0",
+        title: `${risk.summary}${(risk.notes || []).length ? "\n" + risk.notes.join("\n") : ""}\nClick to open that file.`,
+        onclick: () => this.selectFile(risk.path), onkeydown: (ev) => { if (ev.key === "Enter") this.selectFile(risk.path); } },
+        h("div", { class: "value" }, RISK_ICON[risk.level] ? [iconEl(RISK_ICON[risk.level]), " "] : null, `${risk.level} · ${risk.score}`),
+        h("div", { class: "label", text: `wave risk · ${risk.path.split("/").pop()}` })) : null;
+      put(this.statsEl, riskStat, stat(s.files, "files touched", "modified"), stat(s.components, "components touched"),
         stat(`+${s.lines_added} / −${s.lines_removed}`, "lines"), stat(s.symbols_changed, "functions / classes changed"),
         stat(prot, "protected files touched", prot ? "removed" : ""), stat(out, "files outside scope", out ? "modified" : ""),
         stat(counts.high, "high-severity signals", counts.high ? "removed" : ""), stat(counts.medium, "medium signals", counts.medium ? "modified" : ""),
@@ -2255,6 +2286,7 @@
         table([
           { key: "reviewed", label: "✓", sort: (f) => (this.isReviewed(f) ? 1 : 0), render: (f) => this.isReviewed(f) ? h("span", { class: "reviewed-mark", title: "reviewed" }, iconEl("check"))
             : this.reviewed[f.path] ? h("span", { class: "faint", title: "changed since you reviewed it", text: "↻" }) : "" },
+          { key: "risk", label: "Risk", sort: (f) => -((f.risk || {}).score || 0), render: (f) => f.risk ? h("span", { class: "risk-cell", title: riskFactorsText(f.risk) }, riskPill(f.risk)) : "" },
           { key: "path", label: "File", render: (f) => f.kind === "submodule" ? h("span", { class: "mono", title: "Git submodule" }, iconEl("link"), " " + f.path) : h("span", { class: "mono", text: f.path }) },
           { key: "status", label: "Change", render: (f) => statusPill(f.status) || pill("modified", "modified") },
           { key: "scope", label: "Scope", render: (f) => scopePill(f.scope) || h("span", { class: "faint", text: "–" }), sort: (f) => ({ protected: 0, "out-of-scope": 1, unscoped: 2, allowed: 3 })[f.scope] },
@@ -2299,6 +2331,9 @@
           : [h("button", { class: "btn small", onclick: () => this.setReviewed(f.path, true) }, "✓ Mark reviewed"),
             h("button", { class: "btn small primary", title: "Mark reviewed and open the next unreviewed file (m)", onclick: () => this.setReviewed(f.path, true, true) }, "✓ Reviewed & next ›")]));
       put(this.fileEl, h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
+        f.risk ? h("details", { class: "risk-factors", open: f.risk.level !== "low" },
+          h("summary", null, "Risk ", riskPill(f.risk), " ", h("span", { class: "faint", text: f.risk.factors.length ? f.risk.factors[0].text : "no risk factor" })),
+          f.risk.factors.length ? h("ul", { class: "plain" }, f.risk.factors.map((x) => h("li", null, h("span", { class: "mono", text: `+${x.points}` }), " " + x.text))) : null) : null,
         h("div", { class: "muted", text: [f.previous_path ? "↦ moved from " + f.previous_path : null, f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
         h("div", { class: "group actions" },
           h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, iconEl("lock"), " Should not be touched"),
@@ -2468,7 +2503,7 @@
         { ol: [
           "**Before the agent starts, open a work session and agree the scope.** Run `repoviz session start --label \"wave 3: billing\" --allow \"src/billing/**\" --protect \"src/auth/**\"`. In the live app you can also use **Start session** on the Activity & Flow tab. The session records the current state, including files that are already modified, so only the agent's work is reviewed.",
           "**While it works, watch Activity & Flow.** It shows the live app's files as they change, their impact and the entry points and tests that reach them.",
-          "**When it stops, open AI Review.** Read the map (where it went), triage the signals (high first), then walk the changed files with `j` / `k` and mark each one reviewed with `m`.",
+          "**When it stops, open AI Review.** Check the wave risk, read the map (where it went), triage the signals (high first), then walk the changed files, riskiest first, with `j` / `k` and mark each one reviewed with `m`.",
           "**Tell the agent.** Leave notes on signals, files or diff lines, then **Copy prompt** and paste the numbered feedback back to the agent.",
           "**Close the wave.** `repoviz session end` freezes the end state, so you can review that wave again later from the review list.",
         ] },
@@ -2493,7 +2528,8 @@
           "**✓ Not an issue** dismisses a signal. **→ Send to agent** adds it to the feedback. **✎ Note…** lets you write your own instruction.",
           "The most valuable signals: removed functions still called, signatures changed while callers were not updated, broken imports, new code that is not wired in (a router never registered, a module nothing imports), a usual companion change that is missing (a file that almost always changes with this one), disabled tests, secrets, and scope violations."] },
         { h: "5. Walk the files" },
-        { ul: ["The file table is sorted with signals first. Click a row or press `j` / `k` to move through files.",
+        { ul: ["The file table is sorted by **risk**, riskiest first; click a column header to sort another way (your choice is kept). Click a row or press `j` / `k` to move through files in the table's order.",
+          "**Risk** is a score from 0 to 100 with a level (*high*, *medium*, *low*), shown as an icon, a number and a word. Hover it, or open the file, to see each factor and its points: the most severe signal, how many places call the changed code, the entry points reaching it, missing or stale tests, a protected or sensitive path, a churn hotspot and the size of the change. The **wave risk** badge at the top is the riskiest file; click it to open that file. Weights are set in `[review.risk]`.",
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
           "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file."] },
@@ -2503,7 +2539,7 @@
           "Notes you take while looking at one commit still go to the wave's feedback prompt. *Changed, then changed back* flags files a commit changed and a later one restored."] },
         { h: "6. Send feedback" },
         { ul: ["**Feedback for the agent** turns your notes into a numbered, `file:line`-referenced prompt grouped as Revert / Fix / Complete / Improve / Answer.",
-          "Optionally include untriaged signals at or above a severity, then **Copy prompt** or **Download .md**.",
+          "Optionally include untriaged signals at or above a severity (the prompt then also lists the riskiest files, medium or high, to double-check), then **Copy prompt** or **Download .md**.",
           "In the live app, notes are saved in the state directory (shared with `repoviz review --format prompt`). In a static report they stay in your browser."] },
       ] },
     { id: "changes", title: "Changes", icon: "diff", tab: "changes", intro: "Compare two states of the repository and see what changed architecturally: modules, dependencies and cycles.",
@@ -2564,7 +2600,7 @@
       ] },
     { id: "keys", title: "Keyboard shortcuts", icon: "keyboard", intro: "Shortcuts are ignored while you type in a field.",
       blocks: [
-        { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file (AI Review)"],
+        { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file, in the table's order (AI Review: riskiest first)"],
           ["m", "mark the open file reviewed and go to the next unreviewed one (AI Review)"], ["[ / ]", "previous / next commit of the wave; past either end shows the whole wave (AI Review)"], ["Ctrl+Enter", "apply the scope boxes (AI Review)"],
           ["arrows, + / -, 0", "pan, zoom and fit a focused diagram"], ["Enter", "open the focused table row or diagram node"]] },
       ] },

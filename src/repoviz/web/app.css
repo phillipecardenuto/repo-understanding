@@ -101,6 +101,8 @@ main { padding: 14px 16px 40px; }
 .stat.removed { border-left: 4px dashed var(--removed); }
 .stat.modified { border-left: 4px solid var(--modified); }
 .stat.cycle { border-left: 4px dashed var(--cycle); }
+.stat.risk { cursor: pointer; }
+.stat.risk:hover, .stat.risk:focus-visible { border-color: var(--accent); }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
 .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
@@ -173,6 +175,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 ul.plain { list-style: none; margin: 0; padding: 0; }
 ul.plain li { padding: 3px 0; border-bottom: 1px dashed var(--border); overflow-wrap: anywhere; }
 ul.plain li:last-child { border-bottom: 0; }
+.risk-factors { margin: 4px 0 8px; }
+.risk-factors summary { cursor: pointer; }
+.risk-factors ul.plain { margin: 4px 0 0 16px; }
+.risk-cell { white-space: nowrap; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 10px; font-size: 13px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }

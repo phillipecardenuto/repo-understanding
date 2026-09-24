@@ -414,6 +414,10 @@ def cmd_review(args: argparse.Namespace) -> int:
     from .review import (SEVERITY_ORDER, build_review, feedback_markdown, format_review_text, resolve_target,
                          review_targets, scope_for)
 
+    bad = [c for c in args.fail_on if c.startswith("risk:") and c not in ("risk:high", "risk:medium")]
+    if bad:
+        print(f"repoviz: unknown --fail-on condition {bad[0]!r} (use risk:high or risk:medium)", file=sys.stderr)
+        return EXIT_ERROR
     repo = _open(args)
     if args.list:
         for t in review_targets(repo):
@@ -450,6 +454,10 @@ def cmd_review(args: argparse.Namespace) -> int:
             key = "protected" if cond == "protected" else "out_of_scope"
             if report["summary"][key]:
                 failed.append(f"{report['summary'][key]} {cond} file(s)")
+        elif cond.startswith("risk:"):
+            risk = report["risk"]
+            if risk["level"] == "high" or (cond == "risk:medium" and risk["level"] == "medium"):
+                failed.append(f"wave risk is {risk['level']} ({risk['score']}/100, {risk['path']})")
         elif any(f["kind"] == cond for f in report["findings"]):
             failed.append(f"finding '{cond}' present")
     if failed:
@@ -464,6 +472,14 @@ def format_review_markdown(report: dict[str, Any]) -> str:
              f"`{report['base']['label']}` → `{report['head']['label']}` · {s['files']} files · "
              f"{s['components']} components · +{s['lines_added']} −{s['lines_removed']} · "
              + (", ".join(f"{v} {k}" for k, v in s["findings"].items() if v) or "no findings"), ""]
+    risk = report.get("risk") or {}
+    if risk.get("path"):
+        lines += [f"**Risk: {risk['level']} ({risk['score']}/100)**, because of `{risk['path']}`.", "",
+                  "| Risk | File | Why |", "|---:|---|---|"]
+        for t in risk["top"]:
+            why = "; ".join(t["factors"]).replace("|", "\\|") or "–"
+            lines.append(f"| {t['score']} {t['level']} | `{t['path']}` | {why} |")
+        lines.append("")
     lines += ["| Component | Files | +/− | Scope | Findings |", "|---|---:|---:|---|---|"]
     for c in report["components"]:
         scope = ", ".join(f"{v} {k}" for k, v in c["scope"].items())
@@ -604,7 +620,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-commit", action="store_true", help="text output: files and signals grouped by commit")
     p.add_argument("--fail-on", action="append", default=[], metavar="CONDITION",
                    help="exit 3 when: high | medium | low (findings at or above), protected, out-of-scope, "
-                   "or a finding kind such as new-cycle; repeatable")
+                   "risk:high | risk:medium (wave risk at or above), or a finding kind such as new-cycle; "
+                   "repeatable")
     p.set_defaults(func=cmd_review)
     return parser
 

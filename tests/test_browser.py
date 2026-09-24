@@ -405,3 +405,30 @@ def test_commit_view_failures_and_reviewed_marks(page, make_repo) -> None:
         page.wait_for_function("() => document.querySelector('#tab-review').innerText.includes('Could not review this commit')", timeout=30_000)
     finally:
         srv.shutdown()
+
+
+def test_review_orders_files_by_risk(page, make_repo, tmp_path: Path) -> None:
+    from test_review import RISK_APP, risk_wave
+
+    repo = make_repo(RISK_APP)
+    risk_wave(repo)
+    report = tmp_path / "risk.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    badge = page.locator("#tab-review .stat.risk")
+    assert "high · 42" in badge.inner_text() and "wave risk · tokens.py" in badge.inner_text()
+    assert badge.locator("i.rvi-alert-circle").count() == 1  # an icon and a word, not colour alone
+    rows = "Array.from(document.querySelectorAll('#tab-review .files-split > .card:not(.file-card) tbody tr')).map(r => r.cells[2].innerText.trim())"
+    assert page.evaluate(rows) == ["app/auth/tokens.py", "app/core.py", "README.md", "tests/test_auth.py"]
+    cell = page.locator("#tab-review .files-split > .card:not(.file-card) tbody tr >> nth=1").locator(".risk-cell")
+    assert cell.inner_text().strip() == "42 high" and "+9 called from 4 places" in cell.get_attribute("title")
+    page.keyboard.press("j")  # the riskiest file first
+    assert page.evaluate("repoviz.app.tabs.review.selectedFile") == "app/auth/tokens.py"
+    assert "high signal: Protected area modified" in page.inner_text("#tab-review .risk-factors")
+    page.click("#tab-review .files-split th >> text=File")  # sort by path; the choice survives redraws
+    page.keyboard.press("m")
+    assert page.evaluate(rows) == ["README.md", "app/auth/tokens.py", "app/core.py", "tests/test_auth.py"]
+    badge.click()
+    assert page.evaluate("repoviz.app.tabs.review.selectedFile") == "app/auth/tokens.py"
+    assert page.errors == []  # type: ignore[attr-defined]
