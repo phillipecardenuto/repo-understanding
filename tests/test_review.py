@@ -949,3 +949,82 @@ def test_risk_hotspot_security_path_and_stale_tests(make_repo) -> None:
     assert "security-related path" in texts["app/auth/login.py"]
     assert "1 test file covers it; none was updated" in texts["app/auth/login.py"]
     assert not any(t.startswith("hotspot") for t in texts["app/auth/login.py"])
+
+
+# --------------------------------------------------------------------------- any branch against any branch (#35)
+
+
+def diverged_repo(make_repo):
+    """``main`` moved on (``g`` in a.py, a new c.py) after ``feature`` (adds b.py) and ``other`` (adds o.py) left
+    it; ``merged`` has nothing of its own."""
+    repo = make_repo({"app/__init__.py": "", "app/a.py": "def f():\n    return 1\n"})
+    repo.git("checkout", "-q", "-b", "feature")
+    repo.write({"app/b.py": "from app.a import f\n\n\ndef b():\n    return f()\n"}).commit("feature: add b")
+    repo.git("checkout", "-q", "-b", "other", "main")
+    repo.write({"app/o.py": "def o():\n    return 3\n"}).commit("other: add o")
+    repo.git("branch", "merged", "main")
+    repo.git("checkout", "-q", "main")
+    repo.write({"app/a.py": "def f():\n    return 1\n\n\ndef g():\n    return 2\n",
+                "app/c.py": "def c():\n    return 3\n"}).commit("main: add g and c")
+    return repo
+
+
+def test_branch_since_it_diverged_shows_only_its_own_work(make_repo) -> None:
+    repo = diverged_repo(make_repo)
+    r = Repository(repo.path)
+    target = resolve_target(r, base="main", target="feature", mode="merge-base")
+    assert target.key == "range:main...feature" and target.label.startswith("feature since it left main (merge base ")
+    report = build_review(r, target)
+    assert [f["path"] for f in report["files"]] == ["app/b.py"]  # main's newer g() and c.py are not "undone"
+    assert "public-api-removed" not in by_kind(report)
+    assert [c["subject"] for c in report["commits"]["items"]] == ["feature: add b"]
+    # The exact difference compares the trees: main's newer work shows up as removed by the branch.
+    exact = resolve_target(r, base="main", target="feature", mode="exact")
+    assert exact.key == "range:main..feature" and exact.label == "main → feature (exact difference)"
+    report = build_review(r, exact)
+    assert {f["path"]: f["status"] for f in report["files"]} == {
+        "app/a.py": "modified", "app/b.py": "added", "app/c.py": "removed"}
+    assert "public-api-removed" in by_kind(report)
+    # The CLI spec and the listed target share the key, so notes are shared.
+    for spec in ("main...feature", "range:main...feature"):
+        assert resolve_target(r, spec).key == "range:main...feature"
+    assert resolve_target(r, "main..feature").key == "range:main..feature"
+
+
+def test_any_two_branches_remote_ones_and_bad_input(make_repo) -> None:
+    import pytest
+
+    from repoviz.gitutil import GitError
+
+    repo = diverged_repo(make_repo)
+    repo.git("update-ref", "refs/remotes/origin/other", "other")  # a branch only known from the remote
+    r = Repository(repo.path)
+    for base, target in (("feature", "other"), ("origin/other", "feature")):
+        report = build_review(r, resolve_target(r, base=base, target=target, mode="merge-base"))
+        assert [f["path"] for f in report["files"]] == ["app/o.py" if target == "other" else "app/b.py"]
+    with pytest.raises(GitError, match="unknown revision"):
+        resolve_target(r, base="main", target="nope", mode="merge-base")
+    with pytest.raises(ValueError, match="needs a branch, tag or commit"):
+        resolve_target(r, base="WORKTREE", target="feature", mode="merge-base")
+    with pytest.raises(ValueError, match="unknown comparison mode"):
+        resolve_target(r, base="main", target="feature", mode="sideways")
+    with pytest.raises(GitError):
+        resolve_target(r, base="--output=/tmp/x", target="feature", mode="merge-base")  # never an option
+
+
+def test_recent_unmerged_branches_are_review_targets(make_repo) -> None:
+    repo = diverged_repo(make_repo)
+    repo.git("update-ref", "refs/remotes/origin/feature", "feature")  # the local branch stands for it
+    repo.git("update-ref", "refs/remotes/origin/agent-x", "other")  # only known from the remote (a fresh clone)
+    repo.git("update-ref", "refs/remotes/origin/HEAD", "main")
+    targets = {t.id: t for t in review_targets(Repository(repo.path))}
+    branches = {i: t for i, t in targets.items() if t.kind == "branch"}
+    # Not main, not the merged branch, not a remote copy of a local branch.
+    assert set(branches) == {"range:main...feature", "range:main...other", "range:main...origin/agent-x"}
+    assert branches["range:main...feature"].label == "Branch feature vs main (since merge base)"
+    assert branches["range:main...feature"].description == "1 commit(s) not in main"
+    report = build_review(Repository(repo.path), resolve_target(Repository(repo.path), "range:main...other"))
+    assert [f["path"] for f in report["files"]] == ["app/o.py"]
+    repo.git("checkout", "-q", "feature")  # the current branch is already offered as "Branch feature vs main"
+    ids = [t.id for t in review_targets(Repository(repo.path))]
+    assert "branch" in ids and "range:main...feature" not in ids and "range:main...other" in ids

@@ -189,9 +189,10 @@ def comparison_payload(repo: Repository, comp: Comparison, index: int = 0, compa
 
 def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = None, include_activity: bool = True,
                  mode: str = "static", include_reviews: bool | None = None, max_reviews: int = 6,
-                 embed_snapshot: bool = True) -> dict[str, Any]:
+                 embed_snapshot: bool = True, extra_reviews: list[str] | None = None) -> dict[str, Any]:
     """Everything the web UI needs.  With ``embed_snapshot=False`` the (large) snapshot is left out, for callers
-    that serialize and cache it separately."""
+    that serialize and cache it separately.  ``extra_reviews`` are review specs (``main...feature``) to include
+    first, on top of the listed targets."""
     snapshot = repo.snapshot("WORKTREE", "working tree")
     if include_reviews is None:
         include_reviews = mode == "static"  # the live app fetches reviews on demand
@@ -226,10 +227,17 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
     reviews = []
     targets = []
     if include_reviews:
-        from ..review import build_review, review_targets
+        from ..review import build_review, resolve_target, review_targets
 
+        for spec in extra_reviews or []:
+            try:
+                targets.append(resolve_target(repo, spec))
+            except Exception as exc:
+                errors.append({"severity": "error", "code": "review-failed", "message": f"{spec}: {exc}",
+                               "analyzer": "report"})
         try:
-            targets = review_targets(repo)[:max_reviews]
+            listed = [t for t in review_targets(repo) if t.key not in {x.key for x in targets}]
+            targets += listed[:max_reviews]
         except Exception as exc:
             errors.append({"severity": "error", "code": "review-failed", "message": str(exc), "analyzer": "report"})
         for t in targets:

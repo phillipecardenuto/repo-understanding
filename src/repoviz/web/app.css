@@ -179,6 +179,8 @@ ul.plain li:last-child { border-bottom: 0; }
 .risk-factors summary { cursor: pointer; }
 .risk-factors ul.plain { margin: 4px 0 0 16px; }
 .risk-cell { white-space: nowrap; }
+.compare-field .group { flex-wrap: wrap; }
+.compare-note { max-width: 380px; font-size: 12.5px; line-height: 1.5; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 10px; font-size: 13px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }

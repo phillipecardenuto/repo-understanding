@@ -292,7 +292,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     comps = [] if args.no_default_comparisons else repo.default_comparisons()
     for spec in args.compare or []:
         comps.append(repo.resolve_comparison(spec=spec))
-    bundle = build_bundle(repo, comparisons=comps, include_activity=not args.no_activity)
+    bundle = build_bundle(repo, comparisons=comps, include_activity=not args.no_activity, extra_reviews=args.review)
     compress = True if args.compress else (False if args.no_compress else None)
     html = render_static_html(bundle, compress=compress)
     output = args.output or "repoviz-report.html"
@@ -565,6 +565,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-default-comparisons", action="store_true",
                    help="only include comparisons given with --compare")
     p.add_argument("--no-activity", action="store_true", help="omit the activity tab data")
+    p.add_argument("--review", action="append", default=[], metavar="SPEC",
+                   help="additional review for the AI Review tab, e.g. main...feature (feature since it left main) "
+                   "or main..feature (exact difference); repeatable")
     p.add_argument("--compress", action="store_true", help="always gzip the embedded data")
     p.add_argument("--no-compress", action="store_true", help="never gzip the embedded data")
     p.set_defaults(func=cmd_report)
@@ -603,9 +606,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("review", parents=[common], help="review what an AI agent changed (scope, findings, feedback)")
     p.add_argument("target", nargs="?", help="what to review: session (current), session:<id> (a past wave), all, "
-                   "branch, last-commit, or a comparison such as main...HEAD. Default: the current session, else "
+                   "branch, last-commit, or any two branches: main...feature (feature since it left main, like a "
+                   "pull request) or main..feature (exact difference). Default: the current session, else "
                    "uncommitted changes")
-    p.add_argument("--base", help="custom base revision")
+    p.add_argument("--base", help="custom base revision (exact difference with --head)")
     p.add_argument("--head", dest="head_rev", help="custom target revision")
     p.add_argument("--allow", action="append", default=[], metavar="GLOB", help="additional allowed path (repeatable)")
     p.add_argument("--protect", action="append", default=[], metavar="GLOB",

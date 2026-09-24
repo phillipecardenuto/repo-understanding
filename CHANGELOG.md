@@ -6,6 +6,26 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Review any branch against any other branch** ([#35](https://github.com/phillipecardenuto/repo-understanding/issues/35)).
+  - The AI Review tab gets a **compare any two branches** control. Base and
+    target suggest local and remote branches, tags, commits and the working
+    tree. It has a ⇄ swap and two modes:
+    - *since they diverged* (merge base, like a pull request; the default);
+    - *exact difference*.
+
+    The comparison is kept across reloads, and an unknown branch keeps the
+    current review on screen.
+  - The target list now includes recently updated branches with commits the
+    default branch lacks.
+  - Clear labels ("feature since it left main (merge base …)"), shared notes
+    between the app and `repoviz review main...feature`, and
+    `GET /api/review?...&mode=merge-base|exact`.
+  - `repoviz report --review SPEC` adds comparisons to a static report, and the
+    static page explains how to compare other branches.
+
+  Before this, the app's base/target boxes always compared the exact trees. On a
+  branch whose base had moved on, the base's newer work showed up as undone by
+  the branch.
 - **Explainable risk score per file and per wave** ([#5](https://github.com/phillipecardenuto/repo-understanding/issues/5)).
   - Every changed file gets a score from 0 to 100 and a level (high, medium,
     low), with each factor and its points: signal severity, callers of the

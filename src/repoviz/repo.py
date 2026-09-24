@@ -179,7 +179,7 @@ class Repository:
                 sha = self.git.merge_base(a, b_rev)
             except RevisionError as exc:
                 raise RepositoryError(str(exc)) from exc
-            return GitRevisionSource(self.git, sha, label=f"merge-base({a}, {b})")
+            return GitRevisionSource(self.git, sha, label=f"merge base of {a} and {b_rev} ({sha[:10]})")
         if rev.upper() == "HEAD" and self.git.head() is None:
             return EmptySource("HEAD (no commits yet)")
         try:
@@ -271,7 +271,7 @@ class Repository:
     def _label(spec: str) -> str:
         if spec.startswith("merge-base:"):
             _, a, b = spec.split(":", 2)
-            return f"merge-base({a}, {RevSpec.parse(b).label})"
+            return f"merge base of {a} and {'HEAD' if RevSpec.parse(b).kind != 'git' else b}"
         return RevSpec.parse(spec).label
 
     def diff(self, base: RepositorySnapshot, target: RepositorySnapshot) -> RepositoryDiff:

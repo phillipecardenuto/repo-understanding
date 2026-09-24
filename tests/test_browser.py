@@ -432,3 +432,63 @@ def test_review_orders_files_by_risk(page, make_repo, tmp_path: Path) -> None:
     badge.click()
     assert page.evaluate("repoviz.app.tabs.review.selectedFile") == "app/auth/tokens.py"
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_compare_any_two_branches_in_the_live_app(page, make_repo, tmp_path: Path) -> None:
+    from test_review import diverged_repo
+
+    repo = diverged_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base, target = "#tab-review input[aria-label='Base branch or revision']", "#tab-review input[aria-label='Target branch or revision']"
+    key_is = ("(k) => { const t = window.repoviz && repoviz.app && repoviz.app.tabs && repoviz.app.tabs.review;"
+              " return !!(t && t.report && t.report.target.key === k && !t.loading); }")
+    files = lambda: page.evaluate("repoviz.app.tabs.review.report.files.map(f => f.path).sort()")  # noqa: E731
+    shown = lambda: page.evaluate("document.querySelector('#tab-review select[aria-label=\"Review target\"]').selectedOptions[0].textContent")  # noqa: E731
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/")
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        suggestions = page.evaluate("Array.from(document.querySelectorAll('#rv-revs-review option')).map(o => o.value)")
+        assert {"main", "feature", "other", "WORKTREE"} <= set(suggestions)
+        page.fill(base, "feature")
+        page.fill(target, "main")
+        page.click("#tab-review button[aria-label='Swap base and target']")
+        assert (page.input_value(base), page.input_value(target)) == ("main", "feature")
+        page.click("#tab-review .compare-field >> text=Review")  # "since they diverged" by default
+        page.wait_for_function(key_is, arg="range:main...feature", timeout=30_000)
+        assert files() == ["app/b.py"] and shown().startswith("⇄ feature since it left main (merge base ")
+        page.select_option("#tab-review select[aria-label='How to compare']", "exact")
+        page.click("#tab-review .compare-field >> text=Review")
+        page.wait_for_function(key_is, arg="range:main..feature", timeout=30_000)
+        assert files() == ["app/a.py", "app/b.py", "app/c.py"] and shown() == "⇄ main → feature (exact difference)"
+        page.reload()  # the comparison, its mode and the boxes are kept
+        page.wait_for_function(key_is, arg="range:main..feature", timeout=60_000)
+        assert (page.input_value(base), page.input_value(target)) == ("main", "feature")
+        assert page.input_value("#tab-review select[aria-label='How to compare']") == "exact"
+        page.fill(target, "no-such-branch")  # an unknown branch keeps the current review on screen
+        page.click("#tab-review .compare-field >> text=Review")
+        page.wait_for_function("() => document.querySelector('#tab-review [role=status]').textContent.includes('Could not compare')", timeout=30_000)
+        assert "unknown revision" in page.inner_text("#tab-review [role=status]")
+        assert page.evaluate("repoviz.app.tabs.review.report.target.key") == "range:main..feature"
+        page.select_option("#tab-review select[aria-label='Review target']", "range:main...other")  # a listed branch
+        page.wait_for_function(key_is, arg="range:main...other", timeout=30_000)
+        assert files() == ["app/o.py"] and shown() == "Branch other vs main (since merge base)"
+        assert page.locator("#tab-review select[aria-label='Review target'] option[value='__compare__']").count() == 0
+        assert [e for e in page.errors if "status of 400" not in e] == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+
+
+def test_static_report_says_how_to_compare_branches(page, make_repo, tmp_path: Path) -> None:
+    from test_review import diverged_repo
+
+    repo = diverged_repo(make_repo)
+    report = tmp_path / "branches.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path), extra_reviews=["main...feature"])), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    note = page.inner_text("#tab-review .compare-note")
+    assert "repoviz serve" in note and "repoviz report --review main...feature" in note
+    assert page.evaluate("repoviz.app.tabs.review.report.target.key") == "range:main...feature"  # precomputed first
+    assert page.evaluate("repoviz.app.tabs.review.report.files.map(f => f.path)") == ["app/b.py"]
+    assert page.errors == []  # type: ignore[attr-defined]

@@ -83,8 +83,8 @@ The default comparison is **HEAD vs the working tree**. `SPEC` accepts:
 | `staged` | HEAD vs index: staged changes only |
 | `unstaged` | index vs working tree (tracked files): unstaged changes only |
 | `session` | session baseline vs working tree |
-| `A..B` | commit, branch or tag vs another one, e.g. `v1.0..v2.0`, `main..feature` |
-| `A...B` | merge base of A and B vs B, e.g. `main...` = changes since branching from main |
+| `A..B` | exact difference between two commits, branches or tags, e.g. `v1.0..v2.0`, `main..feature` |
+| `A...B` | what B added since it left A (merge base of A and B vs B, like a pull request), e.g. `main...feature`; `main...` = the working tree since it left main |
 | `A` | revision A vs working tree |
 
 Special revisions are `WORKTREE`, `WORKTREE-TRACKED`, `INDEX` (or `STAGED`),
@@ -95,7 +95,10 @@ straight from the object database, the index or the disk.
 ## The tabs
 
 **AI Review** (default). Pick the current work session, a past wave, the branch,
-the last commit or any range.
+the last commit or a recently updated branch, or **compare any two branches**
+(live app): local or remote branches, tags or commits, either *since they
+diverged* (what the target added since it left the base, like a pull request)
+or as the *exact difference* between the two trees.
 
 - **Scope:** set what the agent may change and what it must not touch.
 - **"Where the agent went" map:** touched components, packages or files, with
@@ -188,6 +191,7 @@ repoviz session start --label "wave 3: billing" --allow "src/billing/**" --prote
 repoviz review                          # where it went, scope violations, review signals
 repoviz review --format prompt          # numbered file:line feedback to paste back to the agent
 repoviz review --by-commit              # the same, step by step (the UI's Commits panel)
+repoviz review main...claude/feature    # any branch against any other, since it left main
 repoviz review --fail-on protected --fail-on high   # guardrail for scripted loops (exit 3)
 repoviz review --fail-on risk:high      # exit 3 when the wave risk is high
 repoviz session end                     # freezes the wave; later: repoviz review session:<id>

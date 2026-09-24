@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Iterable
 
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+_SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # a full SHA-1 or SHA-256 object ID
 
 
 class GitError(RuntimeError):
@@ -302,6 +303,29 @@ class Git:
     def branches(self) -> list[str]:
         out = self.try_run("for-each-ref", "--format=%(refname:short)", "refs/heads")
         return [b for b in (out or "").splitlines() if b]
+
+    def recent_branches(self, limit: int = 20) -> list[tuple[str, str]]:
+        """Branches as ``(name, commit)``, the most recently committed first: local ones, and remote-tracking ones
+        (``origin/feature``; a fresh clone often has nothing else) unless a local branch has the same name."""
+        out = self.try_run("for-each-ref", "--sort=-committerdate", f"--count={limit * 2}",
+                           "--format=%(refname)%09%(refname:short)%09%(objectname)", "refs/heads", "refs/remotes")
+        rows = [line.split("\t") for line in (out or "").splitlines() if line.count("\t") == 2]
+        local = {short for ref, short, _ in rows if ref.startswith("refs/heads/")}
+        result = []
+        for ref, short, sha in rows:
+            if not short or not _SHA.match(sha) or ref.endswith("/HEAD"):
+                continue
+            if ref.startswith("refs/remotes/") and short.split("/", 1)[-1] in local:
+                continue  # the local branch stands for it
+            result.append((short, sha))
+        return result[:limit]
+
+    def ahead_count(self, base_sha: str, tip_sha: str) -> int | None:
+        """Commits reachable from ``tip_sha`` but not from ``base_sha`` (full commit IDs only)."""
+        if not (_SHA.match(base_sha) and _SHA.match(tip_sha)):
+            return None
+        out = self.try_run("rev-list", "--count", "--end-of-options", f"{base_sha}..{tip_sha}")
+        return int(out.strip()) if out and out.strip().isdigit() else None
 
     def remote_branches(self) -> list[str]:
         out = self.try_run("for-each-ref", "--format=%(refname:short)", "refs/remotes")

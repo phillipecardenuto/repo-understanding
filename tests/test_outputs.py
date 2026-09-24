@@ -285,3 +285,33 @@ def test_coupling_cli(make_repo, capsys) -> None:
     assert main(["coupling", "--repo", repo.path, "--path", "app.py"]) == 0
     out = capsys.readouterr().out
     assert "6 commits together  app.py  (100% of its 6 commits)" in out and "schema.sql" in out
+
+
+def test_review_any_two_branches_over_the_api_and_in_reports(make_repo, tmp_path) -> None:
+    from test_review import diverged_repo
+
+    repo = diverged_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, body = request(srv, "GET", "/api/review?base=main&target=feature&mode=merge-base")
+        data = json.loads(body)
+        assert status == 200 and [f["path"] for f in data["files"]] == ["app/b.py"]
+        assert data["target"]["key"] == "range:main...feature" and "notes" in data
+        status, _, body = request(srv, "GET", "/api/review?base=main&target=feature&mode=exact")
+        assert status == 200 and len(json.loads(body)["files"]) == 3
+        status, _, body = request(srv, "GET", "/api/review?base=main&target=no-such-branch&mode=merge-base")
+        assert status == 400 and "unknown revision" in json.loads(body)["error"]
+        status, _, body = request(srv, "GET", "/api/review/targets")
+        assert {"range:main...feature", "range:main...other"} <= {t["id"] for t in json.loads(body)}
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    bundle = build_bundle(Repository(repo.path), extra_reviews=["feature...other", "main...nope"])
+    first = bundle["reviews"][0]
+    assert first["target"]["key"] == "range:feature...other" and [f["path"] for f in first["files"]] == ["app/o.py"]
+    assert any("main...nope" in e["message"] for e in bundle["errors"])  # reported, the report still builds
+    out = tmp_path / "branches.html"
+    assert main(["report", "-C", repo.path, "-o", str(out), "--no-compress", "--no-activity",
+                 "--review", "main...feature"]) == 0
+    assert "feature since it left main" in out.read_text(encoding="utf-8")

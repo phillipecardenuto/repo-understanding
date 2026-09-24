@@ -191,7 +191,7 @@ class AppState:
 
         try:
             target = resolve_target(self.repo, query.get("id") or None, query.get("base") or None,
-                                    query.get("target") or None)
+                                    query.get("target") or None, query.get("mode") or None)
             scope = scope_for(self.repo, target)
             commit = (query.get("commit") or "").strip() or None  # one step of the range, reviewed on its own
             sources = (self.repo.open_source(target.base), self.repo.open_source(target.target))

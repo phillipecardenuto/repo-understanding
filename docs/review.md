@@ -55,6 +55,34 @@ files already modified inside it, so earlier work is not attributed to the agent
 When the previous commit is not available locally (shallow clone) or the submodule
 is not checked out, the review says so instead of listing files.
 
+## Reviewing branches
+
+Agents often work on their own branches (`claude/…`, `feature/…`), sometimes
+several at once. You can review **any branch against any other branch**, like a
+pull request, without checking it out.
+
+- **Since they diverged** (`A...B`, the default in the app) reviews what `B`
+  added since it left `A`: the merge base of `A` and `B` against `B`. Work that
+  landed on `A` in the meantime is not shown.
+- **Exact difference** (`A..B`) compares the two trees as they are. If `A` moved
+  on after `B` was created, `A`'s newer work shows up as if `B` had undone it,
+  with the signals that go with it (for example `public-api-removed`). Use it to
+  compare two releases or tags.
+
+| Where | How |
+|---|---|
+| Target list | The current branch against the default branch, plus up to five other recently updated branches that have commits the default branch lacks, as "Branch X vs main (since merge base)". Remote-tracking branches count too (a fresh clone often has only `origin/…`), unless a local branch has the same name. Merged branches are left out. |
+| Review tab (live app) | **…or compare any two branches**: base and target boxes suggest local and remote branches, tags, recent commits, `HEAD`, `WORKTREE` and `INDEX`. **⇄** swaps them, and a menu picks *since they diverged* or *exact difference*. The comparison shows up as **⇄ …** in the target list and survives a reload. An unknown branch shows an error and keeps the current review. |
+| CLI | `repoviz review main...feature`, `repoviz review main..feature` or `--base A --head B` (exact). |
+| API | `GET /api/review?base=A&target=B&mode=merge-base` (or `mode=exact`). An unknown revision returns 400 with the reason. |
+| Static report | `repoviz report --review main...feature` (repeatable) adds that review and opens it first. Other comparisons need `repoviz serve`, and the page says so. |
+
+Commit by commit works on branch ranges too: the **Commits** panel lists the
+branch's own commits. Notes are keyed by the comparison (`range:main...feature`),
+so the app, the listed target and the CLI share them. Revisions are resolved with
+`git rev-parse --end-of-options`, so a name can never act as an option, and
+nothing is checked out.
+
 ## Scope
 
 The scope says which paths the agent was **allowed** to change and which it

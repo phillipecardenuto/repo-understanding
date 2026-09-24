@@ -1712,6 +1712,8 @@
       component_edges: (wave.component_edges || []).filter((e) => ids.has(e.source) && ids.has(e.target)) });
   }
 
+  const CUSTOM_TARGET = "__compare__";  // the target list entry for a comparison made with the compare boxes
+
   class ReviewTab {
     constructor(app, root) {
       this.app = app; this.root = root;
@@ -1726,7 +1728,10 @@
     get repoKey() { return this.app.bundle.snapshot.repository_id; }
     async init() {
       const app = this.app;
-      this.targetSelect = h("select", { "aria-label": "Review target", onchange: () => { this.opts.targetId = this.targetSelect.value; this.opts.targetPinned = true; this.save(); this.load(); } });
+      this.targetSelect = h("select", { "aria-label": "Review target", onchange: () => {
+        if (this.targetSelect.value === CUSTOM_TARGET) return;
+        this.opts.targetId = this.targetSelect.value; this.opts.targetPinned = true; this.opts.custom = null; this.save();
+        this.syncTargetSelect(); this.load(); } });
       this.allowedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/billing/**, tests/billing/**", "aria-label": "Allowed paths" });
       this.protectedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/auth/**, migrations/**", "aria-label": "Protected paths" });
       for (const input of [this.allowedInput, this.protectedInput]) {
@@ -1736,15 +1741,27 @@
       const bar = h("div", { class: "toolbar" },
         field("Review (feature / wave)", this.targetSelect));
       if (app.api.live) {
-        const base = h("input", { size: 12, placeholder: "base e.g. main", list: "rv-revs-review", "aria-label": "Base revision" });
-        const head = h("input", { size: 12, placeholder: "target e.g. WORKTREE", list: "rv-revs-review", "aria-label": "Target revision" });
-        const rev = app.bundle.revisions || {};
-        const dl = h("datalist", { id: "rv-revs-review" }, ["WORKTREE", "INDEX", "HEAD", ...(rev.branches || []), ...(rev.tags || [])].map((v) => h("option", { value: v })));
-        const go = () => { if (!base.value && !head.value) return; this.custom = { base: base.value.trim() || "HEAD", target: head.value.trim() || "WORKTREE" }; this.load(); };
-        for (const input of [base, head]) input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
-        put(bar, h("div", { class: "field" }, h("span", { text: "…or any range" }), h("div", { class: "group" }, base, head, dl,
-          h("button", { class: "btn", onclick: go }, "Review"),
+        // Compare any two branches (or tags, commits, the working tree), like a pull request by default.
+        const c = this.opts.custom || {};
+        this.revList = h("datalist", { id: "rv-revs-review" });
+        this.fillRevisions(app.bundle.revisions || {});
+        this.cmpBase = h("input", { size: 14, placeholder: "base, e.g. main", list: "rv-revs-review", "aria-label": "Base branch or revision", value: c.base || "" });
+        this.cmpTarget = h("input", { size: 14, placeholder: "target, e.g. feature", list: "rv-revs-review", "aria-label": "Target branch or revision", value: c.target || "" });
+        this.cmpMode = select([["merge-base", "since they diverged"], ["exact", "exact difference"]], c.mode || "merge-base", () => {});
+        this.cmpMode.setAttribute("aria-label", "How to compare");
+        this.cmpMode.title = "Since they diverged: only what the target added since it left the base (from their merge base), like a pull request.\nExact difference: the two trees as they are, so work that landed on the base since shows up as undone.";
+        for (const input of [this.cmpBase, this.cmpTarget]) {
+          input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") this.compare(); });
+          input.addEventListener("focus", () => this.refreshRevisions());
+        }
+        put(bar, h("div", { class: "field compare-field" }, h("span", { text: "…or compare any two branches" }), h("div", { class: "group" }, this.cmpBase,
+          h("button", { class: "btn small", title: "Swap base and target", "aria-label": "Swap base and target", onclick: () => { const b = this.cmpBase.value; this.cmpBase.value = this.cmpTarget.value; this.cmpTarget.value = b; } }, "⇄"),
+          this.cmpTarget, this.cmpMode, this.revList,
+          h("button", { class: "btn", onclick: () => this.compare() }, "Review"),
           h("button", { class: "btn", title: "Re-analyze the repository and keep your place (also happens when you come back to this tab)", onclick: () => this.refresh() }, "↻ Refresh"))));
+      } else {
+        put(bar, h("div", { class: "field" }, h("span", { text: "Compare any two branches" }), h("div", { class: "muted compare-note" },
+          "Needs the live app (", h("code", { text: "repoviz serve" }), "), or add one to this report with ", h("code", { text: "repoviz report --review main...feature" }), ".")));
       }
       this.saveScopeBtn = h("button", { class: "btn small", hidden: true, title: "Store this scope with the work session (used by the CLI too)", onclick: () => this.saveScopeToSession() }, "Save to session");
       this.resetScopeBtn = h("button", { class: "btn small", title: "Discard your edits and use the scope from the configuration / session", onclick: () => this.resetScope() }, "Reset");
@@ -1778,6 +1795,36 @@
       await this.loadTargets();
       await this.load();
     }
+    /* Suggestions for the compare boxes: special states, local and remote branches, tags and recent commits. */
+    fillRevisions(rev) {
+      const names = ["WORKTREE", "INDEX", "HEAD", ...(rev.branches || []), ...(rev.remote_branches || []), ...(rev.tags || []), ...(rev.commits || []).map((c) => c.short)];
+      this.revList.innerHTML = "";
+      for (const v of new Set(names)) this.revList.appendChild(h("option", { value: v }));
+      this.revisionsAt = Date.now();
+    }
+    async refreshRevisions() {
+      if (Date.now() - (this.revisionsAt || 0) < 10000) return;  // branches an agent created since the page loaded
+      this.revisionsAt = Date.now();
+      try { this.fillRevisions(await this.app.api.get("/api/revisions")); } catch (err) { /* keep the old suggestions */ }
+    }
+    /* Review the target box against the base box ("since they diverged" by default). */
+    compare() {
+      const base = this.cmpBase.value.trim(), target = this.cmpTarget.value.trim();
+      if (!base && !target) { this.statusEl.textContent = "Pick a base and a target branch (or any revision) to compare."; return; }
+      this.previousCustom = this.opts.custom || null;
+      this.opts.custom = { base: base || (this.app.bundle.revisions || {}).default_branch || "HEAD", target: target || "WORKTREE", mode: this.cmpMode.value };
+      this.save();
+      this.load();
+    }
+    /* The target list shows the custom comparison as its own entry while it is open. */
+    syncTargetSelect() {
+      const old = this.targetSelect.querySelector(`option[value="${CUSTOM_TARGET}"]`);
+      if (old) old.remove();
+      const c = this.app.api.live && this.opts.custom;
+      if (!c) { if (this.opts.targetId) this.targetSelect.value = this.opts.targetId; return; }
+      this.targetSelect.insertBefore(h("option", { value: CUSTOM_TARGET }, "⇄ " + (this.customLabel || `${c.target} vs ${c.base}`)), this.targetSelect.firstChild);
+      this.targetSelect.value = CUSTOM_TARGET;
+    }
     /* In the live app, coming back to this tab picks up new work (the server answers from cache when nothing changed). */
     activate() { if (this.app.api.live && this.report && !this.loading && Date.now() - (this.loadedAt || 0) > 2000) this.refresh(true); }
     async refresh(quiet) { await this.loadTargets(); await this.load(true, !quiet); }
@@ -1794,6 +1841,7 @@
         if (withChanges) this.opts.targetId = withChanges.target.id;
       }
       if (this.opts.targetId) this.targetSelect.value = this.opts.targetId;
+      this.syncTargetSelect();
     }
     /* `keep` reloads the same review and keeps the selection; `announce` reports "up to date" when nothing changed. */
     async load(keep, announce) {
@@ -1804,9 +1852,9 @@
       let r;
       try {
         if (app.api.live) {
+          const c = this.opts.custom;
           const params = prev && this.lastParams ? this.lastParams
-            : this.custom ? { base: this.custom.base, target: this.custom.target } : { id: this.opts.targetId || "" };
-          this.custom = null;
+            : c ? { base: c.base, target: c.target, mode: c.mode || "merge-base" } : { id: this.opts.targetId || "" };
           r = await app.api.get("/api/review?" + new URLSearchParams(params).toString());
           this.lastParams = params;
         } else {
@@ -1815,6 +1863,16 @@
       } catch (err) {
         this.loading = false;
         if (prev) { this.statusEl.textContent = "Refresh failed: " + err.message; return; }
+        if (app.api.live && this.opts.custom) {
+          // A comparison that cannot be made (unknown branch, no merge base…) keeps the current review on screen.
+          const msg = "Could not compare: " + err.message;
+          this.opts.custom = this.report ? this.previousCustom || null : null;
+          this.save(); this.syncTargetSelect();
+          if (this.report) { this.statusEl.textContent = msg; return; }
+          await this.load();
+          this.statusEl.textContent = msg;
+          return;
+        }
         this.statusEl.textContent = "";
         this.showEmpty("Review failed", err.message, true);
         return;
@@ -1838,6 +1896,7 @@
       this.allowedInput.value = scope.allowed.join(", ");
       this.protectedInput.value = scope.protected.join(", ");
       this.saveScopeBtn.hidden = !(app.api.live && r.target.session_id);
+      if (app.api.live && this.opts.custom && !prev) { this.customLabel = r.target.label; this.previousCustom = this.opts.custom; this.syncTargetSelect(); }
       this.statusEl.textContent = `${r.base.label} → ${r.head.label}` + (prev ? " · updated" : "");
       const paths = new Set(r.files.map((f) => f.path));
       this.selectedComponent = prev && r.components.some((c) => c.id === prev.comp) ? prev.comp : null;
@@ -2514,8 +2573,10 @@
     { id: "review", title: "AI Review", icon: "review", tab: "review", intro: "Supervise an agent's work: where it went, what looks wrong, what changed in each file, and the feedback to send back.",
       blocks: [
         { h: "1. Pick what to review" },
-        { ul: ["**Review (feature / wave)** lists the current session, past waves, uncommitted changes, the branch and the last commit. It opens the first one that has changes.",
-          "The live app also accepts any range: type a base and a target (e.g. `main` → `WORKTREE`) and press **Review**. **↻ Refresh** re-checks the repository and keeps your place. The tab also refreshes when you come back to it."] },
+        { ul: ["**Review (feature / wave)** lists the current session, uncommitted changes, the current branch, the last commit, past waves and other recently updated branches that have commits the default branch lacks (*Branch X vs main*). It opens the first one that has changes.",
+          "**Compare any two branches** (live app): pick a base and a target (local or remote branches, tags, commits, `WORKTREE`), swap them with **⇄** and press **Review**. *Since they diverged* (the default) shows only what the target added since it left the base, like a pull request. *Exact difference* compares the two trees as they are, so work that landed on the base in the meantime shows up as undone.",
+          "The comparison appears as **⇄ …** in the list and survives a reload; pick another entry to leave it. Notes are shared with `repoviz review main...feature`. A report can include one with `repoviz report --review main...feature`.",
+          "**↻ Refresh** re-checks the repository and keeps your place. The tab also refreshes when you come back to it."] },
         { h: "2. Set the scope first" },
         { ul: ["**Allowed to change** and **Must not touch** take globs such as `src/billing/**`. Every file is then marked *in scope*, *out of scope* or *protected*, and the matching signals appear.",
           "Press **Apply scope** (or Ctrl+Enter) to try a scope, and **Reset** to go back to the configured or session scope. In the live app, **Save to session** stores it for the CLI too.",

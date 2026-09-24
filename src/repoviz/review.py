@@ -31,6 +31,7 @@ from .activity import _ImpactIndex, _tests_affected, nodes_by_path
 from .config import DependencyRule
 from .diff import symbol_changes
 from .flow import affected_flow
+from .gitutil import GitError
 from .history import skip_companion
 from .ids import content_hash as _blob_hash
 from .ids import make_id, stable_hash
@@ -121,8 +122,71 @@ class ReviewTarget:
         return asdict(self)
 
 
+#: Ends of a comparison that are not commits, so they have no merge base.
+_NOT_COMMITS = ("WORKTREE", "WORKTREE-TRACKED", "INDEX", "EMPTY")
+MAX_BRANCH_TARGETS = 5
+
+
+def range_target(repo: "Repository", base: str | None, target: str | None, mode: str | None = None) -> ReviewTarget:
+    """Review ``target`` against ``base``: any two branches, tags, commits or the working tree.
+
+    ``mode="merge-base"`` reviews what ``target`` added since it left ``base``, like a pull request, so work that
+    landed on ``base`` in the meantime does not show up as reverted.  ``"exact"`` (the default) compares the two
+    trees as they are.  Both keep the key of the CLI spec (``range:A...B`` / ``range:A..B``), so notes are shared.
+    """
+    base = (base or "").strip() or "HEAD"
+    target = (target or "").strip() or "WORKTREE"
+    if mode not in (None, "", "exact", "merge-base"):
+        raise ValueError(f"unknown comparison mode {mode!r} (use merge-base or exact)")
+    if mode == "merge-base":
+        if repo.git is None:
+            raise ValueError("comparing since two revisions diverged needs a Git repository")
+        if base.upper() in _NOT_COMMITS or base.startswith(("SESSION", "merge-base:")):
+            raise ValueError(f"'since they diverged' needs a branch, tag or commit as the base, not {base!r}")
+        spec = f"{base}...{target}"
+        comp = repo.resolve_comparison(spec=spec)
+        fork = repo.git.merge_base(base, "HEAD" if target.upper() in _NOT_COMMITS else target)
+        label = f"{comp.target_label} since it left {base} (merge base {fork[:10]})"
+    else:
+        spec = f"{base}..{target}"
+        comp = repo.resolve_comparison(base, target)
+        label = comp.label + (" (exact difference)" if mode == "exact" else "")
+    return ReviewTarget(f"range:{spec}", label, comp.base, comp.target, "range", f"range:{spec}")
+
+
+def _branch_targets(repo: "Repository", default: str, current: str) -> list[ReviewTarget]:
+    """Recently updated local branches with commits the default branch lacks (open work, like pull requests).
+
+    Memoised on the state of the refs, since the review tab lists targets every time it is shown."""
+    git = repo.git
+    try:
+        default_sha = git.resolve(default)
+    except GitError:
+        return []
+    branches = git.recent_branches(20)
+    key = (default, default_sha, current, tuple(branches))
+    cached = repo.__dict__.get("_branch_targets")
+    if cached is not None and cached[0] == key:
+        return list(cached[1])
+    out: list[ReviewTarget] = []
+    for name, sha in branches:
+        if name in (current, default) or sha == default_sha:
+            continue
+        ahead = git.ahead_count(default_sha, sha)
+        if not ahead:
+            continue  # merged, or nothing of its own
+        out.append(ReviewTarget(f"range:{default}...{name}", f"Branch {name} vs {default} (since merge base)",
+                                f"merge-base:{default}:{name}", name, "branch", f"range:{default}...{name}",
+                                description=f"{ahead} commit(s) not in {default}"))
+        if len(out) >= MAX_BRANCH_TARGETS:
+            break
+    repo.__dict__["_branch_targets"] = (key, out)
+    return list(out)
+
+
 def review_targets(repo: "Repository", limit_sessions: int = 20) -> list[ReviewTarget]:
-    """Reviewable units of work: the active session, past waves, uncommitted work, the branch, the last commit."""
+    """Reviewable units of work: the active session, uncommitted work, the branch, the last commit, past waves
+    and other recent branches."""
     out: list[ReviewTarget] = []
     active = repo.current_session()
     if active is not None:
@@ -156,17 +220,18 @@ def review_targets(repo: "Repository", limit_sessions: int = 20) -> list[ReviewT
         out.append(ReviewTarget(f"session:{s.id}", f"Wave: {s.label or s.id} ({s.started_at[:16]} → "
                                 f"{(s.ended_at or '')[:16]})", f"SESSION@{s.id}", f"SESSION-END@{s.id}",
                                 "past-session", f"session:{s.id}", s.id))
+    default = repo.git_info().get("default_branch") if head else None
+    if default:
+        out += _branch_targets(repo, default, branch)
     return out
 
 
 def resolve_target(repo: "Repository", target_id: str | None = None, base: str | None = None,
-                   target: str | None = None) -> ReviewTarget:
+                   target: str | None = None, mode: str | None = None) -> ReviewTarget:
+    """A listed target (by id), a past wave (``session:<id>``), a comparison spec (``A...B``, ``A..B``, a
+    preset or one revision), or ``base`` / ``target`` with a ``mode`` (see :func:`range_target`)."""
     if base or target:
-        base = base or "HEAD"
-        target = target or "WORKTREE"
-        comp = repo.resolve_comparison(base, target)
-        return ReviewTarget(f"range:{base}..{target}", comp.label, comp.base, comp.target, "range",
-                            f"range:{base}..{target}")
+        return range_target(repo, base, target, mode)
     targets = review_targets(repo)
     if target_id is None:
         if not targets:
@@ -186,6 +251,13 @@ def resolve_target(repo: "Repository", target_id: str | None = None, base: str |
                                 "past-session", target_id, s.id)
     from .repo import parse_comparison
 
+    spec = target_id[len("range:"):] if target_id.startswith("range:") else target_id
+    if "..." in spec:
+        a, _, b = spec.partition("...")
+        return range_target(repo, a, b, "merge-base")
+    if ".." in spec:
+        a, _, b = spec.partition("..")
+        return range_target(repo, a, b)
     b, t, _mode = parse_comparison(target_id)
     comp = repo.resolve_comparison(b, t)
     return ReviewTarget(target_id, comp.label, comp.base, comp.target, "range", f"range:{target_id}")

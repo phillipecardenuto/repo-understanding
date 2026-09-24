@@ -30,8 +30,8 @@ Labels:
 
 ## The list
 
-**Status:** 5 items done (#2, #3, #4, #5, #6), which completes the core agent
-review group; #19 is not planned. The tracking issue
+**Status:** 6 items done (#2, #3, #4, #5, #6, and #35, added later from user
+feedback), which completes the core agent review group; #19 is not planned. The tracking issue
 [#1](https://github.com/phillipecardenuto/repo-understanding/issues/1) is always up to date.
 
 ### Supervising AI agents
@@ -53,6 +53,7 @@ review group; #19 is not planned. The tracking issue
 | [#14](https://github.com/phillipecardenuto/repo-understanding/issues/14) | Constant and configuration value changes, before → after | P2 | S |
 | [#15](https://github.com/phillipecardenuto/repo-understanding/issues/15) | Submodule edge cases: fetch hint for missing history, nested submodules | P3 | S |
 | [#20](https://github.com/phillipecardenuto/repo-understanding/issues/20) | Standing guidance on components, exported as agent context | P3 | S |
+| [#35](https://github.com/phillipecardenuto/repo-understanding/issues/35) | Review any branch against any other branch (since they diverged, or exact) · **✓ done** | P1 | M |
 
 ### Architecture rules and integrations
 
