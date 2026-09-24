@@ -30,15 +30,18 @@ Labels:
 
 ## The list
 
+**Status:** 3 items done (#2, #4, #6); #19 is not planned. The tracking issue
+[#1](https://github.com/phillipecardenuto/repo-understanding/issues/1) is always up to date.
+
 ### Supervising AI agents
 
 | # | Item | Priority | Size |
 |---|---|---|---|
-| [#2](https://github.com/phillipecardenuto/repo-understanding/issues/2) | Review a wave commit by commit (commits panel and per-commit filter) | P1 | M |
+| [#2](https://github.com/phillipecardenuto/repo-understanding/issues/2) | Review a wave commit by commit (commits panel and per-commit filter) · **✓ done** | P1 | M |
 | [#3](https://github.com/phillipecardenuto/repo-understanding/issues/3) | Detect renamed and moved symbols, files and submodules | P1 | L |
-| [#4](https://github.com/phillipecardenuto/repo-understanding/issues/4) | Signal new code that is not wired in | P1 | M |
+| [#4](https://github.com/phillipecardenuto/repo-understanding/issues/4) | Signal new code that is not wired in · **✓ done** | P1 | M |
 | [#5](https://github.com/phillipecardenuto/repo-understanding/issues/5) | Explainable risk score per file and per wave to order the review | P1 | M |
-| [#6](https://github.com/phillipecardenuto/repo-understanding/issues/6) | Change coupling from Git history, and a missed-companion signal | P1 | M |
+| [#6](https://github.com/phillipecardenuto/repo-understanding/issues/6) | Change coupling from Git history, and a missed-companion signal · **✓ done** | P1 | M |
 | [#7](https://github.com/phillipecardenuto/repo-understanding/issues/7) | Checkpoints and an edit timeline inside a wave (agent-hook recipe) | P2 | M |
 | [#8](https://github.com/phillipecardenuto/repo-understanding/issues/8) | Expected changes: compare the agent's plan with what it changed | P2 | M |
 | [#9](https://github.com/phillipecardenuto/repo-understanding/issues/9) | Blocking review, structured verdict and a review-complete gate | P2 | M |
@@ -57,7 +60,7 @@ Labels:
 | [#16](https://github.com/phillipecardenuto/repo-understanding/issues/16) | Architecture contracts (layers, independence, public interfaces, acyclic) with a known-violations baseline | P1 | L |
 | [#17](https://github.com/phillipecardenuto/repo-understanding/issues/17) | CI: SARIF, GitHub annotations, a PR comment with a Mermaid diagram, a reusable Action | P2 | M |
 | [#18](https://github.com/phillipecardenuto/repo-understanding/issues/18) | Read-only MCP server: agents ask about architecture, impact and scope before editing | P2 | M |
-| [#19](https://github.com/phillipecardenuto/repo-understanding/issues/19) | Export architecture docs and other diagram formats (C4/PlantUML, Structurizr, draw.io) | P3 | M |
+| [#19](https://github.com/phillipecardenuto/repo-understanding/issues/19) | Export architecture docs and other diagram formats (C4/PlantUML, Structurizr, draw.io) · *not planned* | P3 | M |
 
 ### Project and system awareness
 
@@ -91,11 +94,11 @@ Labels:
 ## Suggested order
 
 1. **Core agent review:**
-   - #2 (commits);
-   - #4 (unwired code);
+   - #2 (commits), done;
+   - #4 (unwired code), done;
    - #3 (renames);
    - #5 (risk);
-   - #6 (co-change).
+   - #6 (co-change), done.
 
    These change the most for someone reviewing agent waves every day, and they
    have no prerequisites.
