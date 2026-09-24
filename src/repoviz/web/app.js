@@ -180,6 +180,8 @@
     graph: ["#4f46e5", "#a5b4fc", "M20.5 5a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z", "M8.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z", "M20.5 19a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z", "m8.2 10.8 7.6-4.4", "m8.2 13.2 7.6 4.4"],
     pulse: ["#4f46e5", "#a5b4fc", "M3 12h4l3-8 4 16 3-8h4"],
     moon: ["#4f46e5", "#a5b4fc", "M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"],
+    keyboard: ["#4f46e5", "#a5b4fc", "M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z", "M7 10h1", "M11 10h1", "M15 10h1", "M8 14h8"],
+    help: ["#4f46e5", "#a5b4fc", CIRCLE, "M9.6 9.3a2.5 2.5 0 0 1 4.9.7c0 1.7-2.5 2.2-2.5 3.8", "M12 17h.01"],
   };
   function iconSvg(name) {
     const paths = ICONS[name].slice(2).map((d) => {
@@ -2330,6 +2332,223 @@
     }
   }
 
+  // ================================================================== HELP
+  /* In-app guide.  Text supports `code` and **bold**; everything is rendered with textContent (no HTML). */
+  const HELP = [
+    { id: "start", title: "Recommended workflow", icon: "play", intro: "repoviz is built to supervise AI coding agents feature by feature (\"waves\"). The loop below gets the most out of it.",
+      blocks: [
+        { ol: [
+          "**Before the agent starts, open a work session and agree the scope.** Run `repoviz session start --label \"wave 3: billing\" --allow \"src/billing/**\" --protect \"src/auth/**\"`. In the live app you can also use **Start session** on the Activity & Flow tab. The session records the current state, including files that are already modified, so only the agent's work is reviewed.",
+          "**While it works, watch Activity & Flow.** It shows the live app's files as they change, their impact and the entry points and tests that reach them.",
+          "**When it stops, open AI Review.** Read the map (where it went), triage the signals (high first), then walk the changed files with `j` / `k` and mark each one reviewed with `m`.",
+          "**Tell the agent.** Leave notes on signals, files or diff lines, then **Copy prompt** and paste the numbered feedback back to the agent.",
+          "**Close the wave.** `repoviz session end` freezes the end state, so you can review that wave again later from the review list.",
+        ] },
+        { tip: "Use **Changes** and **Dependencies** to judge the architectural impact of a wave, and **Structure** to learn a repository you don't know yet." },
+        { h: "Without sessions" },
+        { p: "You can still review uncommitted changes, the last commit, a branch since it left the default branch, or any range (`main...HEAD`, `v1..v2`)." },
+      ] },
+    { id: "review", title: "AI Review", icon: "review", tab: "review", intro: "Supervise an agent's work: where it went, what looks wrong, what changed in each file, and the feedback to send back.",
+      blocks: [
+        { h: "1. Pick what to review" },
+        { ul: ["**Review (feature / wave)** lists the current session, past waves, uncommitted changes, the branch and the last commit. It opens the first one that has changes.",
+          "The live app also accepts any range: type a base and a target (e.g. `main` → `WORKTREE`) and press **Review**. **↻ Refresh** re-checks the repository and keeps your place. The tab also refreshes when you come back to it."] },
+        { h: "2. Set the scope first" },
+        { ul: ["**Allowed to change** and **Must not touch** take globs such as `src/billing/**`. Every file is then marked *in scope*, *out of scope* or *protected*, and the matching signals appear.",
+          "Press **Apply scope** (or Ctrl+Enter) to try a scope, and **Reset** to go back to the configured or session scope. In the live app, **Save to session** stores it for the CLI too.",
+          "Protect shared or risky areas: authentication, migrations, CI, deployment and vendored modules or submodules."] },
+        { h: "3. Read the map" },
+        { ul: ["**Where the agent went** shows touched components (or packages or files; use **Map by**). A red, thick border marks a protected area; an orange one, changes outside the allowed scope.",
+          "Click a component to list its files. Click a file node to open its change card. Large changes are summarised in \"… N more\" nodes."] },
+        { h: "4. Triage signals" },
+        { ul: ["Signals are **heuristics that point your attention**, not proof of a bug. Filter by severity or category and start with *high*.",
+          "**✓ Not an issue** dismisses a signal. **→ Send to agent** adds it to the feedback. **✎ Note…** lets you write your own instruction.",
+          "The most valuable signals: removed functions still called, signatures changed while callers were not updated, broken imports, disabled tests, secrets, and scope violations."] },
+        { h: "5. Walk the files" },
+        { ul: ["The file table is sorted with signals first. Click a row or press `j` / `k` to move through files.",
+          "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
+          "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
+          "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file."] },
+        { h: "6. Send feedback" },
+        { ul: ["**Feedback for the agent** turns your notes into a numbered, `file:line`-referenced prompt grouped as Revert / Fix / Complete / Improve / Answer.",
+          "Optionally include untriaged signals at or above a severity, then **Copy prompt** or **Download .md**.",
+          "In the live app, notes are saved in the state directory (shared with `repoviz review --format prompt`). In a static report they stay in your browser."] },
+      ] },
+    { id: "changes", title: "Changes", icon: "diff", tab: "changes", intro: "Compare two states of the repository and see what changed architecturally: modules, dependencies and cycles.",
+      blocks: [
+        { h: "Choose the comparison" },
+        { kv: [["HEAD vs working tree", "everything not committed yet (staged, unstaged and untracked)"], ["Staged / unstaged", "only what is in the index, or only what is not"],
+          ["Current work session", "everything since the session started, including commits: the default when a session is active"],
+          ["Branch changes (merge base)", "what a branch changed since it left the default branch, like a pull request"], ["Custom", "any two revisions, e.g. `v1.2` → `HEAD`"]] },
+        { p: "Static reports offer the comparisons precomputed when the report was generated; the live app computes any of them on demand." },
+        { h: "Make the diagram readable" },
+        { ul: ["**Level**: *Auto* picks components, packages, modules or symbols for a readable size. Go down a level to see detail.",
+          "**Show**: *Changed only* is the tightest view. *Changed + neighbours* adds the direct context. *Everything* is for small graphs.",
+          "**Relationships**: keep imports and depends-on for architecture; add calls when working at symbol level.",
+          "**Hide formatting-only** skips files whose code did not change (whitespace or comments). **Group by component** draws components as boxes."] },
+        { h: "Dig into a change" },
+        { ul: ["Click a node or an edge label: the side panel explains *why* it changed and shows source evidence (file and line).",
+          "Below the diagram: new and removed dependencies, cycles introduced or resolved, and every changed node with the reason."] },
+        { tip: "A new **⟲ cycle** or a new dependency between components is usually the most important thing on this tab." },
+      ] },
+    { id: "structure", title: "Structure", icon: "tree", tab: "structure", intro: "Learn the project: its layout and components, and what repoviz discovered about it.",
+      blocks: [
+        { ul: ["The diagram starts at the repository root. **Double-click** a node (or use the breadcrumbs) to drill into a directory or package. **Depth** controls how many levels are shown.",
+          "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
+          "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
+          "Below the diagram, **Repository discovery** lists what was detected: languages, projects and workspaces, source and test roots, entry points, containers, CI, Git submodules and the analyzers that ran."] },
+        { tip: "If something looks wrong (a missing source root, tests counted as code, generated code analyzed), fix it once in `.repoviz.toml`. See `docs/configuration.md`." },
+        { p: "Analysis diagnostics at the bottom explain what could not be resolved (unsupported languages, unresolved imports, dynamic calls), so you know the limits of the picture." },
+      ] },
+    { id: "dependencies", title: "Dependencies", icon: "graph", tab: "dependencies", intro: "Explore who depends on whom, find dependency cycles, and focus on one part of the system.",
+      blocks: [
+        { ul: ["**Level**: project, component, package or module. Start high and go down.",
+          "**Focus** on a name to see its neighbourhood; **Depth** and **Direction** control it. *Dependents* answers \"what breaks if I change this?\"; *dependencies* answers \"what does this use?\".",
+          "**Include**: external packages, the standard library, tests and type-only imports can be switched on or off to reduce noise.",
+          "**Highlight cycles** draws dependency cycles in purple; **cycles only** shows nothing else. The Cycles card lists every cycle; click one to focus on it.",
+          "The fan-in / fan-out table ranks the most-used and most-dependent nodes, often the core and the riskiest modules."] },
+        { tip: "Before accepting a wave that adds a dependency, focus on its source and check the direction matches your layering (for example UI → service → data, never back)." },
+      ] },
+    { id: "activity", title: "Activity & Flow", icon: "pulse", tab: "activity", intro: "Watch work in progress: which files are changing now, what they affect, and which entry points and tests reach them.",
+      blocks: [
+        { ul: ["The **baseline** is the active work session, or `HEAD` when there is none. In the live app, **Start session** / **End session** and **auto-refresh** are here.",
+          "The **activity map** groups modified files by component; colours show added, modified or removed, and edges show new dependencies.",
+          "The **Modified files** table shows impact (new dependencies, cycles, public API changes), the tests that exercise each file, configuration changes and when each file was first and last seen changing.",
+          "**Affected flow** follows the static call graph from the changed code to the entry points (routes, CLIs, handlers) and tests that reach it: run those tests first."] },
+        { tip: "The flow is a static approximation: calls through dynamic dispatch, reflection or configuration are not resolved." },
+      ] },
+    { id: "diagrams", title: "Reading the diagrams", icon: "layers", intro: "Colours are never the only signal: every state also has a border style, a marker and a word.",
+      blocks: [
+        { kv: [["✚ added", "green fill, thick border"], ["✖ removed", "red fill, dashed border"], ["✎ modified", "amber fill, thick border"], ["unchanged", "neutral"],
+          ["+ new edge", "thick green arrow"], ["− removed edge", "red dashed"], ["~ evidence changed", "amber"], ["⟲ cycle", "purple dashed; *new cycle* when introduced"],
+          ["protected / out of scope", "thick dark-red / orange border (AI Review)"], ["dashed grey border", "external or structural-only (no dependency data)"]] },
+        { p: "Icons show the kind of each node: house (repository), package (component), folder (package or directory), code file (module), flask (tests), link (external or submodule), play (entry point), and so on. The Structure legend lists them all." },
+        { h: "Navigating" },
+        { ul: ["Drag to pan and scroll to zoom; **Fit** and **1:1** reset the view. With the diagram focused, arrows pan, `+` / `-` zoom and `0` fits.",
+          "**Find in diagram** highlights matching nodes.",
+          "**Copy** copies the Mermaid source, **SVG** downloads the picture (icons included) and **.mmd** downloads the source for documents or pull requests."] },
+      ] },
+    { id: "keys", title: "Keyboard shortcuts", icon: "keyboard", intro: "Shortcuts are ignored while you type in a field.",
+      blocks: [
+        { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file (AI Review)"],
+          ["m", "mark the open file reviewed and go to the next unreviewed one (AI Review)"], ["Ctrl+Enter", "apply the scope boxes (AI Review)"],
+          ["arrows, + / -, 0", "pan, zoom and fit a focused diagram"], ["Enter", "open the focused table row or diagram node"]] },
+      ] },
+    { id: "modes", title: "Live app and static report", icon: "terminal", intro: "The same interface works in two modes.",
+      blocks: [
+        { kv: [["Live app (`repoviz serve`)", "analyzes on demand: any revision or range, live activity with auto-refresh, sessions started from the UI, notes saved in the state directory"],
+          ["Static report (`repoviz report -o report.html`)", "one self-contained file that works offline: the comparisons and reviews computed when it was generated. Notes and review progress stay in your browser"]] },
+        { p: "Use the live app while you work with an agent; use a static report to share a review, attach it to a pull request or keep a record of a wave." },
+        { h: "Command line" },
+        { ul: ["`repoviz review --format prompt`: the feedback prompt, ready to paste.", "`repoviz review --fail-on protected --fail-on high`: exit code 3 on violations, for automation.",
+          "`repoviz session start|scope|status|end|list`: manage waves.", "`repoviz diff main...HEAD --format markdown`: a change summary for a pull request."] },
+      ] },
+    { id: "privacy", title: "Privacy and safety", icon: "lock", intro: "repoviz only reads.",
+      blocks: [
+        { ul: ["It never modifies the repository, the index or its history, and never runs the repository's code. Git runs with settings that stop a repository's own configuration from starting programs.",
+          "Credential-like values are redacted in excerpts and diffs. Static reports show your home directory as `~`.",
+          "The live server listens on 127.0.0.1 only and rejects requests from other web pages.",
+          "Sessions, observations and notes live in `~/.cache/repoviz` (or `REPOVIZ_STATE_DIR`), readable only by you."] },
+      ] },
+    { id: "trouble", title: "Troubleshooting", icon: "alert", intro: "Common situations and what to do.",
+      blocks: [
+        { kv: [["\"Nothing to review\"", "the tree is clean: start a session before the agent works, or pick the branch or last commit in the review list"],
+          ["A submodule shows only a commit", "it is not checked out (`git submodule update --init`), or the old commit is missing from a shallow clone; fetch more history to see its files"],
+          ["Diagram too small or crowded", "lower the level, use *Changed only*, focus on a name or reduce max nodes"],
+          ["Slow on WSL", "repositories under `/mnt/c` are slow to scan; clone them into the Linux home directory instead"],
+          ["Unresolved imports", "set `source_roots` in `.repoviz.toml` when the layout is unusual (see `docs/configuration.md`)"]] },
+      ] },
+  ];
+  const TAB_HELP = Object.fromEntries(HELP.filter((s) => s.tab).map((s) => [s.tab, s]));
+
+  /* `code` and **bold** inside help text, rendered as elements (never as HTML). */
+  function richText(text) {
+    const out = [];
+    for (const part of String(text).split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/)) {
+      if (!part) continue;
+      if (part.startsWith("`")) out.push(h("code", { text: part.slice(1, -1) }));
+      else if (part.startsWith("**")) out.push(h("b", { text: part.slice(2, -2) }));
+      else if (part.startsWith("*") && part.length > 2) out.push(h("em", { text: part.slice(1, -1) }));
+      else out.push(part);
+    }
+    return out;
+  }
+  function helpBlock(b) {
+    if (b.h) return h("h4", { text: b.h });
+    if (b.p) return h("p", null, richText(b.p));
+    if (b.tip) return h("div", { class: "help-tip" }, iconEl("check"), " ", richText(b.tip));
+    if (b.ul) return h("ul", null, b.ul.map((x) => h("li", null, richText(x))));
+    if (b.ol) return h("ol", null, b.ol.map((x) => h("li", null, richText(x))));
+    if (b.kv) return h("table", { class: "help-kv" }, h("tbody", null, b.kv.map(([k, v]) => h("tr", null, h("th", null, richText(k)), h("td", null, richText(v))))));
+    return null;
+  }
+
+  class HelpPanel {
+    constructor() {
+      this.nav = h("nav", { class: "help-nav", "aria-label": "Guide sections" });
+      this.body = h("div", { class: "help-body", tabindex: "-1" });
+      this.search = h("input", { type: "search", placeholder: "Search the guide…", "aria-label": "Search the guide", oninput: () => this.filter() });
+      this.dialog = h("div", { class: "help-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "help-title" },
+        h("div", { class: "help-head" }, h("h2", { id: "help-title" }, iconEl("help"), " How to use repoviz"), this.search,
+          h("button", { class: "btn small", type: "button", "aria-label": "Close the guide", onclick: () => this.close() }, "✕ Close")),
+        h("div", { class: "help-main" }, this.nav, this.body));
+      this.el = h("div", { class: "help-overlay", hidden: true, onclick: (ev) => { if (ev.target === this.el) this.close(); } }, this.dialog);
+      this.el.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); this.close(); } });
+      document.body.appendChild(this.el);
+      this.current = "start";
+      this.drawNav();
+    }
+    get isOpen() { return !this.el.hidden; }
+    drawNav(sections) {
+      this.nav.innerHTML = "";
+      for (const s of sections || HELP) {
+        put(this.nav, h("button", { type: "button", class: s.id === this.current ? "active" : null, "aria-current": s.id === this.current ? "true" : null,
+          onclick: () => this.showSection(s.id) }, iconEl(s.icon, true), " " + s.title));
+      }
+    }
+    showSection(id) {
+      const s = HELP.find((x) => x.id === id) || HELP[0];
+      this.current = s.id;
+      this.drawNav(this.visible);
+      this.body.innerHTML = "";
+      put(this.body, h("h3", null, iconEl(s.icon), " " + s.title), s.intro ? h("p", { class: "help-intro" }, richText(s.intro)) : null, s.blocks.map(helpBlock),
+        s.tab && APP && APP.currentTab !== s.tab ? h("button", { class: "btn small", type: "button", onclick: () => { this.close(); APP.show(s.tab); } }, `Open the ${s.title} tab →`) : null);
+      this.body.scrollTop = 0;
+    }
+    filter() {
+      const q = this.search.value.trim().toLowerCase();
+      const text = (s) => [s.title, s.intro, ...s.blocks.flatMap((b) => [b.h, b.p, b.tip, ...(b.ul || []), ...(b.ol || []), ...(b.kv || []).flat()])].join(" ").toLowerCase();
+      this.visible = q ? HELP.filter((s) => text(s).includes(q)) : null;
+      const list = this.visible || HELP;
+      if (list.length && !list.some((s) => s.id === this.current)) this.showSection(list[0].id); else this.drawNav(list);
+      if (!list.length) { this.body.innerHTML = ""; put(this.body, h("div", { class: "empty", text: "Nothing in the guide matches." })); }
+    }
+    open(id) {
+      storage.set("rv.help.opened", true);
+      const btn = document.getElementById("help-toggle");
+      if (btn) btn.classList.remove("is-new");
+      this.returnFocus = document.activeElement;
+      this.el.hidden = false;
+      this.showSection(id || this.current);
+      this.search.focus();
+    }
+    close() {
+      this.el.hidden = true;
+      if (this.returnFocus && this.returnFocus.focus) this.returnFocus.focus();
+    }
+  }
+
+  /* A one-line "how to use this tab" banner at the top of each tab (can be hidden; the Help button stays). */
+  function tabIntro(app, tab) {
+    const s = TAB_HELP[tab];
+    if (!s || storage.get(`rv.help.hidden.${tab}`, false)) return null;
+    const el = h("div", { class: "tab-intro", role: "note" }, iconEl(s.icon), h("span", null, h("b", { text: s.title + ": " }), s.intro),
+      h("button", { class: "btn small", type: "button", onclick: () => app.help.open(s.id) }, "How to use it"),
+      h("button", { class: "btn small ghost", type: "button", title: "Hide this hint (the Help button stays in the header)", "aria-label": "Hide this hint",
+        onclick: () => { storage.set(`rv.help.hidden.${tab}`, true); el.remove(); } }, "✕"));
+    return el;
+  }
+
   // ================================================================== APP
   class App {
     constructor(api, bundle) {
@@ -2360,6 +2579,15 @@
         const cur = document.documentElement.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
         const next = cur === "dark" ? "light" : "dark"; storage.set("rv.theme", next); applyTheme(next); initMermaid(); this.rerender();
       });
+      this.help = new HelpPanel();
+      $("#help-toggle").addEventListener("click", () => this.help.open(TAB_HELP[this.currentTab] ? TAB_HELP[this.currentTab].id : "start"));
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key !== "?" || ev.ctrlKey || ev.metaKey || ev.altKey || this.help.isOpen) return;
+        if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable]")) return;
+        ev.preventDefault();
+        this.help.open(TAB_HELP[this.currentTab] ? TAB_HELP[this.currentTab].id : "start");
+      });
+      if (!storage.get("rv.help.opened", false)) $("#help-toggle").classList.add("is-new");  // until the guide is opened once
       const ctors = { review: ReviewTab, changes: ChangesTab, structure: StructureTab, dependencies: DependenciesTab, activity: ActivityTab };
       for (const btn of $$(".tabs [role=tab]")) {
         btn.addEventListener("click", () => this.show(btn.dataset.tab));
@@ -2377,9 +2605,12 @@
     }
     async ensure(tab) {
       if (!this.tabs[tab]) {
-        const t = new this.ctors[tab](this, $("#tab-" + tab));
+        const panel = $("#tab-" + tab);
+        const t = new this.ctors[tab](this, panel);
         this.tabs[tab] = t;
-        try { await t.init(); } catch (err) { console.error(err); $("#tab-" + tab).appendChild(h("div", { class: "notice error", text: "Failed to initialise this tab: " + err.message })); }
+        try { await t.init(); } catch (err) { console.error(err); panel.appendChild(h("div", { class: "notice error", text: "Failed to initialise this tab: " + err.message })); }
+        const intro = tabIntro(this, tab);
+        if (intro) panel.prepend(intro);
       }
       return this.tabs[tab];
     }

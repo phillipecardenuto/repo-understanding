@@ -265,3 +265,37 @@ def test_review_shows_work_inside_submodules(page, make_repo, tmp_path: Path) ->
     assert page.evaluate("repoviz.app.tabs.review.selectedFile") == "modules/engine/src/engine.py"
     assert page.locator("#tab-review table.diff tr.add").count() >= 1
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_in_app_guide(page, shop_repo, tmp_path: Path) -> None:
+    report = tmp_path / "guide.html"
+    report.write_text(render_static_html(build_bundle(Repository(shop_repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function("window.repoviz && window.repoviz.app && window.repoviz.app.ready", timeout=60_000)
+    assert page.locator("#help-toggle.is-new").count() == 1  # nudges first-time users
+    # Every tab starts with a one-line hint that opens its section of the guide.
+    assert "AI Review:" in page.inner_text("#tab-review .tab-intro")
+    page.click("#tab-review .tab-intro >> text=How to use it")
+    assert page.is_visible(".help-dialog") and "Set the scope first" in page.inner_text(".help-body")
+    assert page.locator("#help-toggle.is-new").count() == 0
+    # Sections, search and closing.
+    page.click(".help-nav button >> text=Keyboard shortcuts")
+    assert "mark the open file reviewed" in page.inner_text(".help-body")
+    page.fill(".help-head input", "cycle")
+    nav = page.inner_text(".help-nav")
+    assert "Dependencies" in nav and "Privacy and safety" not in nav
+    page.keyboard.press("Escape")
+    assert not page.is_visible(".help-dialog")
+    # "?" opens the guide at the current tab's section.
+    page.click("#tabbtn-dependencies")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    page.keyboard.press("?")
+    assert page.is_visible(".help-dialog") and page.inner_text(".help-body h3").strip() == "Dependencies"
+    page.click(".help-head >> text=Close")
+    # A hidden hint stays hidden after a reload.
+    page.click("#tab-dependencies .tab-intro button[aria-label='Hide this hint']")
+    page.reload()
+    page.wait_for_function("window.repoviz && window.repoviz.app && window.repoviz.app.ready", timeout=60_000)
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    assert page.locator("#tab-dependencies .tab-intro").count() == 0
+    assert page.errors == []  # type: ignore[attr-defined]
