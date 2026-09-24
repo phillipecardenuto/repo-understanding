@@ -39,6 +39,15 @@ repoviz report -o report.html      # offline, single-file interactive report
 repoviz diff                       # HEAD vs working tree, as text
 ```
 
+Not sure where to start? Press **Help** (or `?`) in the app for a searchable guide:
+the recommended workflow, how to get the most out of each tab, the diagram
+conventions and keyboard shortcuts. Each tab also opens with a one-line hint that
+links to its section.
+
+Released versions are listed in [CHANGELOG.md](CHANGELOG.md). Each release attaches
+a wheel you can install directly, for example
+`pipx install https://github.com/phillipecardenuto/repo-understanding/releases/download/v0.1.0/repoviz-0.1.0-py3-none-any.whl`.
+
 To run without installing, use `PYTHONPATH=src python -m repoviz …` from a checkout.
 On a machine without network access, use `pip install --no-build-isolation .`
 (it needs only the `setuptools` already present in the environment).
@@ -275,6 +284,11 @@ See [docs/configuration.md](docs/configuration.md) for every option.
   analyzes it as a plain directory, with a diagnostic explaining why.
 
 ## Development
+
+Releases: bump `version` in `pyproject.toml` and `src/repoviz/__init__.py`, add a
+`CHANGELOG.md` section, then push a tag (`git tag -a v0.2.0 -m "repoviz 0.2.0" &&
+git push origin v0.2.0`). The *Release* workflow tests, builds and publishes the
+GitHub Release with the wheel, the sdist and the changelog section as notes.
 
 ```bash
 pip install -e '.[test,grimp,browser]'

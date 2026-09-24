@@ -12,6 +12,10 @@ requires-python = ">=3.10"
 # minimal environments.  Everything below is optional.
 dependencies = ["tomli>=1.1; python_version < '3.11'"]
 
+[project.urls]
+Repository = "https://github.com/phillipecardenuto/repo-understanding"
+Changelog = "https://github.com/phillipecardenuto/repo-understanding/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 # Cross-check the AST import graph with grimp for working-tree snapshots.
 grimp = ["grimp>=3.0"]

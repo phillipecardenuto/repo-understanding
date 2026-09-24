@@ -1,0 +1,54 @@
+# Publishes a GitHub Release when a version tag (v1.2.3) is pushed:
+# tests, checks the tag matches the package version, builds the wheel and sdist,
+# and attaches them with the matching CHANGELOG section as release notes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag matches the package version
+        run: |
+          version=$(python -c "import sys; sys.path.insert(0, 'src'); import repoviz; print(repoviz.__version__)")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match the package version $version" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: |
+          python -m pip install -e '.[test,grimp]'
+          python -m pytest -q -m "not browser"
+
+      - name: Build
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          python - <<'EOF' > notes.md
+          import os, re
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          match = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|^\[[^\]]+\]: |\Z)", text, re.S | re.M)
+          print(match.group(1).strip() if match else f"repoviz {version}")
+          EOF
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "repoviz $GITHUB_REF_NAME" --notes-file notes.md
