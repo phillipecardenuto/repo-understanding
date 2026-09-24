@@ -81,6 +81,7 @@ allowed = ["src/**", "tests/**"]
 protected = ["src/auth/**", "migrations/**", ".github/**"]
 sensitive = true                  # flag CI, lock files, deployment, migrations, .env files
 disabled_checks = ["todo"]        # silence signal kinds you do not care about
+wiring_ignore = ["src/plugins/**"] # new files a framework loads without an import
 
 [[review.rules]]                  # forbidden dependencies (architecture guardrails)
 from = ["src/ui/**"]
@@ -106,6 +107,8 @@ Credential-like values are always redacted in excerpts and diffs.
 | `stale-callers` | medium | correctness | a signature changed and callers in untouched files were not updated |
 | `swallowed-exception` | medium | correctness | `except: pass` / empty `catch {}` added |
 | `stub` | medium | correctness | `NotImplementedError`, `todo!()`, "not implemented" added |
+| `unwired-module` | medium (low in a library) | correctness | new code that nothing imports or refers to, or a new router (`APIRouter`, `Blueprint`, `express.Router`) that is never registered; see [New code that is not wired in](#new-code-that-is-not-wired-in) |
+| `unreachable-from-entry` | info | correctness | a new module imported only by tests, or by other new code that nothing uses |
 | `error-handling-removed` | low | correctness | more raise/except/throw/catch lines removed than added |
 | `new-cycle` / `cycle-grown` | high | architecture | a dependency cycle was introduced or extended |
 | `forbidden-dependency` | rule | architecture | a new dependency violates a `[[review.rules]]` rule |
@@ -126,10 +129,71 @@ Credential-like values are always redacted in excerpts and diffs.
 | `suppression` | low | hygiene | `# type: ignore`, `# noqa`, `eslint-disable`, `@ts-ignore` … |
 | `todo` | low | hygiene | TODO / FIXME / XXX / HACK added |
 | `commented-code` | low | hygiene | three or more commented-out code lines |
+| `unwired-symbol` | low | hygiene | a new top-level function or class whose name appears nowhere outside its definition |
 | `large-change` | info | hygiene | more than 400 lines added to one file |
 | `submodule-added` / `submodule-removed` | medium | architecture | a Git submodule was added or removed |
 | `submodule-updated` | medium | architecture | a submodule now points to another commit (commits listed when available) |
 | `submodule-uncommitted` | medium | correctness | files changed inside a submodule are not committed there, so the superproject cannot record them |
+
+### New code that is not wired in
+
+A frequent agent mistake is to write the new piece and forget to connect it. In
+this example the route looks finished in the diff, yet nothing serves it:
+
+```text
+[medium] New router is never registered: app/routes/reports.py defines APIRouter `router`,
+         but nothing registers it, so its routes are never served.
+         Suggestion: Register it in the application (e.g. `app.include_router(reports.router)`
+         in `app/main.py`).
+[low   ] New code is never used: app.services.report_service.export_pdf is not called or
+         referenced anywhere (its module, or the modules that import it).
+[info  ] New module not reachable from the application: app/services/report_service.py is
+         imported only by app/routes/reports.py, tests/test_report_service.py, which no entry
+         point or existing code reaches.
+```
+
+Only code *added* in the reviewed range is checked, in Python, JavaScript and
+TypeScript. (Go imports whole packages, so a new file has no importer of its own.)
+
+Each of the following counts as wired in:
+
+- **Imports.** Another module imports it. For a router module, an importer must
+  also use it; importing it alone does not register it.
+- **Entry points.** It runs by itself: `__main__.py`, an `if __name__ ==
+  "__main__"` block, a console script, a `package.json` `bin`, and so on.
+  Decorated handlers such as `@router.get` do not count, because the module
+  still has to be imported to register them.
+- **References by name or path.** Its dotted name or path appears in code or
+  configuration (not documentation), outside import lines. Examples:
+  `INSTALLED_APPS`, a Celery `include` list, a Dockerfile `CMD`, `index.html`,
+  `asset('app.js')`.
+- **Conventions.** Frameworks load some files without an import:
+  - `__init__.py`, `conftest.py`, `settings.py`, `urls.py`, `models.py`, `admin.py`,
+    `tasks.py`;
+  - migrations and Alembic versions, Django management commands;
+  - `scripts/`, `bin/`, `examples/`, `docs/`;
+  - Next.js/SvelteKit/Remix route files;
+  - `*.config.*`, `*.d.ts`, `*.stories.*`.
+
+  The full list is in `wiring.py` (`WIRED_BY_CONVENTION`). Add your own with
+  `review.wiring_ignore`.
+- **Loaded like its neighbours.** Some files are loaded by a computed name,
+  such as plugins, locales and backends. A new `locale/xx/formats.py` counts as
+  wired when none of the existing `locale/*/formats.py` files is imported either.
+  The same applies to a new file in a folder whose existing modules nothing imports.
+
+In a **library**, new public modules that only tests use (or nobody uses yet) are
+often new API. The repository counts as an application when it has containers,
+compose services or a Procfile, or when the new module's component has route or
+task handlers. Otherwise `unwired-module` is low severity and the tests-only case
+is not reported.
+
+A top-level function or class counts as used when its name appears anywhere
+outside its definition: in its module, in the modules that import it, or in the
+modules that import those (packages that re-export it). This includes use as a
+value, such as `Depends(get_db)` or `callbacks=[handler]`. Methods, decorated
+functions, names in `__all__` and conventional names (`main`, `create_app`,
+`handler`, ...) are not checked.
 
 ## Working through a review
 

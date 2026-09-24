@@ -4,6 +4,20 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ## [Unreleased]
 
+### Added
+
+- **New code that is not wired in** ([#4](https://github.com/phillipecardenuto/repo-understanding/issues/4)).
+  Three new review signals:
+  - `unwired-module`: a new module nothing imports or refers to, or a new
+    router (`APIRouter`, `Blueprint`, `express.Router`) that is never
+    registered. The suggestion names the file where routers are registered.
+  - `unwired-symbol`: a new function or class that is never used.
+  - `unreachable-from-entry`: new code used only by tests or by other unused
+    new code.
+
+  Framework conventions, references by name or path, and plugin-style
+  neighbours count as wiring. `review.wiring_ignore` adds your own exceptions.
+
 ### Documentation
 
 - **Feature wishlist** ([docs/wishlist.md](docs/wishlist.md)). It surveys

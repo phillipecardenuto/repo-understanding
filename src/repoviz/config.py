@@ -92,6 +92,7 @@ class Config:
     review_rules: list[DependencyRule] = field(default_factory=list)
     review_sensitive: bool = True
     review_disabled_checks: list[str] = field(default_factory=list)
+    review_wiring_ignore: list[str] = field(default_factory=list)  # new files that need no importer
     # Where the values came from (for display/debugging).
     sources: list[str] = field(default_factory=list)
 
@@ -220,6 +221,8 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
             cfg.review_sensitive = bool(review["sensitive"])
         if "disabled_checks" in review:
             cfg.review_disabled_checks = _as_list(review["disabled_checks"], "review.disabled_checks")
+        if "wiring_ignore" in review:
+            cfg.review_wiring_ignore = _as_list(review["wiring_ignore"], "review.wiring_ignore")
         rules = review.get("rules")
         if rules is not None:
             if not isinstance(rules, list):

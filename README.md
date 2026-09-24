@@ -192,6 +192,7 @@ Review signals flag likely problems for a human to check:
 - new cycles or forbidden dependencies;
 - broken imports, and calls to functions the agent removed;
 - changed signatures whose callers were not updated;
+- new code that is not wired in (a router never registered, a module nothing imports);
 - untested changes and weakened tests (skips, removed assertions);
 - swallowed exceptions, debugger statements and possible secrets.
 

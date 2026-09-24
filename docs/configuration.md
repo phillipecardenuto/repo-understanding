@@ -72,6 +72,7 @@ allowed = ["src/**", "tests/**"]  # files outside are flagged "out of scope"
 protected = ["src/auth/**"]       # files here are flagged "protected area modified"
 sensitive = true                  # flag CI / lock files / deployment / migrations / .env
 disabled_checks = []              # e.g. ["todo", "debug-output"]
+wiring_ignore = []                # new files that need no importer (loaded by a framework), e.g. ["src/plugins/**"]
 
 [[review.rules]]                  # forbidden dependencies
 from = ["src/ui/**"]

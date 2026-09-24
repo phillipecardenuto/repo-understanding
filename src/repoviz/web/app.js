@@ -2363,7 +2363,7 @@
         { h: "4. Triage signals" },
         { ul: ["Signals are **heuristics that point your attention**, not proof of a bug. Filter by severity or category and start with *high*.",
           "**✓ Not an issue** dismisses a signal. **→ Send to agent** adds it to the feedback. **✎ Note…** lets you write your own instruction.",
-          "The most valuable signals: removed functions still called, signatures changed while callers were not updated, broken imports, disabled tests, secrets, and scope violations."] },
+          "The most valuable signals: removed functions still called, signatures changed while callers were not updated, broken imports, new code that is not wired in (a router never registered, a module nothing imports), disabled tests, secrets, and scope violations."] },
         { h: "5. Walk the files" },
         { ul: ["The file table is sorted with signals first. Click a row or press `j` / `k` to move through files.",
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",

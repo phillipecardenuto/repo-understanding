@@ -51,6 +51,7 @@ from .redact import contains_secret as _secret_in
 from .redact import redact as _redact
 from .sources import TreeSource, is_binary
 from .submodules import WithSubmoduleFiles, submodule_changes
+from .wiring import unwired_code
 
 if TYPE_CHECKING:  # pragma: no cover
     from .repo import Repository
@@ -551,6 +552,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     # --- graph-based findings ---------------------------------------------------------------------
     _graph_findings(add, diff, base_snap, target_snap, target_src, scope, changed_set, path_to_node, component_of,
                     base_src)
+    if not {"unwired-module", "unwired-symbol", "unreachable-from-entry"} <= disabled:
+        _wiring_findings(add, diff, target_snap, target_src, component_of, repo.config.review_wiring_ignore)
     _test_coverage_findings(add, files, impact)
 
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.category, f.path or "", f.line or 0))
@@ -862,6 +865,53 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
             add(Finding("public-api-removed", "architecture", "medium", "Public symbol removed", n.qualified_name,
                         n.path, n.start_line, symbol=n.qualified_name,
                         component=component_of(n.path)[1] if n.path else None), key=n.qualified_name)
+
+
+_REGISTER_CALL = {"APIRouter": "app.include_router({var})", "Blueprint": "app.register_blueprint({var})",
+                  "Router": "app.use('/path', {var})"}
+
+
+def _wiring_findings(add: Any, diff: RepositoryDiff, target: RepositorySnapshot, target_src: TreeSource,
+                     component_of: Any, ignore: list[str]) -> None:
+    """New code nothing uses: modules nobody imports, routers never registered, functions never called."""
+    for u in unwired_code(diff, target, target_src, ignore=ignore):
+        comp = component_of(u.path)[1]
+        if u.kind == "unwired-module" and u.router:
+            stem = u.path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            call = _REGISTER_CALL.get(u.router_kind or "", "app.include_router({var})").format(
+                var=stem if u.router_kind == "Router" else f"{stem}.{u.router}")
+            detail = (f"{u.path} defines {u.router_kind} `{u.router}`, but nothing registers it, so its routes are "
+                      "never served." if not u.importers else
+                      f"{u.path} defines {u.router_kind} `{u.router}`; {', '.join(u.importers[:3])} "
+                      f"{'imports' if len(u.importers) == 1 else 'import'} it but never register"
+                      f"{'s' if len(u.importers) == 1 else ''} it, so its routes are never served.")
+            where = f" in `{u.register_in}`" if u.register_in else ""
+            add(Finding("unwired-module", "correctness", "medium", "New router is never registered", detail, u.path,
+                        component=comp, suggestion=f"Register it in the application (e.g. `{call}`{where})."),
+                key=u.name)
+        elif u.kind == "unwired-module":
+            add(Finding("unwired-module", "correctness", "medium" if u.application else "low",
+                        "New module is not wired in",
+                        f"Nothing imports {u.path}; it is not an entry point and no code or configuration refers "
+                        "to it." + ("" if u.application else " (Expected if it is new public API of a library; "
+                                                             "then it deserves tests.)"), u.path, component=comp,
+                        suggestion="Import it where it is needed or remove it. If a framework loads it by "
+                                   "convention, add it to `review.wiring_ignore`."), key=u.name)
+        elif u.kind == "unreachable-from-entry":
+            tests_only = bool(u.importers) and all(classify.is_test_path(p) for p in u.importers)
+            users = ", ".join(u.importers[:3]) + (f" (+{len(u.importers) - 3})" if len(u.importers) > 3 else "")
+            add(Finding("unreachable-from-entry", "correctness", "info",
+                        "New module only used by tests" if tests_only else "New module not reachable from the "
+                        "application",
+                        f"{u.path} is imported only by {users}, which no entry point or existing code reaches.",
+                        u.path, component=comp,
+                        suggestion="Wire the new code into the application, or confirm it is meant to stay "
+                                   "unused for now."), key=u.name)
+        else:
+            add(Finding("unwired-symbol", "hygiene", "low", "New code is never used",
+                        f"{u.name} is not called or referenced anywhere (its module, or the modules that import it).",
+                        u.path, u.line, symbol=u.name, component=comp,
+                        suggestion="Call it where it is needed or remove it."), key=u.name)
 
 
 def _package_dependency_exists(snapshot: RepositorySnapshot, src_pkg: str, dst_pkg: str) -> bool:

@@ -274,3 +274,140 @@ def test_new_package_dependency_signal(make_repo) -> None:
     kinds = by_kind(build_review(Repository(repo.path), resolve_target(Repository(repo.path), "all")))
     details = [f["detail"] for f in kinds["new-package-dependency"]]
     assert details == ["src/app/auth now depends on src/app/util (app.auth → app.util.money)"]  # reports→util existed
+
+
+# --------------------------------------------------------------------------- new code that is not wired in
+
+FASTAPI_APP = {
+    "requirements.txt": "fastapi\n",
+    "Dockerfile": "FROM python:3.12\nCMD uvicorn app.main:app --host 0.0.0.0\n",
+    "app/__init__.py": "",
+    "app/main.py": """
+        from fastapi import FastAPI
+        from app.routes import images
+
+        app = FastAPI()
+        app.include_router(images.router)
+    """,
+    "app/routes/__init__.py": "",
+    "app/routes/images.py": """
+        from fastapi import APIRouter
+        from app.services.images import list_images
+
+        router = APIRouter(prefix="/images")
+
+
+        @router.get("/")
+        def index():
+            return list_images()
+    """,
+    "app/services/__init__.py": "",
+    "app/services/images.py": "def list_images():\n    return []\n",
+    "tests/test_images.py": "from app.services.images import list_images\n\n\ndef test_list():\n"
+                            "    assert list_images() == []\n",
+}
+
+REPORTS_ROUTE = """
+    from fastapi import APIRouter
+    from app.services.reports import build_report
+
+    router = APIRouter(prefix="/reports")
+
+
+    @router.get("/")
+    def report():
+        return build_report()
+"""
+
+
+def _review_all(repo) -> dict:
+    return build_review(Repository(repo.path), resolve_target(Repository(repo.path), "all"))
+
+
+def test_new_router_that_is_never_registered(make_repo) -> None:
+    repo = make_repo(FASTAPI_APP)
+    repo.write({"app/routes/reports.py": REPORTS_ROUTE,
+                "app/services/reports.py": "def build_report():\n    return {}\n"})
+    kinds = by_kind(_review_all(repo))
+    [route] = kinds["unwired-module"]
+    assert route["path"] == "app/routes/reports.py" and route["title"] == "New router is never registered"
+    assert "`app.include_router(reports.router)` in `app/main.py`" in route["suggestion"]
+    # The new service is used, but only by the unregistered route.
+    [service] = kinds["unreachable-from-entry"]
+    assert service["path"] == "app/services/reports.py" and "app/routes/reports.py" in service["detail"]
+    # Wiring the route in clears every signal.
+    main = Path(repo.path, "app/main.py")
+    main.write_text(main.read_text().replace("import images", "import images, reports")
+                    + "app.include_router(reports.router)\n")
+    kinds = by_kind(_review_all(repo))
+    assert not {"unwired-module", "unreachable-from-entry", "unwired-symbol"} & set(kinds)
+
+
+def test_router_imported_but_not_registered(make_repo) -> None:
+    repo = make_repo(FASTAPI_APP)
+    repo.write({"app/routes/reports.py": REPORTS_ROUTE,
+                "app/services/reports.py": "def build_report():\n    return {}\n"})
+    main = Path(repo.path, "app/main.py")
+    main.write_text(main.read_text().replace("import images", "import images, reports"))
+    [route] = by_kind(_review_all(repo))["unwired-module"]
+    assert "app/main.py imports it but never registers it" in route["detail"]
+
+
+def test_unwired_modules_and_symbols(make_repo) -> None:
+    repo = make_repo(FASTAPI_APP)
+    services = Path(repo.path, "app/services/images.py")
+    services.write_text(services.read_text()
+                        + "\n\ndef export_csv(rows):\n    return rows\n"          # never used
+                        + "\n\ndef get_db():\n    return None\n"                  # used as a value, not called
+                        + "\n\nDEPENDENCIES = [get_db]\n")
+    repo.write({"app/utils/formatting.py": "def pretty(x):\n    return str(x)\n",  # nothing imports it
+                "app/reports/__init__.py": "from .service import build\n",       # a new package nothing uses
+                "app/reports/service.py": "def build():\n    return 1\n"})
+    kinds = by_kind(_review_all(repo))
+    assert sorted(f["path"] for f in kinds["unwired-module"]) == ["app/reports/service.py", "app/utils/formatting.py"]
+    assert all(f["severity"] == "medium" and f["title"] == "New module is not wired in" for f in kinds["unwired-module"])
+    [symbol] = kinds["unwired-symbol"]
+    assert symbol["symbol"] == "app.services.images.export_csv" and symbol["severity"] == "low"
+    assert symbol["line"] == 5
+
+
+def test_code_wired_by_convention_or_reference_is_not_flagged(make_repo) -> None:
+    repo = make_repo({**FASTAPI_APP,
+                      "pyproject.toml": '[project]\nname = "app"\n[project.scripts]\napp-admin = "app.cli:main"\n'})
+    repo.write({
+        "tests/test_reports.py": "def test_nothing():\n    assert 1 + 1 == 2\n",
+        "tests/conftest.py": "import pytest\n",
+        "app/migrations/0002_add_reports.py": "def upgrade():\n    pass\n",
+        "app/cli.py": "def main():\n    print('admin')\n",                         # declared console script
+        "app/worker.py": 'from celery import Celery\n\ncelery = Celery(include=["app.jobs.cleanup"])\n',
+        "app/jobs/__init__.py": "",
+        "app/jobs/cleanup.py": "def run():\n    return 0\n",                      # referenced by a string
+        "scripts/seed.py": "print('seeding')\n",
+        "app/extras.py": "X = 1\n",
+    })
+    Path(repo.path, ".repoviz.toml").write_text('[review]\nwiring_ignore = ["app/extras.py", "app/worker.py"]\n')
+    report = _review_all(repo)
+    flagged = {f["path"] for f in report["findings"]
+               if f["kind"] in ("unwired-module", "unwired-symbol", "unreachable-from-entry")}
+    assert flagged == set(), flagged
+
+
+def test_unwired_signals_can_be_disabled(make_repo) -> None:
+    repo = make_repo({**FASTAPI_APP, ".repoviz.toml": '[review]\ndisabled_checks = ["unwired-module"]\n'})
+    repo.write({"app/utils/formatting.py": "def pretty(x):\n    return str(x)\n"})
+    assert "unwired-module" not in by_kind(_review_all(repo))
+
+
+def test_new_express_router_that_is_never_mounted(make_repo) -> None:
+    repo = make_repo({
+        "package.json": '{"name": "api", "main": "src/app.js", "dependencies": {"express": "^4"}}',
+        "src/app.js": "const express = require('express');\nconst users = require('./routes/users');\n\n"
+                      "const app = express();\napp.use('/users', users);\nmodule.exports = app;\n",
+        "src/routes/users.js": "const express = require('express');\nconst router = express.Router();\n\n"
+                               "router.get('/', (req, res) => res.json([]));\nmodule.exports = router;\n",
+    })
+    repo.write({"src/routes/orders.js": "const express = require('express');\nconst router = express.Router();\n\n"
+                                        "router.get('/', (req, res) => res.json([]));\nmodule.exports = router;\n"})
+    [route] = by_kind(_review_all(repo))["unwired-module"]
+    assert route["path"] == "src/routes/orders.js" and "`app.use('/path', orders)` in `src/app.js`" in \
+        route["suggestion"]
