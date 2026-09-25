@@ -152,6 +152,7 @@ Credential-like values are always redacted in excerpts and diffs.
 | `renamed-symbol` | low | architecture | a function or class was renamed and no reference to the old name is left |
 | `submodule-moved` | medium | architecture | a submodule now lives at another path (same URL or commit, or a similar name in the same folder) |
 | `new-external-dependency` | low | architecture | a new third-party import |
+| `new-runtime-dependency` | low | architecture | code now starts a container built by this repository, or calls one of its services (`app.search now talks to the cbir-service service (http:8000)`), found without imports (see [data-model.md](data-model.md#runtime-coupling-from-code)) |
 | `untested-change` | medium | tests | changed code that no test imports, even indirectly |
 | `tests-not-updated` | low | tests | new public code while the tests covering the module were not touched |
 | `test-disabled` | high | tests | `skip`/`xfail`/`.only`/`@Disabled` added |

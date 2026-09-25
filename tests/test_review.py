@@ -1277,3 +1277,17 @@ def test_disabled_forbidden_dependency_disables_contract_signals(make_repo) -> N
     repo = make_repo(dict(LAYERED, **{".repoviz.toml": LAYERS_TOML + '[review]\ndisabled_checks = ["forbidden-dependency"]\n'}))
     repo.write({"app/models/user.py": "from app.routes import api\n"})
     assert "contract-broken" not in by_kind(_review_all(repo))
+
+
+def test_new_runtime_dependency(make_repo) -> None:
+    repo = make_repo({
+        "app/__init__.py": "", "app/search.py": "def search(q):\n    return []\n",
+        "cbir/Dockerfile": "FROM python:3.12\n", "cbir/main.py": "print(1)\n",
+        "docker-compose.yml": "services:\n  cbir-service:\n    build: ./cbir\n  api:\n    build: .\n",
+    })
+    repo.commit("base")
+    Path(repo.path, "app/search.py").write_text(
+        "import requests\n\n\ndef search(q):\n    return requests.post(\"http://cbir-service:8000/search\", json=q)\n")
+    [f] = by_kind(_review_all(repo))["new-runtime-dependency"]
+    assert f["severity"] == "low" and f["path"] == "app/search.py" and f["line"] == 5
+    assert "now talks to the cbir-service service (http:8000)" in f["detail"]

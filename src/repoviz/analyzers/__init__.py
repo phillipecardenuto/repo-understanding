@@ -18,6 +18,7 @@ from .golang import GoAnalyzer
 from .javascript import JavaScriptAnalyzer
 from .manifest import ManifestAnalyzer
 from .python import PythonAnalyzer
+from .runtime import RuntimeAnalyzer
 
 # Order matters within a phase: generic structure first, call-flow resolution last.
 _REGISTRY: list[type[Analyzer]] = [
@@ -27,6 +28,7 @@ _REGISTRY: list[type[Analyzer]] = [
     PythonAnalyzer,
     JavaScriptAnalyzer,
     GoAnalyzer,
+    RuntimeAnalyzer,
     CallFlowAnalyzer,
 ]
 _PLUGINS_LOADED = False

@@ -74,7 +74,7 @@ class Service:
                "networks": self.networks, "env_keys": self.env_keys, "env_files": self.env_files,
                "profiles": self.profiles, "differences": self.differences,
                "runs": self.runs[0] if self.runs else None, "runs_from": self.runs_from}
-        return {k: v for k, v in out.items() if v not in (None, [], {}, "")}
+        return {k: v for k, v in out.items() if v not in (None, [], {}, "") or (k == "build_context" and v == "")}
 
 
 @dataclass
@@ -93,7 +93,7 @@ def _variant_order(md: Any) -> tuple[int, str, str]:
     return (variant != "base", variant, md.path)
 
 
-def _image_name(image: str | None) -> str | None:
+def image_name(image: str | None) -> str | None:
     """``registry/org/app:1.2@sha`` → ``org/app`` (what a build and a pull of the same image share)."""
     if not image:
         return None
@@ -132,7 +132,7 @@ def compose_services(manifest_data: dict[str, Any], submodules: list[str] | tupl
         for md in files:
             for name, svc in (md.metadata.get("services") or {}).items():
                 declared.setdefault(name, []).append((md, svc))
-        built_images = {_image_name(svc.get("image")) for pairs in declared.values() for _md, svc in pairs
+        built_images = {image_name(svc.get("image")) for pairs in declared.values() for _md, svc in pairs
                         if svc.get("build_context") is not None and svc.get("image")}
         by_name: dict[str, Service] = {}
         for name in sorted(declared):
@@ -146,7 +146,7 @@ def compose_services(manifest_data: dict[str, Any], submodules: list[str] | tupl
 
             image, context = first("image"), next((svc["build_context"] for _md, svc in pairs
                                                    if svc.get("build_context") is not None), None)
-            first_party = context is not None or any(_image_name(svc.get("image")) in built_images
+            first_party = context is not None or any(image_name(svc.get("image")) in built_images
                                                      for _md, svc in pairs if svc.get("image"))
             s = Service(name=name, dir=d, path=pairs[0][0].path, line=pairs[0][1].get("line"),
                         variants=[{"variant": md.metadata.get("variant", "base"), "file": md.path,

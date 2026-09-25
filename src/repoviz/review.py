@@ -1123,6 +1123,26 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
             add(Finding("cycle-grown", "architecture", "high", f"Dependency cycle grew ({c['level']} level)",
                         "New members: " + ", ".join(name(m) for m in c["added_members"]), path, line),
                 key=",".join(sorted(name(m) for m in c["members"])))
+    # New run-time coupling found in code: a container started, a service called (#23).
+    for ch in sorted(diff.edges.values(), key=lambda c: c.edge.id):
+        e = ch.edge
+        if ch.status != ADDED or not e.direct or e.relationship not in ("invokes-container", "talks-to") \
+                or e.metadata.get("from_code"):
+            continue
+        src, dst = nodes.get(e.source_id), nodes.get(e.target_id)
+        if src is None or dst is None or not e.evidence:
+            continue
+        ev, label = e.evidence[0], e.metadata.get("label") or ""
+        what = (f"now starts the {label or 'container'} image, built from {dst.node.qualified_name}"
+                if e.relationship == "invokes-container" else
+                f"now talks to the {dst.node.name} service" + (f" ({label})" if label else ""))
+        add(Finding("new-runtime-dependency", "architecture", "low", "New runtime dependency",
+                    f"{src.node.qualified_name} {what}.", ev.path, ev.start_line, ev.excerpt,
+                    component=component_of(ev.path)[1] if ev.path else None,
+                    suggestion="Check this container or service should be reachable from here, and is available in "
+                               "every environment (compose files, CI, production)."),
+            key=f"{e.source_id}->{e.target_id}:{e.relationship}")
+
     # New dependencies: between components, forbidden by rules, third-party.
     for dep in diff.new_dependencies:
         ch = diff.edges.get(dep["edge_id"])

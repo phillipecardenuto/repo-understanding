@@ -6,6 +6,26 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Runtime coupling from code: container images and service URLs** ([#23](https://github.com/phillipecardenuto/repo-understanding/issues/23)).
+  - A new `runtime` analyzer reads Python and JavaScript without running them.
+  - Code that starts an image this repository builds gets an
+    `invokes-container` edge to the submodule or directory that builds it.
+    That covers the Docker SDK `containers.run(IMAGE)`,
+    `["docker", "run", …, IMAGE]` and `"docker run … IMAGE"` strings.
+  - Code that calls one of its services gets a `talks-to` edge, labelled with
+    protocol and port.
+  - Constants are followed across imports and settings classes, including
+    f-strings and `os.getenv` defaults. A variable a Compose file points at a
+    service counts as that service.
+  - Images come from Compose `build` + `image`, `docker build -t` in
+    Makefiles and CI, and submodules with a Dockerfile.
+  - Unknown images and hosts make no edge. They are listed as external runtime
+    references on the module.
+  - The Dependencies view has a **runtime (containers, HTTP)** filter, on by
+    default, with dashed "runs image" and solid "talks to" lines. On ELIES,
+    `app` is now linked to every ML submodule and service it uses.
+  - The System view draws the same links between services.
+  - New review signal: `new-runtime-dependency` (low).
 - **Checked-out Git submodules analyzed as nested sub-projects** ([#21](https://github.com/phillipecardenuto/repo-understanding/issues/21)).
   - Snapshots read each checked-out submodule with the superproject: at the
     recorded commit, or its working tree for the working tree. Its modules,

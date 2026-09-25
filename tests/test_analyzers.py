@@ -334,3 +334,74 @@ def test_grimp_cross_check(make_repo) -> None:
     # Revisions other than the working tree are analyzed from Git objects with the AST analyzer only.
     head = Repository(repo.path).snapshot("HEAD")
     assert not [d for d in head.diagnostics if d.code.startswith("grimp")]
+
+
+# --------------------------------------------------------------------------- runtime coupling (#23)
+
+RUNTIME = {
+    "app/__init__.py": "",
+    "app/settings.py": "import os\n\nENGINE_IMAGE = \"engine:latest\"\nSCANNER_IMAGE = \"tools/scanner:2\"\n"
+                       "CBIR_HOST = os.getenv(\"CBIR_HOST\", \"localhost\")\n"
+                       "CBIR_URL = os.getenv(\"CBIR_URL\", f\"http://{CBIR_HOST}:8000\")\n",
+    "app/worker.py": "import docker\n\nfrom app import settings\n\n\ndef run():\n    client = docker.from_env()\n"
+                     "    return client.containers.run(settings.ENGINE_IMAGE)\n",
+    "app/search.py": "import requests\n\n\ndef search(q):\n"
+                     "    return requests.post(\"http://cbir-service:8000/search\", json={\"q\": q})\n",
+    "app/via_env.py": "import requests\n\nfrom app.settings import CBIR_URL\n\n\ndef health():\n"
+                      "    return requests.get(f\"{CBIR_URL}/health\")\n",
+    "app/scan.py": "import subprocess\n\nfrom app.settings import SCANNER_IMAGE\n\n\ndef scan(p):\n"
+                   "    subprocess.run(\"docker run --rm -v /data:/data tools/scanner:2 --fast\", shell=True)\n"
+                   "    return [\"docker\", \"run\", SCANNER_IMAGE]\n",
+    "app/other.py": "import requests\n\nIMAGE = \"someone/else:1\"\n\n\ndef ping():\n"
+                    "    return requests.get(\"https://api.example.com/v1/ping\")\n",
+    "modules/engine/Dockerfile": "FROM python:3.12\n",
+    "modules/engine/run.py": "print('engine')\n",
+    "cbir/Dockerfile": "FROM python:3.12\nCMD [\"python\", \"main.py\"]\n",
+    "cbir/main.py": "print('cbir')\n",
+    "tools/Dockerfile": "FROM alpine\n",
+    "Makefile": "images:\n\tdocker build -t tools/scanner:2 \\\n\t    ./tools\n",
+    "docker-compose.yml": "services:\n  engine:\n    build: ./modules/engine\n    image: engine:latest\n"
+                          "  cbir-service:\n    build: ./cbir\n  worker:\n    build: .\n"
+                          "    command: celery -A app.worker worker\n    environment:\n      CBIR_HOST: cbir-service\n",
+}
+
+
+def test_runtime_edges_from_images_and_service_urls(make_repo) -> None:
+    repo = make_repo(RUNTIME)
+    snap = Repository(repo.path).snapshot("WORKTREE")
+    idx = snap.node_index()
+    edges = {(idx[e.source_id].path or idx[e.source_id].name, idx[e.target_id].path or "", idx[e.target_id].name,
+              e.relationship): e for e in snap.dependency_edges if e.relationship in ("invokes-container", "talks-to")}
+    # the acceptance case: a settings constant, imported and run through the Docker SDK
+    run = edges[("app/worker.py", "modules/engine", "engine", "invokes-container")]
+    assert run.evidence[0].start_line == 8 and "containers.run" in run.evidence[0].excerpt
+    assert run.metadata["label"] == "engine:latest" and run.metadata["via"] == "ENGINE_IMAGE"
+    # an image built by `docker build -t` in a Makefile, started from a shell string and from a command list
+    scan = edges[("app/scan.py", "tools", "tools", "invokes-container")]
+    assert scan.metadata["image"] == "tools/scanner" and "Makefile" in scan.metadata["provided_by"]
+    # URLs naming a service: a literal, and a constant whose host variable Compose points at the service
+    talks = edges[("app/search.py", "docker-compose.yml", "cbir-service", "talks-to")]
+    assert talks.metadata["label"] == "http:8000"
+    assert ("app/via_env.py", "docker-compose.yml", "cbir-service", "talks-to") in edges
+    assert not any(k[0] == "app/settings.py" for k in edges)  # defining a URL is not calling it
+    # unknown images and hosts: no edge, but listed on the module
+    other = snap.find(path="app/other.py")
+    assert not any(k[0] == "app/other.py" for k in edges)
+    assert other.metadata["external_runtime_references"] == [
+        {"kind": "url", "value": "https://api.example.com", "line": 7, "via": "literal"}]
+    # between services, for the System view: the worker (whose code starts the engine) → the engine service
+    svc = {n.name: n.id for n in snap.components if n.component_type == "service"}
+    derived = {(idx[e.source_id].name, idx[e.target_id].name, e.relationship) for e in snap.dependency_edges
+               if e.source_id in svc.values() and e.metadata.get("from_code")}
+    assert ("worker", "engine", "invokes-container") in derived and ("worker", "cbir-service", "talks-to") in derived
+
+
+def test_docker_command_parsing() -> None:
+    from repoviz.analyzers.runtime import _docker_build_tags, docker_run_image
+
+    assert docker_run_image(["docker", "run", "--rm", "-v", "a:b", "-e", "X=1", "--gpus", "all", "img:1", "cmd"]) == "img:1"
+    assert docker_run_image(["docker", "create", "--name", "x", "reg.io/team/app"]) == "reg.io/team/app"
+    assert docker_run_image(["docker", "ps"]) is None
+    tags = _docker_build_tags("build:\n\tdocker buildx build --platform linux/amd64 -t org/api:1 -f api/Dockerfile api\n"
+                              "\tdocker build -t $(IMAGE) .\n# docker build -t commented/out .\n")
+    assert tags == [(2, "org/api:1", "api")]

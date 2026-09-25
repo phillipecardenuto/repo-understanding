@@ -249,6 +249,12 @@ Review signals flag likely problems for a human to check:
 - untested changes and weakened tests (skips, removed assertions);
 - swallowed exceptions, debugger statements and possible secrets.
 
+**Runtime coupling** is visible too. Code that starts a container this
+repository builds (Docker SDK, `docker run`) or calls one of its services over
+HTTP gets **runs image** and **talks to** edges, so the Dependencies view shows,
+for example, "API → ML containers" even though nothing imports them. The
+`new-runtime-dependency` signal reports such a link added by a wave.
+
 **Architecture contracts** tell the agent to respect the architecture and check it
 on every wave. Declare layers (`routes → services → models`), independent
 features, public interfaces, forbidden or required dependencies and acyclic

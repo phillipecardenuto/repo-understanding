@@ -32,6 +32,7 @@ flowchart LR
 | `analyzers` | Plugins that populate the graph (see below). |
 | `pipeline` | Runs analyzers phase by phase, isolates failures as diagnostics, then assigns components, aggregates edges and detects cycles. |
 | `model` | Normalized entities, independent of Mermaid and of languages. See [data-model.md](data-model.md). |
+| `analyzers/runtime` | Run-time coupling found in code: images a module starts (`invokes-container`) and services it calls (`talks-to`), with constants resolved through imports, f-strings and `os.getenv` defaults (syntax trees only, never executed). |
 | `services` | Compose files → services: one per name across a directory's variants, first-party or infrastructure (by image kind), what each runs, and `starts-after` / `talks-to` / `shares-volume` links. Used by discovery (entry points) and the manifest analyzer (nodes and edges). |
 | `diff` | Compares two snapshots by stable IDs: statuses, reasons, cycles, and new or removed dependencies. |
 | `flow` | Affected execution flow: changed symbols → callers → entry points and tests. |

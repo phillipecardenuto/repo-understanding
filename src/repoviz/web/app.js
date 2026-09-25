@@ -477,7 +477,7 @@
   function dependencyView(si, o) {
     const rels = new Set(o.relationships);
     const group = makeGrouper(si, o.level, o.external);
-    const pairs = new Map(), relOf = new Map(), under = new Map(), runtime = new Set();
+    const pairs = new Map(), relOf = new Map(), under = new Map(), runtime = new Set(), rpairs = new Map();
     for (const e of si.edges) {
       if (!e.direct || !rels.has(e.relationship)) continue;
       const md = e.metadata || {};
@@ -489,6 +489,15 @@
       const s = group(e.source_id), t = group(e.target_id);
       if (!s || !t || s === t) continue;
       if (!o.tests && (hasTag(si.nodes.get(s), "test") || hasTag(si.nodes.get(t), "test"))) continue;
+      if (RUNTIME_RELS.includes(e.relationship)) {  // a line of its own, labelled (not an import, not in cycles)
+        if ((si.nodes.get(e.source_id) || {}).component_type === "service") continue;  // between services: the System view
+        const rk = s + "\u0000" + t + "\u0000" + e.relationship;
+        const r = rpairs.get(rk) || { count: 0, labels: [], underlying: [] };
+        r.count += e.occurrences; r.underlying.push(e.id);
+        if (md.label && !r.labels.includes(md.label)) r.labels.push(md.label);
+        rpairs.set(rk, r);
+        continue;
+      }
       const key = s + "\u0000" + t;
       pairs.set(key, (pairs.get(key) || 0) + e.occurrences);
       if (!relOf.has(key)) relOf.set(key, e.relationship);
@@ -500,6 +509,11 @@
       const [s, t] = key.split("\u0000");
       return { source: s, target: t, status: "unchanged", cycle: o.cycles && cyc.pairs.has(key), count, relationship: relOf.get(key), underlying: under.get(key) };
     });
+    for (const [key, r] of [...rpairs].sort((a, b) => cmpStr(a[0], b[0]))) {
+      const [s, t, rel] = key.split("\u0000");
+      edges.push({ source: s, target: t, status: "unchanged", cycle: false, count: r.count, relationship: rel, underlying: r.underlying,
+        label: r.labels.slice(0, 2).join(", ") + (r.labels.length > 2 ? " …" : "") });
+    }
     const ci = o.contracts ? si.contractInfo : null;
     if (ci) for (const e of edges) {
       const hits = (e.underlying || []).flatMap((id) => ci.edges.get(id) || []);
@@ -628,9 +642,20 @@
   /* System view: services from Compose files, the code each runs and how they relate.  Mirrors
      render/views.py system_view (keep them in step).  Code nodes are copies inside each service's box;
      view.origin maps a copy back to its node. */
-  const SYSTEM_EDGES = ["starts-after", "talks-to", "shares-volume"];
+  const SYSTEM_EDGES = ["starts-after", "talks-to", "shares-volume", "invokes-container"];
+  /* Run-time coupling found in code (#23): its own line style, never mixed with imports. */
+  const RUNTIME_RELS = ["invokes-container", "talks-to"];
   /* Relationships offered by the Changes and Dependencies filters. */
-  const RELATIONSHIPS = ["imports", "depends-on", "calls", "invokes", "builds", "runs", ...SYSTEM_EDGES];
+  const RELATIONSHIPS = ["imports", "depends-on", "calls", "invokes", "builds", "runs", "starts-after", "shares-volume", "runtime"];
+  /* A filter entry: "runtime" stands for the containers and HTTP calls found in code. */
+  const relsOf = (r) => (r === "runtime" ? RUNTIME_RELS : [r]);
+  function relationshipChecks(o, redraw) {
+    return RELATIONSHIPS.map((r) => checkbox(r === "runtime" ? "runtime (containers, HTTP)" : r, relsOf(r).every((x) => o.relationships.includes(x)), (c) => {
+      const set = new Set(o.relationships);
+      for (const x of relsOf(r)) if (c) set.add(x); else set.delete(x);
+      o.relationships = [...set]; redraw();
+    }));
+  }
   const CODE_TYPES = new Set(["directory", "package", "namespace-package", "project", "workspace-member", "submodule", "module", "file", "repository"]);
   const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   function serviceKind(n) { return meta(n).service_kind || (hasTag(n, "first-party") ? "first-party" : "other"); }
@@ -1090,16 +1115,22 @@
       h("span", { class: "item muted" }, "dashed border: external or structural-only (no dependency data)"),
     ];
   }
+  /* A legend sample of a relationship's line style (width and dash, never colour alone). */
+  function relLine(rel, text) {
+    const r = (THEME.relationship || {})[rel] || {};
+    const dash = !r.dash ? "solid" : Number(r.dash.split(" ")[0]) <= 2 ? "dotted" : "dashed";
+    return h("span", { class: "item" }, h("span", { class: "line", style: { borderTop: `${Math.max(2, r.width || 1.5)}px ${dash} ${r.stroke}` } }), text);
+  }
+  function runtimeLegend() {
+    return [relLine("invokes-container", "runs image (code starts a container built here)"), relLine("talks-to", "talks to (code calls a service's URL)")];
+  }
   function systemLegend(kinds) {
     const item = (name, text) => h("span", { class: "item" }, iconEl(name), " " + text);
-    const line = (rel, text) => {
-      const r = (THEME.relationship || {})[rel] || {};
-      const dash = !r.dash ? "solid" : Number(r.dash.split(" ")[0]) <= 2 ? "dotted" : "dashed";
-      return h("span", { class: "item" }, h("span", { class: "line", style: { borderTop: `${Math.max(2, r.width || 1.5)}px ${dash} ${r.stroke}` } }), text);
-    };
+    const line = relLine;
     const all = THEME.service_kinds || {};
     return [...Object.keys(all).filter((k) => !kinds || kinds.has(k)).map((k) => item(all[k].ui_icon, all[k].label)),
-      line("runs", "runs (its command)"), line("builds", "builds (its image's code)"), line("talks-to", "talks to (a URL or host in its environment)"),
+      line("runs", "runs (its command)"), line("builds", "builds (its image's code)"), line("talks-to", "talks to (a URL or host in its environment or code)"),
+      line("invokes-container", "runs image (its code starts the other's container)"),
       line("starts-after", "starts after (depends_on)"), line("shares-volume", "shares a named volume"),
       h("span", { class: "item muted" }, "boxes: first-party services with the code they run · dashed stadiums: infrastructure")];
   }
@@ -1368,7 +1399,7 @@
         field("Show", select([["changed", "Changed only"], ["neighbors", "Changed + neighbours"], ["all", "Everything"]], o.scope, (v) => { o.scope = v; redraw(); })),
         field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
         h("div", { class: "field" }, h("span", { text: "Relationships" }), h("div", { class: "group" },
-          RELATIONSHIPS.map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
+          relationshipChecks(o, redraw))),
         h("div", { class: "field" }, h("span", { text: "Options" }), h("div", { class: "group" },
           checkbox("external packages", o.external, (c) => { o.external = c; redraw(); }),
           checkbox("hide formatting-only", o.hideCosmetic, (c) => { o.hideCosmetic = c; redraw(); }),
@@ -1740,9 +1771,13 @@
     constructor(app, root) {
       this.app = app; this.root = root;
       const cfg = app.bundle.config || {};
-      this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on"], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
+      this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on", ...RUNTIME_RELS], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
         cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false, contracts: false }, storage.get("rv.deps", {}));
       this.opts.cycleMembers = null;
+      if (!this.opts.runtimeDefault) {  // saved filters from before runtime edges existed: show them once
+        this.opts.relationships = [...new Set([...this.opts.relationships, ...RUNTIME_RELS])];
+        this.opts.runtimeDefault = true;
+      }
     }
     save() { const o = Object.assign({}, this.opts); delete o.cycleMembers; storage.set("rv.deps", o); }
     async init() {
@@ -1751,7 +1786,7 @@
       if (o.focus && !this.si.nodes.has(o.focus)) o.focus = null;
       this.si.contractInfo = contractInfo(app.bundle.contracts);
       if (!this.si.contractInfo) o.contracts = false;
-      this.diagram = new Diagram({ title: "Dependencies", legend: () => [...kindLegend(), contractLegend()], spotlight: true });
+      this.diagram = new Diagram({ title: "Dependencies", legend: () => [...kindLegend(), runtimeLegend(), contractLegend()], spotlight: true });
       this.details = new DetailsPanel(app);
       this.focusInput = h("input", { type: "search", list: "rv-nodes", placeholder: "type a name…", size: 26, "aria-label": "Focus node" });
       this.datalist = h("datalist", { id: "rv-nodes" });
@@ -1778,7 +1813,7 @@
         field("Direction", select([["both", "Both"], ["out", "Depends on (outgoing)"], ["in", "Used by (incoming)"]], o.direction2, (v) => { o.direction2 = v; redraw(); })),
         field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
         h("div", { class: "field" }, h("span", { text: "Relationships" }), h("div", { class: "group" },
-          RELATIONSHIPS.map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
+          relationshipChecks(o, redraw))),
         h("div", { class: "field" }, h("span", { text: "Include" }), h("div", { class: "group" },
           checkbox("external", o.external, (c) => { o.external = c; redraw(); }), checkbox("stdlib", o.stdlib, (c) => { o.stdlib = c; redraw(); }),
           checkbox("tests", o.tests, (c) => { o.tests = c; redraw(); }), checkbox("type-only imports", o.typeOnly, (c) => { o.typeOnly = c; redraw(); }),
@@ -3040,6 +3075,7 @@
         { ul: ["**Level**: project, component, package or module. Start high and go down.",
           "**Click a node** to spotlight it: the nodes that use it are joined by **solid, thick** links, the nodes it uses by **dashed, thick** links, and everything else fades. The line above the diagram gives both counts. The layout does not move. **Esc**, **Clear** or a click on the empty background shows everything again; clicking another node moves the spotlight. The fan-in / fan-out table does the same.",
           "**Focus** on a name to see its neighbourhood; **Depth** and **Direction** control it. *Dependents* answers \"what breaks if I change this?\"; *dependencies* answers \"what does this use?\".",
+          "**Runtime (containers, HTTP)** (on by default) adds coupling that imports miss. A **runs image** line (dashed, labelled with the image) goes from code that starts a container to the code that builds that image: `client.containers.run(settings.ENGINE_IMAGE)` or `[\"docker\", \"run\", IMAGE]` leads to the submodule or directory the image is built from. A **talks to** line (solid, labelled with protocol and port) goes from code that calls a service's URL (`http://cbir-service:8000/…`, or a host variable that the Compose files point at a service) to that service. Constants are followed across imports; nothing is run. An image or host this repository does not provide makes no line: the module lists it under *external runtime references* in its details.",
           "**Include**: external packages, the standard library, tests and type-only imports can be switched on or off to reduce noise.",
           "**Highlight cycles** draws dependency cycles in purple; **cycles only** shows nothing else. The Cycles card lists every cycle; click one to focus on it.",
           "The fan-in / fan-out table ranks the most-used and most-dependent nodes, often the core and the riskiest modules.",

@@ -36,7 +36,8 @@ from ..model import (
 LEVELS = ("component", "package", "module", "project")
 CONTAINER_TYPES = {"directory", "package", "namespace-package", "repository", "project", "workspace-member",
                    "workspace"}
-DEFAULT_RELATIONSHIPS = (REL_IMPORTS, REL_DEPENDS_ON)
+RUNTIME_RELATIONSHIPS = ("invokes-container", "talks-to")  # found in code: containers started, services called
+DEFAULT_RELATIONSHIPS = (REL_IMPORTS, REL_DEPENDS_ON, *RUNTIME_RELATIONSHIPS)
 
 
 @dataclass
@@ -307,6 +308,7 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
     runtime: set[tuple[str, str]] = set()
     rel_of: dict[tuple[str, str], str] = {}
     broken: dict[tuple[str, str], set[str]] = {}
+    run_pairs: dict[tuple[str, str, str], tuple[int, list[str]]] = {}  # containers and HTTP: lines of their own
     for e in snapshot.dependency_edges + snapshot.call_edges:
         if not e.direct or e.relationship not in rels:
             continue
@@ -317,6 +319,14 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
             continue
         if not include_tests and ("test" in nodes[s].tags or "test" in nodes[t].tags):
             continue
+        if e.relationship in RUNTIME_RELATIONSHIPS:  # as dependencyView in web/app.js
+            if nodes[e.source_id].component_type == "service":
+                continue  # between services: the System view draws those
+            count, labels = run_pairs.get((s, t, e.relationship), (0, []))
+            label = e.metadata.get("label")
+            run_pairs[(s, t, e.relationship)] = (count + e.occurrences,
+                                                 labels + [label] if label and label not in labels else labels)
+            continue
         pairs[(s, t)] = pairs.get((s, t), 0) + e.occurrences
         rel_of.setdefault((s, t), e.relationship)
         if contract_edges and e.id in contract_edges:
@@ -324,14 +334,14 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
         if not e.metadata.get("type_checking_only"):
             runtime.add((s, t))
     cycles = _scc_pairs(runtime)
-    visible: set[str] = {x for p in pairs for x in p}
+    visible: set[str] = {x for p in pairs for x in p} | {x for p in run_pairs for x in p[:2]}
     if focus:
         fg = grouper.group(focus) or focus
         visible = {fg}
         frontier = {fg}
         for _ in range(max(depth, 0)):
             nxt = set()
-            for s, t in pairs:
+            for s, t in [*pairs, *((a, b) for a, b, _r in run_pairs)]:
                 if s in frontier and t not in visible:
                     nxt.add(t)
                 if t in frontier and s not in visible:
@@ -355,6 +365,10 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
         if s in keep and t in keep:
             view.edges.append(VEdge(s, t, UNCHANGED, (s, t) in cycles, False, count, rel_of[(s, t)],
                                     ", ".join(sorted(broken.get((s, t), ())))))
+    for (s, t, rel), (count, labels) in sorted(run_pairs.items()):
+        if s in keep and t in keep:
+            view.edges.append(VEdge(s, t, UNCHANGED, count=count, relationship=rel,
+                                    label=", ".join(labels[:2]) + (" …" if len(labels) > 2 else "")))
     return view
 
 
@@ -423,7 +437,7 @@ def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, dep
     return view
 
 
-SYSTEM_EDGES = ("starts-after", "talks-to", "shares-volume")
+SYSTEM_EDGES = ("starts-after", "talks-to", "shares-volume", "invokes-container")
 CODE_TYPES = {"directory", "package", "namespace-package", "project", "workspace-member", "submodule", "module",
               "file", "repository"}
 

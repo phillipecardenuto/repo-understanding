@@ -286,7 +286,7 @@ def cmd_mermaid(args: argparse.Namespace) -> int:
                 layers = (layer_groups(snap, cs) or [None])[0]
             view = views.dependency_view(snap, level=args.level, include_external=args.external, focus=focus,
                                          depth=args.depth, max_nodes=args.max_nodes, icons=icons,
-                                         relationships=args.relationships or ("imports", "depends-on"),
+                                         relationships=args.relationships or views.DEFAULT_RELATIONSHIPS,
                                          contract_edges=contract_edges, layers=layers)
         elif args.view == "system":
             view = views.system_view(snap, max_nodes=args.max_nodes)

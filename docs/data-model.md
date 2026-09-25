@@ -107,6 +107,48 @@ either `first-party` or `infrastructure`.
 | `talks-to` | service → service | an environment value names the other service (by name, `container_name` or `hostname`); `metadata.label` is the protocol and port, `metadata.env_keys` the variable names |
 | `shares-volume` | service → service | the same named volume (listed in `metadata.label`); a volume shared by more than 8 services is ignored |
 
+## Runtime coupling (from code)
+
+The `runtime` analyzer reads Python and JavaScript. It never runs them.
+
+| Relationship | From → to | Meaning |
+|---|---|---|
+| `invokes-container` | module → the directory or submodule that builds the image (the service, when built from the repository root) | the module starts that image: `containers.run(IMAGE)`, `["docker", "run", …, IMAGE]`, `"docker run … IMAGE"` |
+| `talks-to` | module → service | the module uses a URL or host naming the service (`http://cbir-service:8000/search`), directly or through constants |
+
+**Edge metadata.**
+
+- `label`: the image, or the protocol and port.
+- `image` or `host`.
+- `via`: the constant or `literal`.
+- `provided_by`: the Compose file, Makefile or Dockerfile that provides the image.
+- `provider_service`: the service built from it.
+
+Confidence is 0.8 for literals and 0.7 for resolved constants.
+
+**Where values come from.** Constants are resolved through imports, class
+attributes (settings classes), f-strings, `+` concatenation and
+`os.getenv("KEY", default)`. When a Compose file sets `KEY` to another
+service's name or URL, `KEY` counts as that service.
+
+**Where images come from:**
+
+- Compose `build` + `image` pairs;
+- `docker build -t IMAGE CONTEXT` in Makefiles and CI files;
+- a submodule holding a Dockerfile, which provides the image named after it
+  (confidence 0.6).
+
+**Service-to-service copies.** In the last phase, each edge is also drawn
+between services, with `metadata.from_code: true` and `metadata.via` (the
+module): from each first-party service whose code includes the module (its
+build context, narrowed to the services whose command reaches the module
+through imports), to the service it calls or whose image it starts. The System
+view draws these; the Dependencies view leaves them out.
+
+**Unknown values.** An image or host that nothing in the repository provides
+makes no edge. The module keeps it in `metadata.external_runtime_references`
+(`kind`, a redacted `value`, `line`, `via`), with at most 10 per module.
+
 ## SourceEvidence
 
 `path`, `start_line`, `end_line`, `construct` (`import`, `from-import`,

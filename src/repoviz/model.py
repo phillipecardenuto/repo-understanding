@@ -35,7 +35,8 @@ REL_BUILDS = "builds"  # container/service -> project/directory
 REL_RUNS = "runs"  # service -> the module or callable its command runs
 REL_STARTS_AFTER = "starts-after"  # service -> service (compose depends_on)
 REL_SHARES_VOLUME = "shares-volume"  # service -> service (the same named volume)
-REL_TALKS_TO = "talks-to"  # service -> service (a URL or host in its environment names the other)
+REL_TALKS_TO = "talks-to"  # service -> service (a URL or host in its environment names the other); module -> service
+REL_INVOKES_CONTAINER = "invokes-container"  # module -> the code (or service) that builds the image it starts
 
 #: Diff statuses.
 ADDED = "added"

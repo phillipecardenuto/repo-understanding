@@ -176,6 +176,39 @@ class ManifestAnalyzer(Analyzer):
                        analyzer=self.name, evidence=[self.evidence(ctx, e.path, e.line, e.line, e.relationship)],
                        metadata=meta)
         self._services_found = services
+        ctx.shared["runtime.providers"] = self._runtime_providers(b, services)
+
+    def _runtime_providers(self, b: SnapshotBuilder, services: list[Any]) -> dict[str, Any]:
+        """What code can reach at run time (for the runtime analyzer): images this repository builds, service
+        host names, and environment variables the Compose files point at a service."""
+        from ..services import image_name
+
+        def nearest(path: str) -> str:
+            while path:
+                nid = b.path_node_id(path)
+                if nid:
+                    return nid
+                path = posixpath.dirname(path)
+            return b.root_id  # type: ignore[return-value]
+
+        images: dict[str, dict[str, Any]] = {}
+        hosts: dict[str, str] = {}
+        for svc in services:
+            sid = self._service_ids[svc.key]
+            for alias in svc.aliases:
+                hosts.setdefault(alias, sid)
+            if svc.first_party and svc.image and svc.build_context is not None:
+                target = nearest(svc.build_context) if svc.build_context else sid  # the code it is built from
+                images.setdefault(image_name(svc.image) or "", {"target": target, "service": sid, "confidence": 0.9,
+                                                               "via": f"{svc.path} ({svc.name})"})
+        env_hosts: dict[str, Any] = {}
+        for svc in services:
+            for link in svc.links if svc.first_party else []:
+                if link["host"] in hosts:
+                    known = env_hosts.get(link["key"])
+                    env_hosts[link["key"]] = link if known is None or known == link else False  # conflicting: none
+        images.pop("", None)
+        return {"images": images, "hosts": hosts, "env_hosts": {k: v for k, v in env_hosts.items() if v}}
 
     def _external(self, b: SnapshotBuilder, ecosystem: str, name: str, spec: str = "") -> str:
         key_name = _norm(ecosystem, name)
