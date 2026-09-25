@@ -240,6 +240,22 @@ CLI):
 - **Labels** longer than 40 characters are middle-truncated. Each node carries
   an SVG `<title>` with the full name.
 
+Graph questions go through `query.py`: `why` (shortest chains, via
+`graph.shortest_paths`) and `blast_radius` (callers and importers, walked
+backwards). A `GraphIndex` is built once per snapshot (`Repository.graph_index`,
+cached and single-flight) and shared by the CLI, the server and the MCP server.
+For a function, `blast_radius` walks the same edges as `flow.affected_flow`, so
+both reach the same entry points and tests. `app.js` mirrors both (`whyPaths`,
+`blastRadius`) over the embedded snapshot, so static reports answer the same
+questions.
+
+Bounds:
+
+- at most 5 chains of 8 hops;
+- 5,000 nodes per walk.
+
+On Django, a query takes 0–26 ms and the index takes 0.3 s to build.
+
 Long lists use one table helper (`table()` in `app.js`). Besides sorting and
 "Show more", it offers a search box, facet chips with counts, and collapsible
 groups with per-group totals. A group can be headed by one of its rows (a
@@ -266,6 +282,8 @@ Server endpoints:
 | `GET /api/snapshot?rev=` | any snapshot |
 | `GET /api/activity` | activity report with diff and affected flow |
 | `GET /api/revisions`, `/api/profile`, `/api/health` | metadata |
+| `GET /api/path?from=&to=[&rev=]` | why one node depends on another (`query.why`): shortest import or call chains with evidence; names, paths or node IDs |
+| `GET /api/impact?node=[&depth=][&rev=]` | blast radius (`query.blast_radius`): dependents by distance, entry points and tests reached |
 | `GET /api/file/changes?path=[&commit=SHA\|WORKTREE]` | one file's last commits (newest first) and the diff of one of them (by default its uncommitted edits, else its latest commit); used by the Structure tab's *Code changes* drawer |
 | `GET /api/review/targets`, `/api/review?id=\|base=&target=[&mode=merge-base\|exact][&commit=SHA\|WORKTREE]`, `/api/review/notes?key=` | AI review (`mode`: since the two diverged, or the exact difference; `commit`: one step of the range, reviewed alone) |
 | `POST /api/session/start`, `/api/session/end`, `/api/session/scope`, `/api/review/notes` | state changes |

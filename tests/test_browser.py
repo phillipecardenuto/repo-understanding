@@ -754,7 +754,7 @@ def test_dependencies_default_and_header_counts(page, make_repo, tmp_path: Path)
     page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
     tab = page.locator("#tab-dependencies")
     assert "package level (auto)" in tab.locator(".diagram-head .title").inner_text()
-    note = tab.locator(".notice[role=status]")
+    note = tab.locator(".notice.level-note")
     assert note.is_visible() and "Showing packages because the code has only 2 components" in note.inner_text()
     names = page.evaluate("Array.from(document.querySelectorAll('#tab-dependencies g.node')).map(g => g.textContent)")
     assert any("app.core" in n for n in names) and not any("redis" in n or "service" in n for n in names)  # services hidden
@@ -787,7 +787,7 @@ def test_a_stored_dependencies_level_wins(page, make_repo, tmp_path: Path) -> No
     page.goto(report.as_uri() + "#tab=dependencies")
     page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
     assert "component level" in page.locator("#tab-dependencies .diagram-head .title").inner_text()
-    assert page.locator("#tab-dependencies .notice[role=status]").is_hidden()
+    assert page.locator("#tab-dependencies .notice.level-note").is_hidden()
     assert page.errors == []  # type: ignore[attr-defined]
 
 
@@ -1050,3 +1050,121 @@ def test_lists_fit_a_phone_screen(browser, make_repo, tmp_path: Path) -> None:
                 assert text.count("…") == 1 and text.endswith("file_name.py") and title == long
         finally:
             pg.close()
+
+
+# --------------------------------------------------------------------------- Why and blast radius (#28)
+
+NODE_NAMED = "(q) => [...repoviz.app.snapshotIndex.nodes.values()].filter(n => n.qualified_name === q).sort((a, b) => (a.category === 'component' ? 0 : 1) - (b.category === 'component' ? 0 : 1))[0].id"
+EDGE_EVENT = """([a, b, kind]) => { const el = document.querySelector(`#tab-dependencies path.flowchart-link[data-id^="L_${a}_${b}_"]`);
+  el.dispatchEvent(new MouseEvent(kind, { bubbles: true, cancelable: true, button: kind === 'contextmenu' ? 2 : 0 })); }"""
+
+
+def _chain_report(make_repo, tmp_path: Path):
+    from test_query import CHAIN
+
+    repo = make_repo(CHAIN)
+    report = tmp_path / "chain.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    return report.as_uri(), repo
+
+
+def test_why_panel_and_chain_highlight(page, make_repo, tmp_path: Path) -> None:
+    from repoviz.query import why
+
+    uri, repo = _chain_report(make_repo, tmp_path)
+    page.goto(uri + "#tab=dependencies")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    ui, services, db = (page.evaluate(NODE_NAMED, x) for x in ("ui", "services", "db"))
+    page.evaluate(EDGE_EVENT, [services, db, "contextmenu"])  # right-click an edge
+    side = page.locator("#tab-dependencies .split > .card")
+    page.wait_for_function("() => document.querySelector('#tab-dependencies .split > .card').textContent.includes('Why does services depend on db?')", timeout=10_000)
+    assert "services.orders imports db.models" in side.inner_text() and "services/orders.py:1" in side.inner_text()
+    assert "from db import models" in side.inner_text()
+    assert page.locator("#tab-dependencies g.node.is-chain").count() == 2 and page.locator("#tab-dependencies path.is-chain").count() == 1
+    note = page.locator("#tab-dependencies .spot-note")
+    assert "Chain 1 of 1: services.orders → db.models" in note.inner_text() and "outlined" in note.inner_text()  # not colour alone
+    page.keyboard.press("Escape")
+    assert page.locator("#tab-dependencies .is-chain").count() == 0
+    # click an edge, then w; a longer chain across three components
+    page.evaluate(EDGE_EVENT, [ui, services, "click"])
+    assert "Why does ui depend on services?" in side.inner_text()  # the button on the edge details
+    page.locator("body").press("w")
+    page.wait_for_function("() => document.querySelector('#tab-dependencies .spot-note').textContent.includes('Chain 1')", timeout=10_000)
+    page.evaluate("([a, b]) => repoviz.app.tabs.dependencies.showWhy(a, b)", [ui, db])
+    page.wait_for_function("() => document.querySelectorAll('#tab-dependencies g.node.is-chain').length === 3", timeout=10_000)
+    assert page.locator("#tab-dependencies path.is-chain").count() == 2
+    assert "ui.forms → services.orders → db.models" in side.inner_text()
+    # the page computes the same chains as the engine, both ways round
+    idx = Repository(repo.path).graph_index()
+    for a, b in ((ui, db), (db, ui), (page.evaluate(NODE_NAMED, "ui.views.page"), page.evaluate(NODE_NAMED, "db.models.query"))):
+        js = page.evaluate("([a, b]) => repoviz.whyPaths(repoviz.app.snapshotIndex, a, b)", [a, b])
+        py = why(idx, idx.nodes[a], idx.nodes[b])
+        assert js["summary"] == py["summary"] and js["level"] == py["level"]
+        for key in ("paths", "reverse_paths"):
+            assert [[(x["id"], x.get("evidence")) for x in p] for p in js.get(key, [])] == \
+                [[(x["id"], x.get("evidence")) for x in p] for p in py.get(key, [])]
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_blast_radius_view(page, make_repo, tmp_path: Path) -> None:
+    from test_query import CHAIN
+
+    from repoviz.query import blast_radius
+
+    repo = make_repo(CHAIN)
+    report = tmp_path / "blast.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=dependencies")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    db = page.evaluate(NODE_NAMED, "db")
+    page.click(f"#tab-dependencies g.node[data-node-id='{db}']")
+    page.locator("body").press("b")  # blast radius of the selected node
+    page.wait_for_function("() => repoviz.app.tabs.dependencies.diagram.view.title === 'Blast radius'", timeout=10_000)
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=30_000)
+    note = page.locator("#tab-dependencies .blast-note")
+    assert note.is_visible() and "Changing db can affect 4 modules in 3 components, 1 entry point, 2 tests." in note.inner_text()
+    texts = page.evaluate("Array.from(document.querySelectorAll('#tab-dependencies g.node')).map(g => g.textContent)")
+    assert any("ring 1" in t for t in texts) and any("ring 2" in t for t in texts) and any("ring 3+" in t for t in texts)
+    assert page.locator("#tab-dependencies g.node i.rvi-play").count() >= 1 and page.locator("#tab-dependencies g.node i.rvi-flask").count() >= 1
+    assert "ring 1: uses it directly" in page.locator("#tab-dependencies .legend").inner_text()
+    # the page's answer is the engine's
+    idx = Repository(repo.path).graph_index()
+    for name in ("db", "db.models.query", "services.orders"):
+        nid = page.evaluate(NODE_NAMED, name)
+        js = page.evaluate("(id) => repoviz.blastRadius(repoviz.app.snapshotIndex, id, null, 200)", nid)
+        py = blast_radius(idx, idx.nodes[nid], max_items=200)
+        assert js["totals"] == py["totals"] and js["summary"] == py["summary"], name
+        assert [(d["id"], d["distance"]) for d in js["dependents"]] == [(d["id"], d["distance"]) for d in py["dependents"]]
+    # from the Structure tab's details, and back
+    page.locator("#tab-dependencies button:has-text('Back to dependencies')").first.click()
+    page.wait_for_function("() => repoviz.app.tabs.dependencies.diagram.view.title !== 'Blast radius'", timeout=10_000)
+    assert page.locator("#tab-dependencies .blast-note").is_hidden()
+    query = page.evaluate(NODE_NAMED, "db.models.query")
+    page.evaluate("(id) => { repoviz.app.show('structure'); }", None)
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=30_000)
+    page.evaluate("(id) => repoviz.app.tabs.structure.details.showNode(repoviz.app.snapshotIndex, id)", query)
+    page.locator("#tab-structure button:has-text('Blast radius')").click()
+    page.wait_for_function("() => repoviz.app.currentTab === 'dependencies' && repoviz.app.tabs.dependencies.diagram.view.title === 'Blast radius'", timeout=10_000)
+    assert "Changing db.models.query can affect" in page.locator("#tab-dependencies .blast-note").inner_text()
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_why_and_blast_in_the_live_app(page, make_repo) -> None:
+    from test_query import CHAIN
+
+    repo = make_repo(CHAIN)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=dependencies")
+        page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+        assert page.evaluate("repoviz.app.api.live") is True
+        services, db = page.evaluate(NODE_NAMED, "services"), page.evaluate(NODE_NAMED, "db")
+        page.evaluate(EDGE_EVENT, [services, db, "contextmenu"])
+        page.wait_for_function("() => document.querySelector('#tab-dependencies .split > .card').textContent.includes('services.orders imports db.models')", timeout=10_000)
+        page.evaluate("(id) => repoviz.app.tabs.dependencies.showBlast(id)", page.evaluate(NODE_NAMED, "db.models.query"))
+        page.wait_for_function("() => document.querySelector('#tab-dependencies .blast-note') && document.querySelector('#tab-dependencies .blast-note').textContent.includes('1 entry point, 1 test')", timeout=10_000)
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()

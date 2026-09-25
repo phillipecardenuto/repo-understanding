@@ -66,6 +66,14 @@ FAVICON = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect w
            b'fill="none"/></svg>')
 
 
+def _int(text: str | None, default: int, most: int = 50) -> int:
+    """A small positive integer from a query parameter (``default`` when missing or invalid)."""
+    try:
+        return max(0, min(int(text or default), most))
+    except ValueError:
+        return default
+
+
 class ApiError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
@@ -220,6 +228,29 @@ class AppState:
         except (RepositoryError, GitError, ValueError) as exc:
             raise ApiError(400, str(exc)) from exc
 
+    def why(self, query: dict[str, str]) -> dict[str, Any]:
+        """Why one node depends on another (the Dependencies tab's edge panel): the shortest chains, with evidence."""
+        from .query import QueryError, why
+
+        try:
+            idx = self.repo.graph_index(query.get("rev") or "WORKTREE")
+            a, b = idx.resolve(query.get("from") or ""), idx.resolve(query.get("to") or "")
+            return why(idx, a, b, max_paths=_int(query.get("max_paths"), 5), max_len=_int(query.get("max_len"), 8))
+        except (QueryError, RepositoryError, GitError) as exc:
+            raise ApiError(400, str(exc)) from exc
+
+    def impact(self, query: dict[str, str]) -> dict[str, Any]:
+        """The blast radius of one node: its dependents by distance, and the entry points and tests reached."""
+        from .query import QueryError, blast_radius
+
+        try:
+            idx = self.repo.graph_index(query.get("rev") or "WORKTREE")
+            depth = _int(query.get("depth"), 0) or None
+            return blast_radius(idx, idx.resolve(query.get("node") or ""), depth=depth,
+                                max_items=_int(query.get("max_items"), 100, 500))
+        except (QueryError, RepositoryError, GitError) as exc:
+            raise ApiError(400, str(exc)) from exc
+
     def notes(self, query: dict[str, str]) -> dict[str, Any]:
         key = query.get("key") or ""
         if not key:
@@ -372,6 +403,10 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.notes(self._query()))
                 elif path == "/api/file/changes":
                     self._json(200, state.file_changes(self._query()))
+                elif path == "/api/path":
+                    self._json(200, state.why(self._query()))
+                elif path == "/api/impact":
+                    self._json(200, state.impact(self._query()))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:

@@ -6,6 +6,28 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Why does A depend on B? And what breaks if X changes?** ([#28](https://github.com/phillipecardenuto/repo-understanding/issues/28)).
+  - **`repoviz why A B`.**
+    - Prints up to 5 shortest import chains between two components,
+      packages, modules or files, with file:line and code per hop.
+    - Between two functions it uses call chains.
+    - When A does not depend on B, it shows the reverse chains.
+  - **`repoviz impact X`.**
+    - Lists dependents by distance, then fan-in.
+    - Adds the entry points and tests reached; for a function these match
+      the affected flow.
+  - **API.** `/api/path` and `/api/impact` serve the same answers.
+  - **Dependencies tab.**
+    - Right-click a link (or `w`) to list its chains; the first chain is
+      outlined in the diagram.
+    - `b` (or *Blast radius* in the details, also from Structure) draws the
+      dependents by ring (1, 2, 3+), labelled on each node and set apart by
+      border weight and dash, with entry points and tests.
+    - Static reports compute both in the page.
+  - **Bounds and speed.** At most 5 chains of 8 hops, and 5,000 nodes per
+    walk. On Django a query takes under 30 ms (0.3 s to index a snapshot,
+    once).
+  - **MCP.** `dependency_path` and the new commands share `query.py`.
 - **Lists that scale** ([#29](https://github.com/phillipecardenuto/repo-understanding/issues/29)).
   - The shared table gains a search box (`/`), component chips with counts,
     and collapsible groups with per-group totals. All of them are remembered

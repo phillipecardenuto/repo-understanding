@@ -14,6 +14,8 @@ Examples::
     repoviz review                        # what did the agent touch? what looks wrong?
     repoviz review --format prompt        # feedback to paste back to the agent
     repoviz activity
+    repoviz why app.routes app.db         # which imports make the routes depend on the database?
+    repoviz impact app.services.images.list_images   # what may break if it changes
 """
 
 from __future__ import annotations
@@ -484,6 +486,76 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def format_why_text(res: dict[str, Any]) -> str:
+    """``repoviz why``: each chain as one line of names, then one line per hop with file:line and code."""
+    out = [res["summary"]]
+
+    def chains(paths: list[list[dict[str, Any]]], title: str) -> None:
+        for i, chain in enumerate(paths, 1):
+            out.append(f"{title} {i}: " + " → ".join(s["name"] for s in chain))
+            for prev, step in zip(chain, chain[1:]):
+                where = step.get("evidence") or "?"
+                lines = (step.get("code") or "").strip().splitlines()
+                code = f"  {lines[0]}{' …' if len(lines) > 1 else ''}" if lines else ""
+                out.append(f"  {prev['name']} {step.get('how', 'uses')} {step['name']}  ({where}){code}")
+
+    chains(res["paths"], "chain")
+    chains(res.get("reverse_paths") or [], "reverse chain")
+    return "\n".join(out)
+
+
+def format_impact_text(res: dict[str, Any]) -> str:
+    """``repoviz impact``: the summary, then dependents by distance, entry points and tests."""
+    out = [res["summary"]]
+    for key, title in (("entry_points", "Entry points reached"), ("tests", "Tests reached")):
+        if res[key]:
+            out.append(f"{title} ({res['totals'][key]}):")
+            out += [f"  {x['distance']:>2}  {x['name']}  ({x['path']}:{x['line']})" if x.get("line") else
+                    f"  {x['distance']:>2}  {x['name']}" for x in res[key]]
+    if res["dependents"]:
+        out.append(f"Dependents by distance ({res['totals']['dependents']}; 1 = uses it directly):")
+        for x in res["dependents"]:
+            how = f" {x['how']} it" if x.get("how") else ""
+            out.append(f"  {x['distance']:>2}  {x['name']}{how}" + (f"  ({x['evidence']})" if x.get("evidence") else "")
+                       + (f"  · used by {x['fan_in']}" if x["fan_in"] else ""))
+    if res.get("importers_of_its_module"):
+        out.append("Also importing its module (uses not resolved to calls): "
+                   + ", ".join(x["name"] for x in res["importers_of_its_module"]))
+    for key in ("truncated", "capped"):
+        if res.get(key):
+            out.append(f"note: {res[key]}")
+    return "\n".join(out)
+
+
+def cmd_why(args: argparse.Namespace) -> int:
+    from .query import QueryError, why
+
+    repo = _open(args)
+    try:
+        idx = repo.graph_index(args.rev)
+        res = why(idx, idx.resolve(args.source), idx.resolve(args.target), max_paths=args.max_paths,
+                  max_len=args.max_len)
+    except QueryError as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    _write(json.dumps(res, indent=1) if args.json else format_why_text(res), args.output)
+    return EXIT_OK
+
+
+def cmd_impact(args: argparse.Namespace) -> int:
+    from .query import QueryError, blast_radius
+
+    repo = _open(args)
+    try:
+        idx = repo.graph_index(args.rev)
+        res = blast_radius(idx, idx.resolve(args.target), depth=args.depth or None, max_items=args.limit)
+    except QueryError as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    _write(json.dumps(res, indent=1) if args.json else format_impact_text(res), args.output)
+    return EXIT_OK
+
+
 def cmd_coupling(args: argparse.Namespace) -> int:
     repo = _open(args)
     if repo.git is None:
@@ -774,6 +846,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--suggest", action="store_true",
                    help="print a layers contract (TOML) suggested from the current imports between components")
     p.set_defaults(func=cmd_contracts)
+
+    p = sub.add_parser("why", parents=[common], help="why A depends on B: the shortest import (or call) chains, "
+                       "with file:line for every hop")
+    p.add_argument("source", help="component, package, module, symbol (qualified name) or path")
+    p.add_argument("target", help="what it depends on")
+    p.add_argument("--rev", default="WORKTREE", help="revision to analyze (default: the working tree)")
+    p.add_argument("--max-paths", type=int, default=5, help="at most this many chains (up to 5)")
+    p.add_argument("--max-len", type=int, default=8, help="at most this many hops per chain (up to 8)")
+    p.add_argument("--json", action="store_true", help="the chains with their evidence, as JSON")
+    p.set_defaults(func=cmd_why)
+
+    p = sub.add_parser("impact", parents=[common], help="blast radius: what uses X, transitively, with the entry "
+                       "points and tests it reaches")
+    p.add_argument("target", help="symbol, module, package, component (qualified name) or path")
+    p.add_argument("--rev", default="WORKTREE", help="revision to analyze (default: the working tree)")
+    p.add_argument("--depth", type=int, default=0, help="stop after this many steps (default: no limit)")
+    p.add_argument("--limit", type=int, default=50, help="at most this many items per list")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_impact)
 
     p = sub.add_parser("coupling", parents=[common],
                        help="files that usually change together, learned from Git history")

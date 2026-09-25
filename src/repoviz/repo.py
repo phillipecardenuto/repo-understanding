@@ -89,6 +89,7 @@ class Repository:
         self._snapshots: OrderedDict[tuple[str, ...], RepositorySnapshot] = OrderedDict()
         self._diffs: OrderedDict[tuple[str, ...], RepositoryDiff] = OrderedDict()
         self._couplings: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+        self._graph_indexes: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
         self._lock = threading.RLock()
         self._inflight: dict[tuple[Any, ...], threading.Lock] = {}
         self.state = StateStore(self.root, self.name, self.config.state_dir)
@@ -250,6 +251,28 @@ class Repository:
                     self.file_cache.clear()
                 self._inflight.pop(("snapshot", *key), None)
         return snap
+
+    def graph_index(self, spec: str | RevSpec = "WORKTREE") -> Any:
+        """The query index (``query.GraphIndex``) of a snapshot: built once per snapshot, then reused by every
+        "why" and "blast radius" question about it."""
+        from .query import GraphIndex
+
+        snap = self.snapshot(spec)
+        key = (snap.kind, snap.revision_id, self.config.fingerprint())
+        cached = self._cached(self._graph_indexes, key)
+        if cached is not None:
+            return cached
+        with self._single_flight(("graph_index", *key)):
+            cached = self._cached(self._graph_indexes, key)
+            if cached is not None:
+                return cached
+            idx = GraphIndex(snap)
+            with self._lock:
+                self._graph_indexes[key] = idx
+                while len(self._graph_indexes) > 2:
+                    self._graph_indexes.popitem(last=False)
+                self._inflight.pop(("graph_index", *key), None)
+        return idx
 
     @staticmethod
     def _relabel(snap: RepositorySnapshot, label: str) -> RepositorySnapshot:

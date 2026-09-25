@@ -78,6 +78,9 @@
   class StaticApi {
     constructor(data) { this.data = data; this.live = false; }
     async bundle() { return this.data; }
+    /* Graph queries run in the page, over the embedded snapshot (the live app asks the server). */
+    async why(si, a, b) { return whyPaths(si, a, b); }
+    async impact(si, id) { return blastRadius(si, id, null, 200); }
     async comparison(id) {
       const c = this.data.comparisons.find((x) => x.id === id) || this.data.comparisons[0];
       return c;
@@ -114,6 +117,8 @@
       return body;
     }
     bundle() { return this.get("/api/bundle"); }
+    why(si, a, b) { return this.get("/api/path?" + new URLSearchParams({ from: a, to: b }).toString()); }
+    impact(si, id) { return this.get("/api/impact?" + new URLSearchParams({ node: id, max_items: "200" }).toString()); }
     comparison(params) { return this.get("/api/diff?" + new URLSearchParams(params).toString()); }
     activity() { return this.get("/api/activity", true); }
     snapshot(rev) { return this.get("/api/snapshot?" + new URLSearchParams({ rev }).toString()); }
@@ -332,6 +337,173 @@
       memo.set(id, r);
       return r;
     };
+  }
+
+  // --------------------------------------------------------- graph queries
+  /* Why A depends on B, and blast radius: a mirror of query.py for static reports (the live app asks the
+     server, /api/path and /api/impact).  Same walks, same bounds, same result shape. */
+  const Q_MAX_PATHS = 5, Q_MAX_LEN = 8, Q_MAX_NODES = 5000;
+  const Q_HOW = { imports: "imports", calls: "calls", invokes: "runs" };
+  const addTo = (map, k, v, e) => { let m = map.get(k); if (!m) map.set(k, (m = new Map())); if (!m.has(v)) m.set(v, e); };
+  function queryIndex(si) {
+    if (si.q) return si.q;
+    const q = { users: new Map(), callers: new Map(), importers: new Map(), imports: new Map(), calls: new Map(), edge: new Map() };
+    for (const e of si.edges) {
+      if (!e.direct || e.source_id === e.target_id || !Q_HOW[e.relationship]) continue;
+      addTo(q.users, e.target_id, e.source_id, e);
+      addTo(e.relationship === "imports" ? q.importers : q.callers, e.target_id, e.source_id, e);
+      if (e.relationship === "imports") {
+        const t = si.nodes.get(e.target_id);
+        if (t && !hasTag(t, "external")) addTo(q.imports, e.source_id, e.target_id, e);
+      } else addTo(q.calls, e.source_id, e.target_id, e);
+    }
+    return (si.q = q);
+  }
+  /* graph.shortest_paths: up to maxPaths shortest paths from any start to any goal, deterministic. */
+  function shortestPaths(starts, goals, adj, maxPaths, maxDepth) {
+    const goalSet = new Set(goals), parents = new Map(), dist = new Map(), found = [];
+    let frontier = [...new Set(starts)].sort(cmpStr), depth = 0, visits = 0;
+    for (const x of frontier) dist.set(x, 0);
+    while (frontier.length && !found.length && depth < maxDepth && visits < 200000) {
+      depth++;
+      const next = [];
+      for (const cur of frontier) {
+        for (const n of [...((adj.get(cur) || new Map()).keys())].sort(cmpStr)) {
+          visits++;
+          if (!dist.has(n)) { dist.set(n, depth); parents.set(n, [cur]); next.push(n); }
+          else if (dist.get(n) === depth) parents.get(n).push(cur);
+          if (goalSet.has(n) && !found.includes(n) && dist.get(n) === depth) found.push(n);
+        }
+      }
+      frontier = next;
+    }
+    const paths = [];
+    const walk = (node, suffix) => {
+      if (paths.length >= maxPaths) return;
+      if (dist.get(node) === 0) { paths.push(suffix.slice().reverse()); return; }
+      for (const p of parents.get(node) || []) walk(p, [...suffix, p]);
+    };
+    for (const g of found.sort(cmpStr)) walk(g, [g]);
+    return paths.slice(0, maxPaths);
+  }
+  function qModuleOf(si, n) { for (let i = 0; n && n.category === "symbol" && i < 64; i++) n = si.nodes.get(n.parent_id); return n; }
+  function qModulesUnder(si, n) {
+    if (n.category === "module") return [n.id];
+    if (n.category === "symbol") { const m = qModuleOf(si, n); return m ? [m.id] : []; }
+    const out = [], stack = [n.id];
+    while (stack.length && out.length < Q_MAX_NODES) {
+      for (const c of si.children.get(stack.pop()) || []) {
+        const x = si.nodes.get(c);
+        if (x.category === "module") out.push(c); else if (x.category !== "symbol") stack.push(c);
+      }
+    }
+    return out.sort(cmpStr);
+  }
+  function qSymbolsUnder(si, ids) {
+    const out = [], stack = [...ids];
+    while (stack.length && out.length < Q_MAX_NODES) for (const c of si.children.get(stack.pop()) || []) if (si.nodes.get(c).category === "symbol") { out.push(c); stack.push(c); }
+    return out;
+  }
+  function qComponent(si, n) {
+    for (let i = 0; n && i < 64; i++) {
+      const cid = meta(n).component_id || (hasTag(n, "component") ? n.id : null);
+      if (cid && si.nodes.has(cid)) return si.nodes.get(cid);
+      n = si.nodes.get(n.parent_id);
+    }
+    return null;
+  }
+  const qLoc = (p, l) => (p && l ? `${p}:${l}` : p || null);
+  function qEvidence(e) {
+    const ev = e && (e.evidence || [])[0];
+    if (!ev) return {};
+    const out = { evidence: qLoc(ev.path, ev.start_line) };
+    if (ev.excerpt) out.code = String(ev.excerpt).slice(0, 200);
+    return out;
+  }
+  const qDescribe = (n) => Object.assign({ name: n.qualified_name, kind: n.component_type, id: n.id }, n.path ? { at: qLoc(n.path, n.start_line) } : {});
+  function whyPaths(si, aId, bId, maxPaths, maxLen) {
+    const q = queryIndex(si), a = si.nodes.get(aId), b = si.nodes.get(bId);
+    if (!a || !b) throw new Error("unknown node");
+    maxPaths = Math.max(1, Math.min(maxPaths || Q_MAX_PATHS, Q_MAX_PATHS)); maxLen = Math.max(1, Math.min(maxLen || Q_MAX_LEN, Q_MAX_LEN));
+    const step = (id, e) => { const n = si.nodes.get(id); return Object.assign({ id, name: n.qualified_name, path: n.path, line: n.start_line || null }, e ? Object.assign({ how: Q_HOW[e.relationship] || e.relationship }, qEvidence(e)) : {}); };
+    const chains = (src, dst, adj) => shortestPaths(src, dst, adj, maxPaths, maxLen).map((p) => [step(p[0]), ...p.slice(1).map((t, i) => step(t, adj.get(p[i]).get(t)))]);
+    let level = "imports", found = [], back = [];
+    if (a.category === "symbol" && b.category === "symbol") { found = chains([a.id], [b.id], q.calls); if (found.length) level = "calls"; }
+    const starts = qModulesUnder(si, a);
+    let goals = qModulesUnder(si, b);
+    if (!found.length) {
+      if (!starts.length || !goals.length) throw new Error("both ends must be (or contain) modules of the analyzed code");
+      const s0 = new Set(starts), g2 = goals.filter((g) => !s0.has(g));
+      if (g2.length) goals = g2;
+      found = chains(starts, goals, q.imports);
+      if (!found.length) back = chains(goals, starts, q.imports);
+    }
+    const res = { source: qDescribe(a), target: qDescribe(b), level, paths: found, max_paths: maxPaths, max_len: maxLen };
+    if (found.length) {
+      const hops = found[0].length - 1;
+      res.summary = `${a.qualified_name} depends on ${b.qualified_name}: ${found.length} shortest chain(s) of ${hops} ${level === "calls" ? "call" : "import"}${hops !== 1 ? "s" : ""}${hops === 1 ? " (direct)" : ""}.`;
+    } else {
+      res.reverse_paths = back;
+      res.summary = `${a.qualified_name} does not depend on ${b.qualified_name} (within ${maxLen} imports)${back.length ? `; but ${b.qualified_name} depends on ${a.qualified_name}.` : "."}`;
+    }
+    return res;
+  }
+  function blastRadius(si, nodeId, depth, maxItems) {
+    const q = queryIndex(si), node = si.nodes.get(nodeId);
+    if (!node) throw new Error("unknown node");
+    let seedSyms, seedMods;
+    if (node.category === "symbol") { seedSyms = [node.id, ...qSymbolsUnder(si, [node.id])]; seedMods = []; }
+    else { seedMods = qModulesUnder(si, node); seedSyms = qSymbolsUnder(si, seedMods); }
+    const seeds = new Set([...seedSyms, ...seedMods]), dist = new Map([...seeds].map((x) => [x, 0])), via = new Map();
+    let capped = false;
+    for (const [starts, users] of [[seedSyms, q.callers], [seedMods, q.importers]]) {
+      const queue = [...starts].sort(cmpStr);
+      for (let i = 0; i < queue.length; i++) {
+        const cur = queue[i];
+        if (depth && dist.get(cur) >= depth) continue;
+        for (const user of [...((users.get(cur) || new Map()).keys())].sort(cmpStr)) {
+          if (!si.nodes.has(user) || dist.has(user)) continue;
+          if (dist.size >= Q_MAX_NODES) { capped = true; break; }
+          dist.set(user, dist.get(cur) + 1); via.set(user, [cur, users.get(cur).get(user)]); queue.push(user);
+        }
+      }
+    }
+    let moduleImporters = [];
+    if (node.category === "symbol") {
+      const m = qModuleOf(si, node);
+      const reachedModules = new Set([...dist.keys()].map((x) => qModuleOf(si, si.nodes.get(x))).filter(Boolean).map((x) => x.id));
+      if (m) moduleImporters = [...((q.importers.get(m.id) || new Map()).keys())].filter((u) => !dist.has(u) && !reachedModules.has(u) && si.nodes.has(u)).sort(cmpStr);
+    }
+    const fanIn = (n) => (q.users.get(n) || new Map()).size;
+    const tag = (n, t) => hasTag(si.nodes.get(n), t);
+    const reached = [...dist.keys()].filter((n) => !seeds.has(n)).sort((x, y) => (dist.get(x) - dist.get(y)) || (fanIn(y) - fanIn(x)) || cmpStr(si.nodes.get(x).qualified_name, si.nodes.get(y).qualified_name));
+    const chain = (n) => { const out = [n]; while (via.has(out[out.length - 1]) && out.length < 64) out.push(via.get(out[out.length - 1])[0]); return out; };
+    const item = (nid) => {
+      const n = si.nodes.get(nid), m = qModuleOf(si, n), comp = qComponent(si, m);
+      const out = { id: nid, name: n.qualified_name, kind: n.component_type, category: n.category, path: n.path, line: n.start_line || null, distance: dist.get(nid), fan_in: fanIn(nid),
+        module: m ? m.qualified_name : null, component: comp ? comp.qualified_name : null };
+      if (via.has(nid)) { const [t, e] = via.get(nid); Object.assign(out, { uses: t, how: Q_HOW[e.relationship] || e.relationship }, qEvidence(e)); }
+      return out;
+    };
+    const entryPoints = reached.filter((n) => tag(n, "entry-point") && !tag(n, "test"));
+    const tests = reached.filter((n) => tag(n, "test") && (tag(n, "entry-point") || si.nodes.get(n).category === "module"));
+    const users = reached.filter((n) => !tag(n, "test"));
+    const seedModules = new Set([...seeds].map((x) => qModuleOf(si, si.nodes.get(x))).filter(Boolean).map((m) => m.id));
+    const modules = new Set(users.map((n) => qModuleOf(si, si.nodes.get(n))).filter((m) => m && !seedModules.has(m.id)).map((m) => m.id));
+    const components = new Set([...modules].map((mid) => qComponent(si, si.nodes.get(mid))).filter(Boolean).map((c) => c.id));
+    const testFiles = [...new Set(tests.map((n) => si.nodes.get(n).path).filter(Boolean))].sort(cmpStr);
+    const k = Math.max(1, maxItems || 100);
+    const t = { dependents: users.length, modules: modules.size, components: components.size, entry_points: entryPoints.length, tests: tests.length, test_files: testFiles.length };
+    const res = { target: Object.assign(qDescribe(node), { category: node.category }), depth: depth || null, seeds: seeds.size, totals: t,
+      dependents: users.slice(0, k).map(item), entry_points: entryPoints.slice(0, k).map((n) => Object.assign(item(n), { chain: chain(n) })),
+      tests: tests.slice(0, k).map((n) => Object.assign(item(n), { chain: chain(n) })), test_files: testFiles.slice(0, k),
+      importers_of_its_module: moduleImporters.filter((n) => !tag(n, "test")).slice(0, k).map((n) => qDescribe(si.nodes.get(n))) };
+    if (capped) res.capped = `stopped after ${Q_MAX_NODES} nodes`;
+    if (users.length > k || entryPoints.length > k || tests.length > k) res.truncated = `lists cut at ${k} items (totals count everything)`;
+    const pl = (n, w) => `${n} ${w}${n !== 1 ? "s" : ""}`;
+    res.summary = `Changing ${node.qualified_name} can affect ${pl(t.modules, "module")} in ${pl(t.components, "component")}, ${pl(t.entry_points, "entry point")}, ${pl(t.tests, "test")}.`;
+    if (!reached.length && !moduleImporters.length) res.summary += " Nothing in the analyzed code uses it (dynamic uses, such as getattr or string imports, are not seen).";
+    return res;
   }
 
   /* Pick the coarsest level that still shows some structure (small repositories have few components). */
@@ -1197,6 +1369,7 @@
         if (target.tagName === "path") { target.style.pointerEvents = "stroke"; target.setAttribute("stroke-linecap", "round"); }
         target.style.cursor = "pointer";
         target.addEventListener("click", (ev) => { if (this.suppressClick) return; ev.stopPropagation(); handlers.onEdge(e); });
+        if (handlers.onEdgeMenu) target.addEventListener("contextmenu", (ev) => { ev.preventDefault(); ev.stopPropagation(); handlers.onEdgeMenu(e); });
       }
       this.fit();
       if (this.find.value) this.highlight(this.find.value);
@@ -1206,9 +1379,40 @@
     /* Spotlight a node's direct neighbourhood (one hop) without touching the layout: the node, the nodes that use it
        (inbound: solid, thick links) and the nodes it uses (outbound: dashed, thick links) stay; the rest fades.
        Never colour alone: stroke weight and pattern differ, and a status line names both directions. */
+    /* Highlight one chain (why A depends on B): its nodes and links stay, thick and outlined; the rest fades.
+       ids: the view's node IDs along the chain; pairs: [source, target] view edges; note: what is shown. */
+    chain(ids, pairs, note) {
+      this.spotlight(null);
+      const on = new Set(ids), keys = new Set(pairs.map(([a, b]) => a + "\u0000" + b));
+      this.spot = "\u0000chain";
+      $("svg", this.stage) && $("svg", this.stage).classList.add("rv-spotlight");
+      for (const [id, g] of this.nodeEls || new Map()) g.classList.add(on.has(id) ? "is-chain" : "is-dimmed");
+      for (const { e, el } of this.edgeEls || []) el.classList.add(keys.has(e.source + "\u0000" + e.target) ? "is-chain" : "is-dimmed");
+      this.spotNote.innerHTML = "";
+      this.spotNote.hidden = false;
+      put(this.spotNote, note, h("span", { class: "muted", text: " · the chain is outlined, everything else is faded. " }),
+        h("button", { class: "btn small", type: "button", onclick: () => { this.spotlight(null); this.viewport.focus(); } }, "Clear (Esc)"));
+      this.reveal(ids);
+    }
+    /* Bring the given nodes into view: centre them, zooming out only as far as needed to show them all
+       (never below 20%). */
+    reveal(ids) {
+      const boxes = ids.map((id) => (this.nodeEls || new Map()).get(id)).filter(Boolean).map((g) => g.getBoundingClientRect());
+      const vp = this.viewport.getBoundingClientRect();
+      if (!boxes.length || !vp.width) return;
+      const x0 = Math.min(...boxes.map((b) => b.left)), x1 = Math.max(...boxes.map((b) => b.right));
+      const y0 = Math.min(...boxes.map((b) => b.top)), y1 = Math.max(...boxes.map((b) => b.bottom));
+      if (x0 >= vp.left && x1 <= vp.right && y0 >= vp.top && y1 <= vp.bottom) return;  // already in view
+      const k = this.t.k, fit = Math.min(1, (vp.width * 0.9) / (x1 - x0 || 1), (vp.height * 0.9) / (y1 - y0 || 1));
+      const k2 = Math.max(0.2, Math.min(k, k * fit));
+      // the box centre in diagram coordinates, then placed in the middle of the view at the new zoom
+      const cx = ((x0 + x1) / 2 - vp.left - this.t.x) / k, cy = ((y0 + y1) / 2 - vp.top - this.t.y) / k;
+      this.t = { k: k2, x: vp.width / 2 - cx * k2, y: vp.height / 2 - cy * k2 };
+      this.apply();
+    }
     spotlight(nid) {
       this.spot = nid || null;
-      const cls = ["is-focused", "is-linked-inbound", "is-linked-outbound", "is-dimmed"];
+      const cls = ["is-focused", "is-linked-inbound", "is-linked-outbound", "is-dimmed", "is-chain"];
       for (const g of (this.nodeEls || new Map()).values()) g.classList.remove(...cls);
       for (const { el } of this.edgeEls || []) el.classList.remove(...cls);
       const svg = $("svg", this.stage);
@@ -1533,8 +1737,11 @@
       h("dd", { class: typeof v === "object" ? "mono" : null, text: typeof v === "object" ? JSON.stringify(v, null, Array.isArray(v) && v.length < 6 ? 0 : 1) : String(v) })]));
   }
 
+  /* Links that "why" explains with chains (import or call chains); other links carry their own evidence. */
+  const WHY_RELS = new Set(["imports", "calls"]);
   class DetailsPanel {
-    constructor(app) { this.app = app; this.el = h("div", { class: "card" }, h("div", { class: "details-empty", text: "Select a node or an edge label in the diagram (or a table row) to see details and source evidence." })); }
+    /* opts.onWhy(sourceId, targetId) and opts.onBlast(nodeId) add "Why…" (edges) and "Blast radius" (nodes). */
+    constructor(app, opts) { this.app = app; this.opts = opts || {}; this.el = h("div", { class: "card" }, h("div", { class: "details-empty", text: "Select a node or an edge label in the diagram (or a table row) to see details and source evidence." })); }
     clear(text) { this.el.innerHTML = ""; this.el.appendChild(h("div", { class: "details-empty", text: text || "Nothing selected." })); }
     showNode(idx, id, extra) {
       const n = idx.nodes.get(id);
@@ -1559,6 +1766,7 @@
       const actions = h("div", { class: "group", style: { marginTop: "8px" } });
       if (this.app.tabs.dependencies) actions.appendChild(h("button", { class: "btn small", onclick: () => this.app.focusDependencies(id) }, "Focus in Dependencies"));
       if (this.app.tabs.structure && idx.kind === "snapshot") actions.appendChild(h("button", { class: "btn small", onclick: () => this.app.showInStructure(id) }, "Show in Structure"));
+      if (this.opts.onBlast && !hasTag(n, "external")) actions.appendChild(h("button", { class: "btn small", title: "What may break if this changes (b)", onclick: () => this.opts.onBlast(id) }, iconEl("zap"), " Blast radius"));
       this.el.appendChild(actions);
       for (const [title, list, other] of [["Outgoing", idx.out.get(id) || [], "target_id"], ["Incoming", idx.inn.get(id) || [], "source_id"]]) {
         if (!list.length) continue;
@@ -1585,6 +1793,9 @@
       const s = idx.nodes.get(e.source), t = idx.nodes.get(e.target);
       this.el.appendChild(h("h3", null, `${s ? displayName(s) : e.source} → ${t ? displayName(t) : e.target} `, statusPill(e.status), e.cycle ? pill("⟲ cycle", "cycle") : null));
       this.el.appendChild(h("div", { class: "muted", text: `${e.relationship} · ${plural(e.count || 1, "occurrence")}${e.underlying && e.underlying.length > 1 ? ` · aggregated from ${e.underlying.length} direct relationships` : ""}` }));
+      if (this.opts.onWhy && e.source !== e.target && WHY_RELS.has(e.relationship)) this.el.appendChild(h("div", { class: "group", style: { margin: "6px 0" } },
+        h("button", { class: "btn small", title: "The shortest import chains behind this link, with file:line (w, or right-click the link)", onclick: () => this.opts.onWhy(e.source, e.target) },
+          `Why does ${s ? s.name || displayName(s) : e.source} depend on ${t ? t.name || displayName(t) : e.target}?`)));
       for (const uid of (e.underlying || []).slice(0, 50)) {
         const u = idx.edgeById.get(uid);
         if (!u) continue;
@@ -1594,6 +1805,36 @@
         this.el.appendChild(evidenceList(evidenceOf(u), 5));
         if (u.base_evidence && u.base_evidence.length) put(this.el, h("div", { class: "muted", text: "Before:" }), evidenceList(u.base_evidence, 3));
       }
+    }
+    /* "Why does A depend on B?": up to 5 chains, each hop with file:line and code; pick one to highlight it. */
+    showWhy(res, pick) {
+      this.el.innerHTML = "";
+      const chainsEl = (paths, reverse) => h("ol", { class: "why-chains" }, paths.map((p, i) => h("li", null,
+        h("div", { class: "why-head" }, pick && !reverse ? h("button", { class: "btn small", type: "button", onclick: () => pick(i) }, `Show chain ${i + 1}`) : null, " ",
+          h("span", { class: "mono", text: p.map((x) => x.name).join(" → ") })),
+        h("ul", { class: "plain why-hops" }, p.slice(1).map((x, j) => h("li", null,
+          h("span", { class: "mono", text: `${p[j].name} ${x.how || "uses"} ${x.name}` }), " ",
+          x.evidence ? h("span", { class: "loc faint mono", text: x.evidence }) : null,
+          x.code ? h("pre", { class: "excerpt", text: x.code }) : null))))));
+      put(this.el, h("h3", null, iconEl("graph"), ` Why does ${res.source.name} depend on ${res.target.name}?`),
+        h("div", { class: "muted", text: res.summary }),
+        res.paths.length ? chainsEl(res.paths, false) : null,
+        (res.reverse_paths || []).length ? [h("h4", { text: `The other way round: ${res.target.name} depends on ${res.source.name}` }), chainsEl(res.reverse_paths, true)] : null,
+        h("div", { class: "faint", text: `Shortest ${res.level === "calls" ? "call" : "import"} chains only: at most ${res.max_paths || 5}, of up to ${res.max_len || 8} steps. Dynamic imports and calls are not seen.` }));
+    }
+    /* Blast radius: the summary, then entry points, tests and dependents by distance. */
+    showBlast(res, back) {
+      this.el.innerHTML = "";
+      const ring = (d) => (d >= 3 ? "3+" : String(d));
+      const row = (x, ic) => h("li", null, h("span", { class: "ring-tag", title: `distance ${x.distance}` }, `ring ${ring(x.distance)}`), " ", ic ? [iconEl(ic), " "] : null,
+        h("span", { class: "mono", text: x.name }), x.how ? h("span", { class: "faint", text: ` ${x.how} it` }) : null, x.evidence ? h("span", { class: "faint mono", text: ` · ${x.evidence}` }) : null);
+      const list = (title, items, ic, total) => items.length ? [h("h4", { text: `${title} (${total})` }), h("ul", { class: "plain scroll blast-list", style: { maxHeight: "220px" } }, items.slice(0, 100).map((x) => row(x, ic)))] : null;
+      put(this.el, h("h3", null, iconEl("zap"), ` Blast radius of ${res.target.name}`), h("div", { class: "blast-summary", text: res.summary }),
+        back ? h("div", { class: "group", style: { margin: "6px 0" } }, h("button", { class: "btn small", onclick: back }, "← Back to dependencies")) : null,
+        list("Entry points reached", res.entry_points, "play", res.totals.entry_points), list("Tests reached", res.tests, "flask", res.totals.tests),
+        list("Dependents by distance", res.dependents, null, res.totals.dependents),
+        (res.importers_of_its_module || []).length ? [h("h4", { text: "Also importing its module" }), h("div", { class: "faint", text: res.importers_of_its_module.map((x) => x.name).join(", ") + " (uses not resolved to calls)" })] : null,
+        res.capped || res.truncated ? h("div", { class: "faint", text: [res.capped, res.truncated].filter(Boolean).join("; ") }) : null);
     }
     showActivity(ev, activity) {
       this.el.innerHTML = "";
@@ -1834,7 +2075,7 @@
       this.unfolded = new Set();
       this.diagram = new Diagram({ title: "Structure", legend: kindLegend, orient: "structure",
         onFind: () => { if (this.foldsSeen && this.viewName() !== "system") this.draw(); } });  // a match inside a fold comes out
-      this.details = new DetailsPanel(app);
+      this.details = new DetailsPanel(app, { onBlast: (id) => app.showBlast(id) });
       this.crumbs = h("div", { class: "crumbs" });
       this.drawer = h("div", { class: "card changes-drawer", role: "region", "aria-label": "Code changes", hidden: true });
       document.addEventListener("keydown", (ev) => {
@@ -2106,6 +2347,40 @@
       diagnosticsCard((snap && snap.diagnostics) || [], "Analysis diagnostics"));
   }
 
+  /* Blast radius as a diagram: the node, then its dependents by ring (1 = uses it directly, 2, 3+), with the
+     entry points (play icon) and tests (flask) reached and the chains that lead to them.  Each link points from
+     a dependent to what it uses.  Rings differ in border weight and dash and are written on every node. */
+  const RING_KIND = (d) => (d <= 1 ? "ring1" : d === 2 ? "ring2" : "ring3");
+  function blastView(si, res, maxNodes) {
+    const view = { title: "Blast radius", direction: "LR", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, orientable: true };
+    const items = new Map();
+    for (const x of [...res.dependents, ...res.entry_points, ...res.tests]) if (!items.has(x.id)) items.set(x.id, x);
+    const seed = res.target.id, keep = new Set([seed]), limit = maxNodes || 80;
+    const add = (id) => { if (!keep.has(id) && items.has(id)) { if (keep.size < limit) keep.add(id); else view.truncated++; } };
+    for (const x of [...res.entry_points.slice(0, 12), ...res.tests.slice(0, 12)]) for (const id of x.chain || [x.id]) add(id);
+    for (const x of res.dependents) add(x.id);
+    view.truncated = Math.max(view.truncated, res.totals.dependents + res.totals.tests - (keep.size - 1));
+    // symbols keep their module or class ("api.list_images", "Store.save"): two list_images are told apart
+    const label = (id, fallback) => { const n = si.nodes.get(id); return n ? (n.category === "symbol" ? String(n.qualified_name).split(/[.:]/).slice(-2).join(".") : n.name || displayName(n)) : fallback; };
+    const sn = si.nodes.get(seed);
+    view.nodes.push({ id: seed, label: label(seed, res.target.name), sublabel: "changed here", status: "unchanged", kind: "seed", shape: "stadium", icon: sn ? icon(sn) : "", parent: null });
+    for (const id of keep) {
+      if (id === seed) continue;
+      const x = items.get(id), n = si.nodes.get(id);
+      const entry = res.entry_points.some((e) => e.id === id), test = res.tests.some((e) => e.id === id);
+      view.nodes.push({ id, label: label(id, x.name), sublabel: `ring ${x.distance >= 3 ? "3+" : x.distance}${x.how ? " · " + x.how : ""}${entry ? " · entry point" : test ? " · test" : ""}`,
+        status: "unchanged", kind: RING_KIND(x.distance), shape: n && n.category === "module" ? "round" : "box", icon: entry ? "play" : test ? "flask" : n ? icon(n) : "", parent: null });
+      const to = keep.has(x.uses) ? x.uses : seed;  // a symbol inside the node, or a dependent not drawn: link to the node
+      view.edges.push({ source: id, target: to, status: "unchanged", relationship: x.how === "imports" ? "imports" : "calls", count: 1 });
+    }
+    return view;
+  }
+  function blastLegend() {
+    const sw = (kind, text) => { const k = (THEME.kind || {})[kind] || {}; return h("span", { class: "item" }, h("span", { class: "swatch", style: { background: k.fill, borderColor: k.stroke, borderWidth: (k.width || 1) + "px", borderStyle: k.dash ? "dashed" : "solid" } }), text); };
+    return [sw("seed", "the node that changes"), sw("ring1", "ring 1: uses it directly (thick border)"), sw("ring2", "ring 2: one step further"), sw("ring3", "ring 3+: further (thin, dashed)"),
+      h("span", { class: "item" }, iconEl("play"), " entry point"), h("span", { class: "item" }, iconEl("flask"), " test"), h("span", { class: "item" }, "→ from a dependent to what it uses")];
+  }
+
   class DependenciesTab {
     constructor(app, root) {
       this.app = app; this.root = root;
@@ -2126,7 +2401,15 @@
       this.si.contractInfo = contractInfo(app.bundle.contracts);
       if (!this.si.contractInfo) o.contracts = false;
       this.diagram = new Diagram({ title: "Dependencies", legend: () => [...kindLegend(), runtimeLegend(), contractLegend()], spotlight: true, orient: "dependencies" });
-      this.details = new DetailsPanel(app);
+      this.details = new DetailsPanel(app, { onWhy: (a, b) => this.showWhy(a, b), onBlast: (id) => this.showBlast(id) });
+      this.blastNote = h("div", { class: "notice blast-note", role: "status", hidden: true });
+      document.addEventListener("keydown", (ev) => {  // w: why (the last edge clicked); b: blast radius (the selected node)
+        if (this.app.currentTab !== "dependencies" || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable]")) return;
+        if (ev.key === "Escape" && this.diagram.spot) { ev.preventDefault(); this.diagram.spotlight(null); }
+        else if (ev.key === "w" && this.lastEdge && WHY_RELS.has(this.lastEdge.relationship)) { ev.preventDefault(); this.showWhy(this.lastEdge.source, this.lastEdge.target); }
+        else if (ev.key === "b" && this.diagram.selected && this.si.nodes.has(this.diagram.selected)) { ev.preventDefault(); this.showBlast(this.diagram.selected); }
+      });
       this.focusInput = h("input", { type: "search", list: "rv-nodes", placeholder: "type a name…", size: 26, "aria-label": "Focus node" });
       this.datalist = h("datalist", { id: "rv-nodes" });
       this.focusInput.addEventListener("change", () => {
@@ -2160,7 +2443,7 @@
           checkbox("highlight cycles", o.cycles, (c) => { o.cycles = c; redraw(); }), checkbox("cycles only", o.cyclesOnly, (c) => { o.cyclesOnly = c; redraw(); }),
           checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
         h("div", { class: "field" }, h("span", { text: "Overlay" }), h("div", { class: "group" }, overlay))),
-        this.levelNote = h("div", { class: "notice", role: "status", hidden: true }),
+        this.levelNote = h("div", { class: "notice level-note", role: "status", hidden: true }), this.blastNote,
         h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el),
         h("div", { class: "two-col" }, this.cyclesEl, this.fanEl), this.contractsEl);
       this.servicesCheck.title = "Also draw the Compose services' own links (images, builds, other services). Services the code calls are always shown; the System view (Structure tab) is their home.";
@@ -2218,8 +2501,50 @@
       }
       return view;
     }
+    /* Why does A depend on B: the chains in the side panel; the first one is outlined in the diagram. */
+    async showWhy(a, b) {
+      let res;
+      try { res = await this.app.api.why(this.si, a, b); } catch (err) { this.details.clear("Why: " + err.message); return; }
+      const pick = (i) => this.highlightChain(res, i);
+      this.details.showWhy(res, res.paths.length ? pick : null);
+      if (res.paths.length && !this.blast) pick(0);
+    }
+    highlightChain(res, i) {
+      const view = this.diagram.view, chain = res.paths[i];
+      if (!view || !chain) return;
+      const group = makeGrouper(this.si, view.level || "module", true), drawn = new Set(view.nodes.map((n) => n.id));
+      const ids = [];
+      for (const st of chain) { const g = group(st.id) || st.id; if (drawn.has(g) && ids[ids.length - 1] !== g) ids.push(g); }
+      const pairs = ids.slice(1).map((g, j) => [ids[j], g]);
+      this.diagram.chain(ids, pairs, h("span", null, h("b", { text: `Chain ${i + 1} of ${res.paths.length}: ` }), chain.map((x) => x.name).join(" → ")));
+    }
+    /* Blast radius of a node, drawn in place of the dependency graph until "Back to dependencies". */
+    async showBlast(id) {
+      let res;
+      try { res = await this.app.api.impact(this.si, id); } catch (err) { this.details.clear("Blast radius: " + err.message); return; }
+      this.blast = res;
+      await this.draw();
+    }
+    closeBlast() { this.blast = null; this.diagram.setLegend(() => [...kindLegend(), runtimeLegend(), contractLegend()]); this.draw(); }
+    async drawBlast() {
+      const res = this.blast;
+      this.blastNote.innerHTML = "";
+      put(this.blastNote, iconEl("zap"), " ", h("b", { text: res.summary }), " ",
+        h("button", { class: "btn small", onclick: () => this.closeBlast() }, "← Back to dependencies"));
+      this.blastNote.hidden = false;
+      const view = blastView(this.si, res, this.opts.maxNodes);
+      this.diagram.setTitle(`Blast radius · ${res.target.name}`);
+      this.diagram.setLegend(blastLegend);
+      await this.diagram.render(view, {
+        onNode: (nid) => { this.diagram.select(nid); if (this.si.nodes.has(nid)) this.details.showNode(this.si, nid); },
+        onNodeDouble: (nid) => { if (this.si.nodes.has(nid)) this.showBlast(nid); },
+      });
+      this.details.showBlast(res, () => this.closeBlast());
+    }
     async draw() {
       const o = this.opts, si = this.si;
+      if (this.blast) return this.drawBlast();
+      this.blastNote.hidden = true;
       if (o.level === "symbol" && !o.focus && !o.cycleMembers) {
         this.diagram.setTitle("Symbol-level call graph");
         await this.diagram.render({ title: "", nodes: [], edges: [], subgraphs: new Map() }, {});
@@ -2241,7 +2566,8 @@
       await this.diagram.render(view, {
         onNode: (id) => this.details.showNode(si, id),
         onNodeDouble: (id) => this.setFocus(id),
-        onEdge: (e) => this.details.showEdge(si, e),
+        onEdge: (e) => { this.lastEdge = e; this.details.showEdge(si, e); },
+        onEdgeMenu: (e) => { this.lastEdge = e; if (WHY_RELS.has(e.relationship)) this.showWhy(e.source, e.target); else this.details.showEdge(si, e); },
         onCluster: (id) => this.details.showNode(si, id),
       });
       this.drawSide(view);
@@ -3524,6 +3850,8 @@
           "**Runtime (containers, HTTP)** (on by default) adds coupling that imports miss. A **runs image** line (dashed, labelled with the image) goes from code that starts a container to the code that builds that image: `client.containers.run(settings.ENGINE_IMAGE)` or `[\"docker\", \"run\", IMAGE]` leads to the submodule or directory the image is built from. A **talks to** line (solid, labelled with protocol and port) goes from code that calls a service's URL (`http://cbir-service:8000/…`, or a host variable that the Compose files point at a service) to that service. Constants are followed across imports; nothing is run. An image or host this repository does not provide makes no line: the module lists it under *external runtime references* in its details.",
           "**Include**: external packages, the standard library, tests and type-only imports can be switched on or off to reduce noise.",
           "**Highlight cycles** draws dependency cycles in purple; **cycles only** shows nothing else. The Cycles card lists every cycle; click one to focus on it.",
+          "**Why does A depend on B?** Right-click a link (or click it, then press `w`, or use the button in the side panel). The panel lists up to 5 shortest import chains (calls, between two functions), each step with its file:line and code. The first chain is outlined in the diagram and everything else fades; **Show chain N** picks another; Esc clears it.",
+          "**Blast radius**: select a node and press `b` (or **Blast radius** in its details, also in the Structure tab). The diagram shows what may break if it changes: its dependents by **ring** (ring 1 uses it directly, thick border; ring 2; ring 3+, thin and dashed; the ring is written on every node), the **entry points** (play icon) and **tests** (flask) reached, and a summary such as “Changing images.list_images can affect 14 modules in 4 components, 3 entry points, 6 tests”. Double-click a node for its own blast radius; **← Back to dependencies** returns. The same walk as the Activity tab's affected flow, on demand.",
           "The fan-in / fan-out table ranks the most-used and most-dependent nodes, often the core and the riskiest modules.",
           "**Contracts** (Overlay) marks every import that breaks an architecture contract from `[[contracts]]`: a thick, dashed line labelled “⚠ contract name” (“known” when it is in the baseline). A layers contract also draws its layers as numbered groups (Layer 1 is the highest; the layout may place them side by side). The **Architecture contracts** card lists each contract (✓ pass or ⚠ N new) and its violations; click one to focus on the importing module. Check a whole tree with `repoviz contracts`."] },
         { tip: "Before accepting a wave that adds a dependency, focus on its source and check the direction matches your layering (for example UI → service → data, never back)." },
@@ -3554,7 +3882,7 @@
       ] },
     { id: "keys", title: "Keyboard shortcuts", icon: "keyboard", intro: "Shortcuts are ignored while you type in a field.",
       blocks: [
-        { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file, in the table's order (AI Review: riskiest first; collapsed groups are skipped)"], ["o", "collapse or expand the current file's group (AI Review)"], ["/", "search the tab's list (AI Review files, Changes nodes)"],
+        { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file, in the table's order (AI Review: riskiest first; collapsed groups are skipped)"], ["o", "collapse or expand the current file's group (AI Review)"], ["w", "why does the last clicked link exist: its import chains (Dependencies)"], ["b", "blast radius of the selected node (Dependencies)"], ["/", "search the tab's list (AI Review files, Changes nodes)"],
           ["m", "mark the open file reviewed and go to the next unreviewed one (AI Review)"], ["[ / ]", "previous / next commit of the wave; past either end shows the whole wave (AI Review)"], ["Ctrl+Enter", "apply the scope boxes (AI Review)"],
           ["arrows, + / -, 0", "pan, zoom and fit a focused diagram"], ["Enter", "open the focused table row or diagram node"]] },
       ] },
@@ -3785,6 +4113,7 @@
       if (t && t.diagram) t.diagram.select(id);
     }
     async focusDependencies(id) { await this.show("dependencies"); this.tabs.dependencies.setFocus(id); }
+    async showBlast(id) { await this.show("dependencies"); this.tabs.dependencies.showBlast(id); }
     async showInStructure(id) {
       await this.show("structure");
       const si = this.snapshotIndex, n = si.nodes.get(id);
@@ -3826,7 +4155,7 @@
     } catch (err) { fail("Could not load repository data: " + err.message); return; }
     const app = new App(api, bundle);
     APP = app;
-    window.repoviz = { app, toMermaid, changesView, dependencyView, structureView, systemView, flowView, activityView, indexDiff, indexSnapshot, chooseDirection };
+    window.repoviz = { app, toMermaid, changesView, dependencyView, structureView, systemView, flowView, activityView, indexDiff, indexSnapshot, chooseDirection, whyPaths, blastRadius };
     await app.init();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", main); else main();

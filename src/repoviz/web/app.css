@@ -139,6 +139,17 @@ main { padding: 14px 16px 40px; }
 .viewport svg.rv-spotlight g.node.is-linked-inbound :is(rect, polygon, path, circle) { stroke-width: 3px !important; stroke-dasharray: none !important; }
 .viewport svg.rv-spotlight g.node.is-linked-outbound :is(rect, polygon, path, circle) { stroke-width: 3px !important; stroke-dasharray: 7 4 !important; }
 .viewport svg.rv-spotlight g.node.is-linked-inbound.is-linked-outbound :is(rect, polygon, path, circle) { stroke-dasharray: 2 3 !important; }
+/* A "why" chain: outlined nodes and thick links; the rest is faded (never colour alone). */
+.viewport svg.rv-spotlight g.node.is-chain :is(rect, polygon, path, circle) { stroke: var(--accent) !important; stroke-width: 4px !important; stroke-dasharray: none !important; }
+.viewport svg.rv-spotlight path.flowchart-link.is-chain { stroke: var(--accent) !important; stroke-width: 4px !important; stroke-dasharray: none !important; opacity: 1; }
+.why-chains { padding-left: 20px; margin: 8px 0; }
+.why-chains > li { margin-bottom: 10px; }
+.why-head .mono { font-weight: 600; overflow-wrap: anywhere; }
+.why-hops { margin: 4px 0 0 4px; }
+.why-hops li { margin: 3px 0; overflow-wrap: anywhere; }
+.why-hops pre.excerpt { margin: 2px 0 0; }
+.blast-summary { font-weight: 600; margin: 4px 0; }
+.ring-tag { display: inline-block; font-size: 11px; border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-variant-numeric: tabular-nums; }
 .spot-note[hidden] { display: none; }
 .changes-drawer { margin-top: 10px; }
 .changes-drawer[hidden] { display: none; }

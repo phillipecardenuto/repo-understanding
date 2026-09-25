@@ -174,6 +174,34 @@
       "color": "#292524",
       "width": 1.2,
       "dash": "5 3"
+    },
+    "seed": {
+      "fill": "#fef3c7",
+      "stroke": "#b45309",
+      "color": "#451a03",
+      "width": 3.5,
+      "dash": null
+    },
+    "ring1": {
+      "fill": "#fee2e2",
+      "stroke": "#b91c1c",
+      "color": "#450a0a",
+      "width": 3,
+      "dash": null
+    },
+    "ring2": {
+      "fill": "#ffedd5",
+      "stroke": "#c2410c",
+      "color": "#431407",
+      "width": 2,
+      "dash": null
+    },
+    "ring3": {
+      "fill": "#fefce8",
+      "stroke": "#a16207",
+      "color": "#422006",
+      "width": 1,
+      "dash": "4 3"
     }
   },
   "icons": {

@@ -24,6 +24,8 @@ implementation waves, and for understanding any codebase. It answers questions l
 | What should I tell the agent to fix, complete or revert? | **AI Review** → notes → feedback prompt, `repoviz review --format prompt` |
 | What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
 | What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
+| Why does A depend on B? Which import chain, in which files? | **Dependencies** → right-click a link (or `w`), `repoviz why A B` |
+| If this changes, what may break? (blast radius) | **Dependencies** → `b` on a node, `repoviz impact X` |
 | What changed since another commit / branch / tag / merge base? | **Changes** tab, `repoviz diff` |
 | Did a change introduce a new dependency or a dependency cycle? Resolve one? | **Changes** tab, `repoviz diff --fail-on new-cycle` |
 | Which parts of the repository are being modified right now? | **Activity & Flow** tab, `repoviz activity` |
@@ -63,6 +65,8 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
+| `repoviz why A B [--json]` | Why A depends on B: up to 5 shortest import (or call) chains, each hop with file:line and code; the reverse direction when A does not depend on B. |
+| `repoviz impact X [--depth N] [--json]` | Blast radius: what uses X, transitively, by distance and fan-in, with the entry points and tests it reaches. |
 | `repoviz mermaid --view changes\|dependencies\|structure\|flow\|system` | Print Mermaid text (paste into docs or PRs). `system` draws the services from the Compose files. `--direction auto\|LR\|TB` sets the orientation (auto: from the diagram's shape); `--fold N` folds long lists of leaves in the structure view. |
 | `repoviz discover [--json]` | What discovery found: languages, manifests, roots, entry points, CI… |
 | `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
@@ -221,6 +225,24 @@ modules that use it (solid, thick links), modules it uses (dashed, thick links),
 and everything else faded; Esc or a click on the background restores the graph.
 Clicking an edge label explains *why* one thing depends on another, with
 file:line evidence and source excerpts for every underlying import.
+
+**Why does A depend on B?** Right-click a link, or click it and press `w`. The
+side panel lists up to 5 shortest import chains (call chains between two
+functions), for example `ui.forms → services.orders → db.models`, each step with
+file:line and code. The first chain is outlined in the diagram and the rest
+fades.
+
+**Blast radius.** Press `b` on a selected node, or use *Blast radius* in its
+details (also from the Structure tab). The diagram then shows what may break if
+the node changes:
+
+- its dependents by distance ring (ring 1 uses it directly), with border weight
+  and dash per ring, and the ring written on each node;
+- the entry points (play icon) and tests (flask) it reaches;
+- a summary: "Changing `images.list_images` can affect 14 modules in 4
+  components, 3 entry points, 6 tests".
+
+Static reports compute both in the page.
 
 **Activity & Flow.** For each file currently being modified: Git status,
 owning component, lines added and removed, and first/last observation times.

@@ -22,11 +22,10 @@ from pathlib import Path
 from typing import IO, Any, Callable
 
 from . import __version__, classify
-from .activity import nodes_by_path
 from .filechanges import checked_path
-from .graph import shortest_paths
-from .ids import make_id
 from .model import CATEGORY_MODULE, CATEGORY_SYMBOL, REL_CALLS, REL_IMPORTS, REL_INVOKES
+from .query import FILE_LIKE, GraphIndex, QueryError, describe, why
+from .query import evidence as _evidence
 from .redact import redact
 
 log = logging.getLogger(__name__)
@@ -105,8 +104,8 @@ TOOLS: dict[str, dict[str, Any]] = {
         "inputSchema": {"type": "object", "properties": {
             "source": dict(_TARGET, description="Where the chain starts (path or qualified name)."),
             "target": dict(_TARGET, description="Where it ends (path or qualified name)."),
-            "max_paths": {"type": "integer", "minimum": 1, "maximum": 10, "default": 3,
-                          "description": "How many chains to return (1–10)."}},
+            "max_paths": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3,
+                          "description": "How many chains to return (1–5)."}},
             "required": ["source", "target"]},
     },
     "check_scope": {
@@ -262,101 +261,6 @@ def _loc(path: str | None, line: int | None) -> str | None:
     return f"{path}:{line}" if path and line else path
 
 
-def _evidence(edge: Any) -> dict[str, Any]:
-    ev = edge.evidence[0] if edge is not None and edge.evidence else None
-    if ev is None:
-        return {}
-    out = {"evidence": _loc(ev.path, ev.start_line)}
-    if ev.excerpt:
-        out["code"] = redact(ev.excerpt)[:200]
-    return out
-
-
-# --------------------------------------------------------------------------- graph index
-
-FILE_LIKE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
-
-
-class _Index:
-    """Lookups over one snapshot, built once per working-tree state."""
-
-    def __init__(self, snap: Any) -> None:
-        self.snap = snap
-        self.nodes = snap.node_index()
-        self.by_path = nodes_by_path(snap)
-        self.by_name: dict[str, list[Any]] = {}
-        for n in snap.nodes():
-            self.by_name.setdefault(n.qualified_name, []).append(n)
-        # who uses X: X -> {user: edge}, over direct imports, calls and entry-point invocations
-        self.users: dict[str, dict[str, Any]] = {}
-        # module imports (internal, direct): for dependency paths
-        self.imports: dict[str, set[str]] = {}
-        self.import_edge: dict[tuple[str, str], Any] = {}
-        for e in snap.edges():
-            if not e.direct or e.source_id == e.target_id or e.relationship not in (REL_IMPORTS, REL_CALLS, REL_INVOKES):
-                continue
-            self.users.setdefault(e.target_id, {}).setdefault(e.source_id, e)
-            if e.relationship == REL_IMPORTS and e.target_id in self.nodes and "external" not in self.nodes[e.target_id].tags:
-                self.imports.setdefault(e.source_id, set()).add(e.target_id)
-                self.import_edge.setdefault((e.source_id, e.target_id), e)
-        self.children: dict[str, list[str]] = {}
-        for n in snap.nodes():
-            if n.parent_id:
-                self.children.setdefault(n.parent_id, []).append(n.id)
-
-    def dir_node(self, path: str) -> Any:
-        return self.nodes.get(make_id("dir", f"path:dir:{path}"))
-
-    def nearest_dir(self, path: str) -> Any:
-        parts = path.split("/")[:-1]
-        for i in range(len(parts), -1, -1):
-            d = self.dir_node("/".join(parts[:i]))
-            if d is not None:
-                return d
-        return None
-
-    def component(self, node: Any) -> Any:
-        for _ in range(64):
-            if node is None:
-                return None
-            cid = node.metadata.get("component_id") or (node.id if "component" in node.tags else None)
-            if cid and cid in self.nodes:
-                return self.nodes[cid]
-            node = self.nodes.get(node.parent_id or "")
-        return None
-
-    def module_of(self, node: Any) -> Any:
-        for _ in range(64):
-            if node is None or node.category != CATEGORY_SYMBOL:
-                return node
-            node = self.nodes.get(node.parent_id or "")
-        return None
-
-    def modules_under(self, node: Any) -> list[str]:
-        """The modules a node stands for: itself, its module (a symbol), or every module below it."""
-        if node.category == CATEGORY_MODULE:
-            return [node.id]
-        if node.category == CATEGORY_SYMBOL:
-            m = self.module_of(node)
-            return [m.id] if m is not None else []
-        out, stack = [], [node.id]
-        while stack and len(out) < MAX_IMPACT_NODES:
-            for c in self.children.get(stack.pop(), ()):
-                n = self.nodes[c]
-                if n.category == CATEGORY_MODULE:
-                    out.append(c)
-                elif n.category != CATEGORY_SYMBOL:
-                    stack.append(c)
-        return sorted(out)
-
-
-def describe(n: Any) -> dict[str, Any]:
-    out: dict[str, Any] = {"name": n.qualified_name, "kind": n.component_type}
-    if n.path:
-        out["at"] = _loc(n.path, n.start_line)
-    return out
-
-
 # --------------------------------------------------------------------------- server
 
 class McpServer:
@@ -366,7 +270,6 @@ class McpServer:
         self.repo = repo
         self.allow_writes = allow_writes
         self.version = PROTOCOL_VERSIONS[0]
-        self._index: tuple[tuple[Any, ...], _Index] | None = None
         self.handlers: dict[str, Callable[[dict[str, Any]], tuple[str, dict[str, Any]]]] = {
             "architecture_overview": self.architecture_overview, "where_does_this_go": self.where_does_this_go,
             "impact": self.impact, "dependency_path": self.dependency_path, "check_scope": self.check_scope,
@@ -508,12 +411,8 @@ class McpServer:
 
     # -- shared lookups ----------------------------------------------------------------------------------------
 
-    def index(self) -> _Index:
-        snap = self.repo.snapshot("WORKTREE")
-        key = (snap.kind, snap.revision_id, self.repo.config.fingerprint())
-        if self._index is None or self._index[0] != key:
-            self._index = (key, _Index(snap))
-        return self._index[1]
+    def index(self) -> GraphIndex:
+        return self.repo.graph_index("WORKTREE")
 
     def rel_path(self, text: str) -> str:
         """A repository-relative path from ``text`` (absolute paths inside the repository are accepted)."""
@@ -533,7 +432,7 @@ class McpServer:
         except ValueError:
             raise ToolError(f"refused: {text!r} is not a path inside the repository") from None
 
-    def resolve(self, idx: _Index, text: str) -> Any:
+    def resolve(self, idx: GraphIndex, text: str) -> Any:
         t = text.strip()
         exact = idx.by_name.get(t)
         if exact:
@@ -791,33 +690,27 @@ class McpServer:
     def dependency_path(self, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         idx = self.index()
         a, b = self.resolve(idx, args["source"]), self.resolve(idx, args["target"])
-        starts, goals = idx.modules_under(a), idx.modules_under(b)
-        if not starts or not goals:
-            raise ToolError("both ends must be (or contain) modules of the analyzed code")
-        goals = [g for g in goals if g not in set(starts)] or goals
+        try:
+            res = why(idx, a, b, max_paths=args["max_paths"])
+        except QueryError as exc:
+            raise ToolError(str(exc)) from None
 
-        def chains(src: list[str], dst: list[str]) -> list[list[dict[str, Any]]]:
+        key = "symbol" if res["level"] == "calls" else "module"
+
+        def steps(chain: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out = []
-            for path in shortest_paths(src, dst, idx.imports, max_paths=args["max_paths"]):
-                steps = [{"module": idx.nodes[path[0]].qualified_name}]
-                for s, t in zip(path, path[1:]):
-                    steps.append({"module": idx.nodes[t].qualified_name, **_evidence(idx.import_edge.get((s, t)))})
-                out.append(steps)
+            for step in chain:
+                item = {key: step["name"]}
+                item.update({k: step[k] for k in ("evidence", "code") if k in step})
+                out.append(item)
             return out
 
-        found = chains(starts, goals)
-        data: dict[str, Any] = {"source": describe(a), "target": describe(b), "paths": found}
-        if found:
-            hops = len(found[0]) - 1
-            summary = (f"{a.qualified_name} depends on {b.qualified_name}: {len(found)} shortest chain(s) of "
-                       f"{hops} import(s)" + (" (direct)" if hops == 1 else "") + ".")
-        else:
-            back = chains(goals, starts)
-            data["reverse_paths"] = back
-            summary = (f"{a.qualified_name} does not import {b.qualified_name}, directly or indirectly"
-                       + (f"; but {b.qualified_name} depends on {a.qualified_name} (see reverse_paths)." if back
-                          else "."))
-        return summary, data
+        data: dict[str, Any] = {"source": describe(a), "target": describe(b), "paths": [steps(c) for c in res["paths"]]}
+        if res["level"] == "calls":
+            data["level"] = "calls"
+        if "reverse_paths" in res:
+            data["reverse_paths"] = [steps(c) for c in res["reverse_paths"]]
+        return res["summary"], data
 
     def check_scope(self, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         from .review import _first_match, _sensitive_kind
