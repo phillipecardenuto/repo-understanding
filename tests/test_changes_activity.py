@@ -439,3 +439,145 @@ def test_reports_carry_history_comparisons(make_repo) -> None:
     assert by_mode["last-commit"]["files"] == 2 and by_mode["last-commit"]["label"] == "Last commit: Merge feature"
     assert "last-merge" not in by_mode
     assert by_mode["last-commit"]["diff"]["summary"]["nodes"]["added"] > 0
+
+
+# --------------------------------------------------------------------------- checkpoints and the timeline (#7)
+
+CP_APP = {"app/__init__.py": "", "app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+
+
+def _cp_session(make_repo, files=CP_APP):
+    from repoviz.repo import Repository
+
+    repo = make_repo(files)
+    r = Repository(repo.path)
+    session = r.state.start_session(r.git, r.root, "wave")
+    return repo, r, session
+
+
+def test_checkpoints_split_a_wave_into_steps(make_repo) -> None:
+    from repoviz.checkpoints import create, timeline
+    from repoviz.review import build_review, resolve_target
+
+    repo, r, s = _cp_session(make_repo)
+    assert create(r.state, r.git, r.root, s) == (None, False)  # nothing changed since the session started
+    repo.write({"app/a.py": "def a():\n    return 10\n"})
+    first, created = create(r.state, r.git, r.root, s, label="step 1")
+    assert created and (first["n"], first["previous"], first["files"], first["label"]) == (1, 0, 1, "step 1")
+    assert create(r.state, r.git, r.root, s)[1] is False  # idempotent: nothing changed since checkpoint 1
+    repo.write({"app/b.py": "def b():\n    return 20\n\n\ndef c():\n    return 3\n"})
+    second, _ = create(r.state, r.git, r.root, s, origin="hook")
+    assert (second["n"], second["previous"], second["lines_added"], second["lines_removed"]) == (2, 1, 5, 1)
+    assert [c["path"] for c in second["changed"]] == ["app/b.py"]
+    # Checkpoint 1 → 2 is the second edit alone; so is "since checkpoint 1" while nothing else changed.
+    step = build_review(r, resolve_target(r, "checkpoint:1-2"))
+    assert [f["path"] for f in step["files"]] == ["app/b.py"] and step["target"]["kind"] == "checkpoint"
+    assert "Checkpoint 1 (step 1) → checkpoint 2" in step["target"]["label"]
+    since = build_review(r, resolve_target(r, f"checkpoint:{s.id}:1"))
+    assert [f["path"] for f in since["files"]] == ["app/b.py"]
+    assert [f["path"] for f in build_review(r, resolve_target(r, "checkpoint:0-1"))["files"]] == ["app/a.py"]
+    ids = [t.id for t in __import__("repoviz.review", fromlist=["review_targets"]).review_targets(r)]
+    assert f"checkpoint:{s.id}:2" in ids and f"checkpoint:{s.id}:1-2" in ids
+    # Commits in between are part of the step, and the state after the commit reads back.
+    repo.commit("commit b")
+    repo.write({"app/a.py": "def a():\n    return 100\n"})
+    third, _ = create(r.state, r.git, r.root, s)
+    assert [c["path"] for c in third["changed"]] == ["app/a.py"]  # b.py was committed as it was: no change
+    assert r.open_source(f"CHECKPOINT@{s.id}:3").read_bytes("app/a.py") == b"def a():\n    return 100\n"
+    assert r.open_source("CHECKPOINT:1").read_bytes("app/b.py") == b"def b():\n    return 2\n"
+    tl = timeline(r.state, s)
+    assert [c["n"] for c in tl["checkpoints"]] == [1, 2, 3] and "state" not in tl["checkpoints"][0]
+    import pytest
+
+    with pytest.raises(ValueError, match="no checkpoint 9"):
+        resolve_target(r, "checkpoint:1-9")
+
+
+def test_checkpoint_copies_are_deduplicated_capped_and_pruned(make_repo, monkeypatch) -> None:
+    import repoviz.checkpoints as cp
+
+    monkeypatch.setattr(cp, "GC_GRACE_SECONDS", 0)
+    repo, r, s = _cp_session(make_repo)
+    files = r.state._session_dir(s.id) / "files"
+    for i in range(6):
+        repo.write({"app/a.py": f"A = {i}\n", "app/same.py": "SAME = 1\n"})  # same.py: one copy for all
+        meta, created = cp.create(r.state, r.git, r.root, s, origin="manual" if i == 1 else "auto", max_checkpoints=3)
+        assert created
+    tl = cp.timeline(r.state, s)
+    # the manual checkpoint (2) stays; the oldest automatic ones go
+    assert [(c["n"], c["origin"]) for c in tl["checkpoints"]] == [(2, "manual"), (5, "auto"), (6, "auto")]
+    assert tl["checkpoints"][1]["previous"] == 2 and tl["checkpoints"][1]["merged"] == 2  # 3 and 4 folded into 5
+    assert not (r.state._session_dir(s.id) / "checkpoints" / "3.json").exists()
+    kept = {p.name for p in files.iterdir()}
+    assert len(kept) == 4  # a.py at checkpoints 2, 5 and 6, and one same.py
+    # Reviewing a folded step still works: checkpoint 2 → 5 holds the changes of 3, 4 and 5.
+    from repoviz.review import build_review, resolve_target
+
+    assert [f["path"] for f in build_review(r, resolve_target(r, "checkpoint:2-5"))["files"]] == ["app/a.py"]
+
+
+def test_hook_cli_notes_and_the_fast_path(make_repo, monkeypatch, capsys) -> None:
+    import io
+    import subprocess
+    import sys
+
+    from repoviz.checkpoints import timeline
+    from repoviz.entry import main
+
+    repo, r, s = _cp_session(make_repo)
+    repo.write({"app/a.py": "def a():\n    return 10\n"})
+    payload = {"tool_name": "Edit", "tool_input": {"file_path": str(Path(repo.path, "app/a.py"))}, "cwd": repo.path}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert main(["session", "checkpoint", "--hook-input", "--quiet"]) == 0
+    assert capsys.readouterr().out == ""
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert main(["session", "checkpoint", "--hook-input", "--quiet"]) == 0  # again: nothing new
+    assert main(["session", "-C", repo.path, "note", "--tool", "Edit", "--file", "app/a.py",
+                 "--message", "raised a() token=sk-live-abcdefghijklmnopqrstuvwxyz123456"]) == 0
+    tl = timeline(r.state, s)
+    assert [(c["label"], c["origin"]) for c in tl["checkpoints"]] == [("Edit app/a.py", "hook")]
+    assert tl["events"][0]["message"].startswith("raised a() token=") and "abcdefghij" not in tl["events"][0]["message"]
+    assert main(["session", "-C", repo.path, "timeline"]) == 0
+    out = capsys.readouterr().out
+    assert "#1" in out and "Edit app/a.py" in out and "repoviz review checkpoint:0-1" in out
+    # The fast path does not load the analysis code, and without a session a hook does nothing.
+    code = ("import sys; from repoviz.entry import main; rc = main(['session', '-C', sys.argv[1], 'checkpoint']); "
+            "print(rc, 'repoviz.repo' in sys.modules, 'repoviz.analyzers' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", code, repo.path], capture_output=True, text=True, check=True).stdout
+    assert out.strip().splitlines()[-1] == "0 False False"
+    r.state.end_session(r.git, r.root)
+    assert main(["session", "-C", repo.path, "checkpoint", "--quiet"]) == 0 and capsys.readouterr().out == ""
+
+
+def test_prune_old_sessions_keeps_their_waves_reviewable(make_repo, monkeypatch) -> None:
+    import repoviz.checkpoints as cp
+    from repoviz.cli import main
+    from repoviz.review import build_review, resolve_target
+
+    monkeypatch.setattr(cp, "GC_GRACE_SECONDS", 0)
+    repo, r, s = _cp_session(make_repo)
+    for i in range(3):
+        repo.write({"app/a.py": f"A = {i}\n"})
+        cp.create(r.state, r.git, r.root, s)
+    ended = r.state.end_session(r.git, r.root)
+    assert main(["session", "-C", repo.path, "prune", "--days", "1"]) == 0  # too recent: kept
+    assert len(cp.timeline(r.state, ended)["checkpoints"]) == 3
+    ended.ended_at = "2020-01-01T00:00:00+00:00"
+    r.state.save_session(ended)
+    assert cp.prune_sessions(r.state, 30) == {"sessions": 1, "checkpoints": 3, "files": 2}
+    assert cp.timeline(r.state, ended)["checkpoints"] == []
+    report = build_review(r, resolve_target(r, f"session:{s.id}"))  # baseline and end state are still there
+    assert [f["path"] for f in report["files"]] == ["app/a.py"]
+
+
+def test_static_report_embeds_the_timeline_not_the_steps(make_repo) -> None:
+    from repoviz.checkpoints import create
+    from repoviz.render.html import build_bundle
+
+    repo, r, s = _cp_session(make_repo)
+    repo.write({"app/a.py": "A = 1\n"})
+    create(r.state, r.git, r.root, s, label="one")
+    bundle = build_bundle(r)
+    tl = bundle["activity"]["timeline"]
+    assert tl["session"]["id"] == s.id and [c["label"] for c in tl["checkpoints"]] == ["one"]
+    assert not any(t["kind"] == "checkpoint" for t in bundle["review_targets"])

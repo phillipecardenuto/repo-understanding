@@ -194,6 +194,17 @@ class Repository:
             if session.active:
                 return WorkingTreeSource(self.git, include_untracked=True)
             return self.state.end_source(session, self.git)
+        if rs.kind == "checkpoint":
+            from .checkpoints import checkpoint_source
+
+            sid, _, n = rs.rev.rpartition(":")
+            session = self.state.load_session(sid) if sid else self.current_session()
+            if session is None:
+                raise RepositoryError(f"unknown session {sid!r}" if sid else "no active session")
+            try:
+                return checkpoint_source(self.state, session, self.git, int(n))
+            except ValueError as exc:
+                raise RepositoryError(str(exc)) from exc
         rev = rs.rev
         if rev.startswith("merge-base:"):
             _, a, b = rev.split(":", 2)

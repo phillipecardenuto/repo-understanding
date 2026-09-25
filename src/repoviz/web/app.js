@@ -125,6 +125,7 @@
     snapshot(rev) { return this.get("/api/snapshot?" + new URLSearchParams({ rev }).toString()); }
     sessionStart(label) { return this.post("/api/session/start", { label }); }
     sessionEnd() { return this.post("/api/session/end", {}); }
+    checkpoint(label) { return this.post("/api/session/checkpoint", { label: label || "" }); }
   }
 
   // ---------------------------------------------------------------- indexes
@@ -2700,7 +2701,8 @@
       this.statsEl = h("div", { class: "stats" });
       this.tableEl = h("div", { class: "card" });
       this.flowSide = h("div", { class: "card" });
-      put(this.root, this.headEl, this.statsEl, h("div", { class: "split" }, h("div", null, this.mapDiagram.el, this.tableEl), this.details.el),
+      this.timelineEl = h("div", { class: "card timeline-card", hidden: true });
+      put(this.root, this.headEl, this.statsEl, this.timelineEl, h("div", { class: "split" }, h("div", null, this.mapDiagram.el, this.tableEl), this.details.el),
         h("h2", { text: "Execution / call flow that may be affected", style: { fontSize: "16px", margin: "16px 0 8px" } }),
         h("div", { class: "split" }, h("div", null, this.flowDiagram.el), this.flowSide));
       await this.load();
@@ -2727,6 +2729,8 @@
       this.data = data;
       app.activityIndex = data.diff ? indexDiff(data.diff) : null;
       this.drawHead();
+      const tv = (data.timeline || {}).version;
+      if (tv !== this.timelineVersion) { this.timelineVersion = tv; this.drawTimeline(); }
       if (!quiet || changed) await this.draw();
     }
     /* Run a session action, then reload; errors are shown instead of being lost. */
@@ -2742,17 +2746,60 @@
         h("span", { class: "muted", text: b.kind === "session" ? `baseline commit ${(b.session.baseline_head || "").slice(0, 10)} · ${b.session.dirty_files_at_start} file(s) were already dirty` : "uncommitted changes relative to HEAD" }))));
       if (app.api.live) {
         // Kept across redraws so a label being typed survives the auto-refresh.
-        const label = this.labelInput || (this.labelInput = h("input", { placeholder: "session label (optional)", size: 18, "aria-label": "Session label" }));
+        const label = this.labelInput || (this.labelInput = h("input", { placeholder: "label (optional)", size: 18, "aria-label": "Label for a new session or a checkpoint" }));
         put(this.headEl, h("div", { class: "field" }, h("span", { text: "Work session" }), h("div", { class: "group" }, label,
           h("button", { class: "btn", title: "Record the current working tree as the baseline; everything changed afterwards (including commits) is attributed to the session.",
             onclick: () => this.act(async () => { await app.api.sessionStart(label.value); label.value = ""; }) }, b.kind === "session" ? "Restart session" : "Start session"),
-          b.kind === "session" ? h("button", { class: "btn", onclick: () => this.act(() => app.api.sessionEnd()) }, "End session") : null)),
+          b.kind === "session" ? h("button", { class: "btn", onclick: () => this.act(() => app.api.sessionEnd()) }, "End session") : null,
+          b.kind === "session" ? h("button", { class: "btn", title: "Record the working tree now, as a step of this session you can review on its own (also: repoviz session checkpoint, or an agent hook)",
+            onclick: () => this.act(async () => { const r = await app.api.checkpoint(label.value); label.value = ""; this.flash = r.message; this.timelineVersion = null; }) }, iconEl("check"), " Mark checkpoint") : null)),
         h("div", { class: "field" }, h("span", { text: "Live" }), h("div", { class: "group" },
           checkbox(`auto-refresh (${d.poll_seconds || 3}s)`, this.opts.auto, (c) => { this.opts.auto = c; this.save(); if (c) this.schedule(); else clearTimeout(this.timer); }),
           h("button", { class: "btn small", onclick: () => this.load() }, "Refresh now"))));
       }
       this.updatedEl = h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` });
       put(this.headEl, h("button", { class: "btn small", onclick: () => this.app.show("review") }, "Review this work →"), this.updatedEl);
+    }
+    /* The session's checkpoints and notes, newest first; a checkpoint opens its step (previous → this) in AI Review. */
+    drawTimeline() {
+      const app = this.app, tl = (this.data && this.data.timeline) || {}, el = this.timelineEl;
+      el.innerHTML = "";
+      el.hidden = !tl.session;
+      if (!tl.session) return;
+      const cps = tl.checkpoints || [], evs = tl.events || [];
+      const reworked = new Map((tl.reworked || []).map((r) => [r.path, r.times]));
+      const ORIGIN = { manual: ["check", "marked"], hook: ["terminal", "agent hook"], auto: ["pulse", "automatic"] };
+      // newest first; within a second, a note follows the checkpoint it was written after
+      const key = (x) => [x.at, x.c ? x.c.n : x.e.after || 0, x.c ? 0 : 1];
+      const cmp = (a, b) => { const ka = key(a), kb = key(b); for (let i = 0; i < 3; i++) if (ka[i] !== kb[i]) return ka[i] < kb[i] ? 1 : -1; return 0; };
+      const items = cps.map((c, i) => ({ at: c.at, c, prev: i ? cps[i - 1].n : 0 })).concat(evs.map((e) => ({ at: e.at, e }))).sort(cmp);
+      const open = (x) => app.openReview(`checkpoint:${tl.session.id}:${x.prev}-${x.c.n}`,
+        `${x.prev ? "Checkpoint " + x.prev : "Baseline"} → checkpoint ${x.c.n}${x.c.label ? " (" + x.c.label + ")" : ""}`);
+      const entry = (x) => {
+        if (x.e) return h("li", { class: "tl-note" }, h("span", { class: "tl-icon", "aria-hidden": "true" }, iconEl("comment")),
+          h("span", { class: "mono faint", text: fmtTime(x.e.at) }), " ", pill("note"), " ",
+          h("span", { text: [x.e.tool, x.e.file, x.e.message].filter(Boolean).join(" · ") || "(empty note)" }));
+        const c = x.c, [icon, word] = ORIGIN[c.origin] || ["check", c.origin];
+        const files = (c.changed || []).slice(0, 8).map((f) => h("span", { class: "tl-file" }, statusPill(f.status), " ", h("span", { class: "mono", text: f.path }),
+          f.added !== null && f.added !== undefined ? h("span", { class: "faint", text: ` +${f.added} −${f.removed}` }) : null,
+          (reworked.get(f.path) || 0) >= 3 ? [" ", pill([iconEl("alert", true), ` reworked ×${reworked.get(f.path)}`], "medium")] : null));
+        const more = c.files > 8 ? h("span", { class: "faint", text: `… and ${c.files - 8} more` }) : null;
+        const attrs = app.api.live ? { class: "tl-cp clickable", role: "button", tabindex: "0", title: `Review this step alone: ${x.prev ? "checkpoint " + x.prev : "the baseline"} → checkpoint ${c.n}`,
+          onclick: () => open(x), onkeydown: (ev) => { if (ev.key === "Enter") open(x); } } : { class: "tl-cp" };
+        return h("li", attrs, h("span", { class: "tl-icon", "aria-hidden": "true" }, iconEl(icon)),
+          h("b", { text: `#${c.n}` }), " ", h("span", { class: "mono faint", text: fmtTime(c.at) }), " ", pill(word), " ",
+          c.label ? h("span", { text: c.label }) : null, " ",
+          h("span", { class: "muted", text: `${plural(c.files, "file")} · +${c.lines_added} −${c.lines_removed}` + (c.merged ? ` · includes ${plural(c.merged, "earlier checkpoint")}` : "") }),
+          h("div", { class: "tl-files" }, files, more));
+      };
+      put(el, h("h3", null, "Timeline ", h("span", { class: "faint small", text: `${plural(cps.length, "checkpoint")} · ${plural(evs.length, "note")}` + (tl.session.active ? "" : " · last session, ended") })),
+        this.flash ? h("div", { class: "notice", role: "status", text: this.flash }) : null,
+        h("div", { class: "muted small", text: app.api.live ? "Click a checkpoint to review that step alone (previous checkpoint → this one) in AI Review. Checkpoints come from “Mark checkpoint”, repoviz session checkpoint (or an agent hook), and automatically while this page is open."
+          : "Reviewing one step needs the live app (repoviz serve); this report lists the checkpoints and notes only." }),
+        (tl.reworked || []).length ? h("div", { class: "tl-reworked" }, h("span", { class: "muted", text: "Reworked in 3 or more checkpoints: " }),
+          (tl.reworked || []).slice(0, 10).map((r) => [pill([iconEl("alert", true), ` ×${r.times}`], "medium"), " ", h("span", { class: "mono", text: r.path }), "  "])) : null,
+        items.length ? h("ol", { class: "timeline" }, items.slice(0, 200).map(entry)) : h("div", { class: "empty", text: "No checkpoint yet. Mark one, or let an agent hook record one after each edit." }));
+      this.flash = null;
     }
     async draw() {
       const d = this.data, s = d.summary || {};
@@ -2971,8 +3018,20 @@
     }
     save() { storage.set("rv.review", this.opts); }
     get repoKey() { return this.app.bundle.snapshot.repository_id; }
+    /* A target reached from elsewhere (a checkpoint step): kept in the list, next to the server's targets. */
+    pickTarget(id, label) {
+      this.opts.extraTargets = [...(this.opts.extraTargets || []).filter((t) => t.id !== id), { id, label: label || id }].slice(-5);
+      this.opts.targetId = id; this.opts.targetPinned = true; this.opts.custom = null; this.save();
+    }
+    async openTarget(id, label) {
+      this.pickTarget(id, label);
+      this.loadedAt = Date.now();  // activate() must not reload the previous target meanwhile
+      await this.loadTargets();
+      await this.load();
+    }
     async init() {
       const app = this.app;
+      if (app.pendingReview) { this.pickTarget(app.pendingReview.id, app.pendingReview.label); app.pendingReview = null; }
       this.targetSelect = h("select", { "aria-label": "Review target", onchange: () => {
         if (this.targetSelect.value === CUSTOM_TARGET) return;
         this.opts.targetId = this.targetSelect.value; this.opts.targetPinned = true; this.opts.custom = null; this.save();
@@ -3003,6 +3062,8 @@
           h("button", { class: "btn small", title: "Swap base and target", "aria-label": "Swap base and target", onclick: () => { const b = this.cmpBase.value; this.cmpBase.value = this.cmpTarget.value; this.cmpTarget.value = b; } }, "⇄"),
           this.cmpTarget, this.cmpMode, this.revList,
           h("button", { class: "btn", onclick: () => this.compare() }, "Review"),
+          h("button", { class: "btn", title: "Record the working tree now as a checkpoint of the active session; then review “since checkpoint N” or one step at a time (the Activity tab lists them)",
+            onclick: () => this.markCheckpoint() }, iconEl("check"), " Mark checkpoint"),
           h("button", { class: "btn", title: "Re-analyze the repository and keep your place (also happens when you come back to this tab)", onclick: () => this.refresh() }, "↻ Refresh"))));
       } else {
         put(bar, h("div", { class: "field" }, h("span", { text: "Compare any two branches" }), h("div", { class: "muted compare-note" },
@@ -3039,6 +3100,13 @@
       document.addEventListener("keydown", (ev) => this.onKey(ev));
       await this.loadTargets();
       await this.load();
+    }
+    async markCheckpoint() {
+      try {
+        const r = await this.app.api.checkpoint("");
+        this.statusEl.textContent = r.message;
+        await this.loadTargets();
+      } catch (err) { this.statusEl.textContent = "Could not record a checkpoint: " + err.message; }
     }
     /* Suggestions for the compare boxes: special states, local and remote branches, tags and recent commits. */
     fillRevisions(rev) {
@@ -3077,6 +3145,7 @@
       const app = this.app;
       try { this.targets = app.api.live ? await app.api.get("/api/review/targets") : (app.bundle.review_targets || []); }
       catch (err) { this.targets = []; this.statusEl.textContent = "Could not list review targets: " + err.message; }
+      if (app.api.live) this.targets = this.targets.concat((this.opts.extraTargets || []).filter((x) => !this.targets.some((t) => t.id === x.id)));
       this.targetSelect.innerHTML = "";
       for (const t of this.targets) this.targetSelect.appendChild(h("option", { value: t.id, title: t.description || "" }, t.label));
       if (!this.targets.some((t) => t.id === this.opts.targetId)) { this.opts.targetId = this.targets.length ? this.targets[0].id : null; this.opts.targetPinned = false; }
@@ -3925,6 +3994,7 @@
         { h: "Commit by commit" },
         { ul: ["When the wave has commits, the **Commits** panel lists them oldest first, followed by any uncommitted work, with files, lines and signals per commit.",
           "Click a commit (or press `[` / `]`) to review that step alone: in the live app its own diff, key changes and signals; in a report, the files it touched. **Show all** returns to the whole wave.",
+          "Without commits, **checkpoints** mark the steps: the target list offers *Since checkpoint N* and *Last step: checkpoint N-1 → N*, and a checkpoint in the Activity tab's timeline opens its step here. **Mark checkpoint** records one now (live app).",
           "Notes you take while looking at one commit still go to the wave's feedback prompt. *Changed, then changed back* flags files a commit changed and a later one restored."] },
         { h: "6. Send feedback" },
         { ul: ["**Feedback for the agent** turns your notes into a numbered, `file:line`-referenced prompt grouped as Revert / Fix / Complete / Improve / Answer.",
@@ -3990,7 +4060,9 @@
           "The **activity map** groups modified files by component; colours show added, modified or removed, and edges show new dependencies.",
           "The **Modified files** table shows impact (new dependencies, cycles, public API changes), the tests that exercise each file, configuration changes and when each file was first and last seen changing.",
           "**Often with** lists files that, according to Git history, usually change together with the edited one but are not touched yet (for example its migration, test or client). Tell the agent before it finishes.",
-          "**Affected flow** follows the static call graph from the changed code to the entry points (routes, CLIs, handlers) and tests that reach it: run those tests first."] },
+          "**Affected flow** follows the static call graph from the changed code to the entry points (routes, CLIs, handlers) and tests that reach it: run those tests first.",
+          "The **timeline** lists the session's **checkpoints**, newest first: each with the files changed since the previous one and ±lines; **reworked ×N** marks files changed in 3 or more. Click one to review that step alone in AI Review (live app).",
+          "Checkpoints come from **Mark checkpoint**, from `repoviz session checkpoint` (an agent hook can call it after every edit: see docs/review.md), and automatically while this page is open (at most every 30 s). Notes from `repoviz session note` appear in the timeline too."] },
         { tip: "The flow is a static approximation: calls through dynamic dispatch, reflection or configuration are not resolved." },
       ] },
     { id: "diagrams", title: "Reading the diagrams", icon: "layers", intro: "Colours are never the only signal: every state also has a border style, a marker and a word.",
@@ -4241,6 +4313,13 @@
       if (t && t.diagram) t.diagram.select(id);
     }
     async focusDependencies(id) { await this.show("dependencies"); this.tabs.dependencies.setFocus(id); }
+    /* Open the AI Review tab on a target that may not be listed (a checkpoint step from the Activity timeline). */
+    async openReview(id, label) {
+      const r = this.tabs.review;
+      if (r && r.targetSelect) { await this.show("review"); await r.openTarget(id, label); return; }
+      this.pendingReview = { id, label };  // picked up when the tab is built
+      await this.show("review");
+    }
     async showBlast(id) { await this.show("dependencies"); this.tabs.dependencies.showBlast(id); }
     async showInStructure(id) {
       await this.show("structure");

@@ -188,6 +188,34 @@ def _branch_targets(repo: "Repository", default: str, current: str) -> list[Revi
     return list(out)
 
 
+_CHECKPOINT_ID = re.compile(r"checkpoint:(?:([0-9A-Za-z_-]+):)?(\d{1,6})(?:-(\d{1,6}))?")
+
+
+def checkpoint_target(repo: "Repository", sid: str | None, a: int, b: int | None = None) -> ReviewTarget:
+    """Checkpoint ``a`` → ``b`` of a session, or everything since checkpoint ``a`` (0 is the baseline)."""
+    from .checkpoints import load_state, timeline
+
+    session = repo.state.load_session(sid) if sid else repo.current_session()
+    if session is None:
+        raise ValueError(f"unknown session {sid!r}" if sid else "no active session: checkpoints belong to a session")
+    for n in (a, b):
+        if n is not None:
+            load_state(repo.state, session, n)  # raises ValueError for a checkpoint that does not exist
+    labels = {c["n"]: c.get("label") or "" for c in timeline(repo.state, session)["checkpoints"]}
+    name = lambda n: "the baseline" if n == 0 else f"checkpoint {n}" + (f" ({labels[n]})" if labels.get(n) else "")  # noqa: E731
+    base = f"SESSION@{session.id}" if a == 0 else f"CHECKPOINT@{session.id}:{a}"
+    if b is None:
+        target = "WORKTREE" if session.active else f"SESSION-END@{session.id}"
+        label = f"Since {name(a)}" + ("" if session.active else " (to the end of the session)")
+        key = f"checkpoint:{session.id}:{a}"
+    else:
+        target = f"CHECKPOINT@{session.id}:{b}"
+        label = f"{name(a)[0].upper()}{name(a)[1:]} → {name(b)}"
+        key = f"checkpoint:{session.id}:{a}-{b}"
+    return ReviewTarget(key, label[:160], base, target, "checkpoint", key, session.id,
+                        f"session {session.label or session.id}")
+
+
 def review_targets(repo: "Repository", limit_sessions: int = 20) -> list[ReviewTarget]:
     """Reviewable units of work: the active session, uncommitted work, the branch, the last commit, past waves
     and other recent branches."""
@@ -197,6 +225,15 @@ def review_targets(repo: "Repository", limit_sessions: int = 20) -> list[ReviewT
         out.append(ReviewTarget("session", f"Current session: {active.label or active.id}", "SESSION", "WORKTREE",
                                 "session", f"session:{active.id}", active.id,
                                 f"started {active.started_at}; everything changed since then, including commits"))
+        from .checkpoints import timeline
+
+        cps = timeline(repo.state, active)["checkpoints"]
+        if cps:  # the latest steps; any other checkpoint range is reachable from the timeline or the CLI
+            last = cps[-1]
+            out.append(checkpoint_target(repo, active.id, last["n"]))
+            out[-1].description = f"what changed after checkpoint {last['n']} ({last['at']})"
+            out.append(checkpoint_target(repo, active.id, cps[-2]["n"] if len(cps) > 1 else 0, last["n"]))
+            out[-1].label = "Last step: " + out[-1].label
     if repo.git is None:
         out.append(ReviewTarget("all", "Directory (no Git history)", "EMPTY", "WORKTREE", "preset", "all"))
         return out
@@ -244,6 +281,9 @@ def resolve_target(repo: "Repository", target_id: str | None = None, base: str |
     for t in targets:
         if t.id == target_id:
             return t
+    cp = _CHECKPOINT_ID.fullmatch(target_id)
+    if cp:
+        return checkpoint_target(repo, cp.group(1), int(cp.group(2)), int(cp.group(3)) if cp.group(3) else None)
     if target_id.startswith("session:"):
         sid = target_id.split(":", 1)[1]
         s = repo.state.load_session(sid)
@@ -814,8 +854,21 @@ def _commit_range(repo: "Repository", target: ReviewTarget) -> _CommitRange:
     session = repo.state.load_session(target.session_id) if target.session_id else None
     cr.session = session
     base = target.base
+
+    def checkpoint_head(spec: str) -> tuple[str | None, bool]:
+        from .checkpoints import checkpoint_head as head_of
+
+        try:
+            return head_of(repo.state, session, int(spec.rsplit(":", 1)[1])) if session else (None, False)
+        except ValueError:
+            return None, False
+
     if base.startswith("SESSION"):
         cr.base = session.baseline_head if session else None
+        if cr.base is None:
+            return cr
+    elif base.startswith("CHECKPOINT@"):
+        cr.base = checkpoint_head(base)[0]
         if cr.base is None:
             return cr
     elif base.startswith("merge-base:"):
@@ -836,6 +889,10 @@ def _commit_range(repo: "Repository", target: ReviewTarget) -> _CommitRange:
         cr.head = session.end_head if session else None
         if session is not None and (session.end_overrides or session.end_submodule_overrides):
             cr.uncommitted = "Uncommitted at the end of the session"
+    elif tgt.startswith("CHECKPOINT@"):
+        cr.head, dirty = checkpoint_head(tgt)
+        if dirty:
+            cr.uncommitted = f"Uncommitted at checkpoint {tgt.rsplit(':', 1)[1]}"
     else:
         cr.head = sha_of(tgt)
     if cr.head and cr.head != cr.base:

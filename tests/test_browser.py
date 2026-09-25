@@ -1295,3 +1295,43 @@ def test_review_file_card_lists_dependency_changes(page, make_repo, tmp_path: Pa
     assert "source changed" in page.inner_text("#tab-review .file-card tr:has(.value-change)")
     assert page.locator("#tab-review .file-card tr:has(.value-change) i.rvi-alert-circle").count() == 1
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_activity_timeline_opens_a_step_in_review(page, make_repo, tmp_path: Path) -> None:
+    from repoviz.checkpoints import create, note
+
+    repo = make_repo({"app/__init__.py": "", "app/a.py": "A = 1\n", "app/b.py": "B = 1\n"})
+    r = Repository(repo.path)
+    s = r.state.start_session(r.git, r.root, "wave")
+    for i in range(3):  # a.py rewritten in three checkpoints: reworked
+        repo.write({"app/a.py": f"A = {i + 2}\n"})
+        create(r.state, r.git, r.root, s, label=f"step {i + 1}")
+    repo.write({"app/b.py": "B = 2\n"})
+    create(r.state, r.git, r.root, s, label="b only", origin="hook")
+    note(r.state, s, tool="Edit", file="app/b.py", message="changed B")
+    # The static report lists the timeline; reviewing one step needs the live app.
+    report = tmp_path / "report.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=activity")
+    page.wait_for_selector("#tab-activity .timeline-card:not([hidden]) ol.timeline", timeout=60_000)
+    text = page.inner_text("#tab-activity .timeline-card")
+    assert "4 checkpoints · 1 note" in text and "needs the live app" in text and "reworked ×3" in text
+    assert page.locator("#tab-activity .timeline li.clickable").count() == 0
+    assert page.locator("#tab-activity .timeline li").first.inner_text().count("changed B") == 1  # newest first
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=activity")
+        page.wait_for_selector("#tab-activity .timeline li.clickable", timeout=60_000)
+        page.click("#tab-activity .timeline li.clickable:has-text('b only')")
+        page.wait_for_function("() => repoviz.app.currentTab === 'review' && repoviz.app.tabs.review.report && "
+                               "repoviz.app.tabs.review.report.target.kind === 'checkpoint'", timeout=60_000)
+        report_js = "repoviz.app.tabs.review.report"
+        assert page.evaluate(f"{report_js}.files.map((f) => f.path)") == ["app/b.py"]
+        assert page.evaluate(f"{report_js}.target.id") == f"checkpoint:{s.id}:3-4"
+        assert "Checkpoint 3 (step 3) → checkpoint 4 (b only)" in page.evaluate(
+            "repoviz.app.tabs.review.targetSelect.selectedOptions[0].textContent")
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()

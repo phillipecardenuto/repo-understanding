@@ -122,6 +122,7 @@ class AppState:
         self._diff_bodies = _Lru(8)
         self._snapshot_body: tuple[Any, bytes] | None = None
         self._reviews = _Lru(6)
+        self._auto_checkpoint: tuple[str, float] = ("", 0.0)  # (activity etag, monotonic time) of the last try
         if auto_session and repo.is_git and repo.current_session() is None:
             repo.state.start_session(repo.git, repo.root, label="started with repoviz serve")
 
@@ -178,7 +179,10 @@ class AppState:
             raise ApiError(400, str(exc)) from exc
 
     def activity(self) -> tuple[str, bytes]:
-        """Return ``(etag, body)``; the body is only re-serialized when the repository changed."""
+        """Return ``(etag, body)``; the body is only re-serialized when the repository changed.
+
+        The session's timeline travels with it (read fresh: a hook may have added a checkpoint), and the page's
+        polling doubles as the clock for automatic checkpoints."""
         with self.activity_lock:  # observe() records observation times
             result = observe(self.repo, cache=self._activity_cache)
             etag = result.get("etag") or ""
@@ -188,7 +192,47 @@ class AppState:
                     payload["diff"] = compact_diff_of(payload["diff"], flow_node_ids(payload.get("flow")))
                 self._activity_body = (etag, dumps(payload).encode("utf-8"))
             body = self._activity_body[1]
-        return etag, _splice({"generated_at": result["generated_at"]}, body)
+        self.maybe_auto_checkpoint(etag)
+        tl = self.timeline()
+        return f"{etag}-{tl['version']}", _splice({"generated_at": result["generated_at"], "timeline": tl}, body)
+
+    def timeline(self) -> dict[str, Any]:
+        from .checkpoints import timeline
+
+        return timeline(self.repo.state, self.repo.current_session())
+
+    def maybe_auto_checkpoint(self, etag: str) -> None:
+        """An automatic checkpoint when the working tree changed since the last try, at most every
+        ``[activity] checkpoint_seconds``: a timeline even without agent hooks."""
+        every = self.repo.config.checkpoint_seconds
+        last_etag, last_at = self._auto_checkpoint
+        if every <= 0 or etag == last_etag or time.monotonic() - last_at < every or not self.repo.is_git:
+            return
+        session = self.repo.current_session()
+        if session is None:
+            return
+        from .checkpoints import create
+
+        with self.write_lock:
+            self._auto_checkpoint = (etag, time.monotonic())
+            try:
+                create(self.repo.state, self.repo.git, self.repo.root, session, label="", origin="auto",
+                       max_checkpoints=self.repo.config.max_checkpoints)
+            except (OSError, GitError, ValueError) as exc:  # best effort: never break the activity poll
+                log.warning("automatic checkpoint failed: %s", exc)
+
+    def checkpoint(self, body: dict[str, Any]) -> dict[str, Any]:
+        from .checkpoints import create, describe
+
+        session = self.repo.current_session()
+        if session is None or not self.repo.is_git:
+            raise ApiError(400, "no active session: start one first (checkpoints belong to a session)")
+        label = str(body.get("label") or "")[:200]
+        with self.write_lock:
+            meta, created = create(self.repo.state, self.repo.git, self.repo.root, session, label=label,
+                                   origin="manual", max_checkpoints=self.repo.config.max_checkpoints)
+        return {"checkpoint": {k: v for k, v in (meta or {}).items() if k != "state"} or None, "created": created,
+                "message": describe(meta, created)}
 
     def session_start(self, body: dict[str, Any]) -> dict[str, Any]:
         if not self.repo.is_git:
@@ -459,6 +503,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.session_start(body))
                 elif path == "/api/session/end":
                     self._json(200, state.session_end())
+                elif path == "/api/session/checkpoint":
+                    self._json(200, state.checkpoint(body))
                 elif path == "/api/review/notes":
                     self._json(200, state.save_notes(body))
                 elif path == "/api/session/scope":

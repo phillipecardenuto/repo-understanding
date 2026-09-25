@@ -81,6 +81,17 @@ def test_state_directory_is_private(make_repo) -> None:
     copies = list((session_dir / "files").iterdir())
     assert copies and all(stat.S_IMODE(os.stat(c).st_mode) == 0o600 for c in copies)
     assert stat.S_IMODE(os.stat(session_dir / "session.json").st_mode) == 0o600
+    # Checkpoints keep the same permissions: copies, state files, the timeline, the stat cache and the lock.
+    from repoviz.checkpoints import create, note
+
+    Path(repo.path, "a.py").write_text("x = 3\n")
+    assert create(r.state, r.git, r.root, session)[1]
+    note(r.state, session, message="edited a.py")
+    for d in (session_dir / "files", session_dir / "checkpoints"):
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+    written = [session_dir / n for n in ("timeline.json", "statcache.json", ".lock")]
+    written += list((session_dir / "checkpoints").iterdir()) + list((session_dir / "files").iterdir())
+    assert all(stat.S_IMODE(os.stat(f).st_mode) == 0o600 for f in written)
 
 
 def test_static_report_hides_home_directory(make_repo, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -122,6 +122,10 @@ class Config:
     external_dependencies: bool = False
     # Activity tracking
     poll_seconds: float = 3.0
+    # Checkpoints of the active session ([activity]): the live server records one when the working tree changed,
+    # at most every checkpoint_seconds (0: never), and a session keeps at most max_checkpoints.
+    checkpoint_seconds: float = 30.0
+    max_checkpoints: int = 200
     churn_commits: int = 300
     state_dir: str | None = None
     # Review of AI-agent work
@@ -158,6 +162,8 @@ class Config:
         data = dataclasses.asdict(self)
         data.pop("sources", None)
         data.pop("poll_seconds", None)
+        data.pop("checkpoint_seconds", None)
+        data.pop("max_checkpoints", None)
         data.pop("max_diagram_nodes", None)
         for key in [k for k in data if k.startswith(("review_", "history_", "contracts", "cache_"))]:
             data.pop(key)
@@ -267,6 +273,8 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
     activity = take("activity")
     if activity is not None:
         cfg.poll_seconds = float(activity.get("poll_seconds", cfg.poll_seconds))
+        cfg.checkpoint_seconds = max(0.0, float(activity.get("checkpoint_seconds", cfg.checkpoint_seconds)))
+        cfg.max_checkpoints = max(2, int(activity.get("max_checkpoints", cfg.max_checkpoints)))
         cfg.churn_commits = int(activity.get("churn_commits", cfg.churn_commits))
     history = take("history")
     if history is not None:

@@ -70,6 +70,8 @@ external_dependencies = false
 
 [activity]
 poll_seconds = 3                  # live app auto-refresh
+checkpoint_seconds = 30           # live app: automatic checkpoint of the session at most this often (0: never)
+max_checkpoints = 200             # per session; the oldest automatic ones are removed first
 churn_commits = 300               # history window for hotspots (0 disables)
 
 # ----- change coupling from Git history (see review.md) --------------------------------------

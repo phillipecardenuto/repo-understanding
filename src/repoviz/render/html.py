@@ -188,6 +188,14 @@ def comparison_payload(repo: Repository, comp: Comparison, index: int = 0, compa
             "_revisions": (base.revision_id, target.revision_id)}
 
 
+def _timeline(repo: Repository) -> dict[str, Any]:
+    """Checkpoints and notes of the active session, else of the latest one (metadata only)."""
+    from ..checkpoints import timeline
+
+    session = repo.current_session() or max(repo.state.list_sessions(), key=lambda s: s.started_at, default=None)
+    return timeline(repo.state, session)
+
+
 def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = None, include_activity: bool = True,
                  mode: str = "static", include_reviews: bool | None = None, max_reviews: int = 6,
                  embed_snapshot: bool = True, extra_reviews: list[str] | None = None) -> dict[str, Any]:
@@ -203,6 +211,7 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
     if include_activity:
         try:
             activity = observe(repo, record=False)
+            activity["timeline"] = _timeline(repo)
         except Exception as exc:
             errors.append({"severity": "error", "code": "activity-failed", "message": str(exc), "analyzer": "report"})
     keep = flow_node_ids(activity.get("flow")) if activity else set()
@@ -237,7 +246,8 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
                 errors.append({"severity": "error", "code": "review-failed", "message": f"{spec}: {exc}",
                                "analyzer": "report"})
         try:
-            listed = [t for t in review_targets(repo) if t.key not in {x.key for x in targets}]
+            # checkpoint steps need `repoviz serve` (the report embeds the timeline, not each step's review)
+            listed = [t for t in review_targets(repo) if t.key not in {x.key for x in targets} and t.kind != "checkpoint"]
             targets += listed[:max_reviews]
         except Exception as exc:
             errors.append({"severity": "error", "code": "review-failed", "message": str(exc), "analyzer": "report"})

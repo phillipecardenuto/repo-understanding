@@ -42,7 +42,7 @@ _ALIASES = {
 class RevSpec:
     """A parsed revision: a special token or a git revision expression."""
 
-    kind: str  # worktree | worktree-tracked | index | session | empty | git
+    kind: str  # worktree | worktree-tracked | index | session | session-at | session-end | checkpoint | empty | git
     rev: str = ""
 
     @classmethod
@@ -51,6 +51,9 @@ class RevSpec:
         past = re.fullmatch(r"(?i)session(-end)?@([0-9A-Za-z_-]+)", token)
         if past:  # SESSION@<id> = baseline of a (past) session, SESSION-END@<id> = its end state
             return cls("session-end" if past.group(1) else "session-at", past.group(2))
+        cp = re.fullmatch(r"(?i)checkpoint(?:@([0-9A-Za-z_-]+))?:(\d{1,6})", token)
+        if cp:  # CHECKPOINT@<id>:<n> = checkpoint n of a session; CHECKPOINT:<n> = of the active session
+            return cls("checkpoint", f"{cp.group(1) or ''}:{int(cp.group(2))}")
         alias = _ALIASES.get(token.upper())
         if alias == WORKTREE:
             return cls("worktree")
@@ -76,6 +79,7 @@ class RevSpec:
             "empty": "empty tree",
             "session-at": f"baseline of session {self.rev}",
             "session-end": f"end of session {self.rev}",
+            "checkpoint": f"checkpoint {self.rev.rsplit(':', 1)[-1]}",
         }.get(self.kind, self.rev)
 
     def __str__(self) -> str:
@@ -84,6 +88,7 @@ class RevSpec:
             "empty": EMPTY,
             "session-at": f"SESSION@{self.rev}",
             "session-end": f"SESSION-END@{self.rev}",
+            "checkpoint": f"CHECKPOINT@{self.rev}" if not self.rev.startswith(":") else f"CHECKPOINT{self.rev}",
         }.get(self.kind, self.rev)
 
 

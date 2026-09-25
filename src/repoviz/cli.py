@@ -618,7 +618,46 @@ def cmd_coupling(args: argparse.Namespace) -> int:
 
 
 def cmd_session(args: argparse.Namespace) -> int:
+    if args.action in ("checkpoint", "note"):
+        from .checkpoint_cli import run
+
+        return run(args)
     repo = _open(args)
+    if args.action == "timeline":
+        from .checkpoints import timeline
+
+        s = repo.current_session() or next(iter(sorted(repo.state.list_sessions(), key=lambda x: x.started_at,
+                                                        reverse=True)), None)
+        tl = timeline(repo.state, s)
+        if args.json:
+            print(json.dumps(tl, indent=2))
+            return EXIT_OK
+        if s is None:
+            print("no session")
+            return EXIT_OK
+        print(f"session {s.id} ({s.label or 'no label'}), {'active' if s.active else 'ended'}: "
+              f"{len(tl['checkpoints'])} checkpoint(s), {len(tl['events'])} note(s)")
+        items = [("c", c["at"], c) for c in tl["checkpoints"]] + [("e", e["at"], e) for e in tl["events"]]
+        for kind, _at, x in sorted(items, key=lambda i: (i[1], i[0])):
+            if kind == "c":
+                print(f"  #{x['n']:<3} {x['at']}  {x['origin']:<6} {x['files']} file(s) +{x['lines_added']} "
+                      f"−{x['lines_removed']}  {x['label']}")
+            else:
+                print(f"       {x['at']}  note   {' '.join(v for v in (x['tool'], x['file'], x['message']) if v)}")
+        for r in tl["reworked"]:
+            print(f"  reworked ×{r['times']}: {r['path']}")
+        if tl["checkpoints"]:
+            last = tl["checkpoints"][-1]
+            print(f"review a step with: repoviz review checkpoint:{last['previous']}-{last['n']}  "
+                  f"(or checkpoint:{last['n']} for everything since)")
+        return EXIT_OK
+    if args.action == "prune":
+        from .checkpoints import prune_sessions
+
+        out = prune_sessions(repo.state, args.days)
+        print(f"removed {out['checkpoints']} checkpoint(s) and {out['files']} file copies from {out['sessions']} "
+              f"session(s) that ended more than {args.days:g} days ago")
+        return EXIT_OK
     if args.action == "start":
         if not repo.is_git:
             print("repoviz: sessions need a Git repository", file=sys.stderr)
@@ -936,8 +975,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("session", parents=[common], help="manage work sessions (waves of agent work)")
-    p.add_argument("action", choices=("start", "status", "scope", "end", "list"))
-    p.add_argument("--label", help="label for a new session (e.g. the feature or wave name)")
+    p.add_argument("action", choices=("start", "status", "scope", "end", "list", "checkpoint", "note", "timeline",
+                                      "prune"),
+                   help="checkpoint: record the working tree now (a step of the wave); note: add a timeline event; "
+                   "timeline: list checkpoints and notes; prune: delete the checkpoints of sessions that ended long ago")
+    p.add_argument("--label", default="", help="label for a new session (e.g. the feature or wave name), or for a "
+                   "checkpoint")
+    p.add_argument("--tool", default="", help="note / checkpoint: the agent tool that made the edit (e.g. Edit)")
+    p.add_argument("--file", default="", help="note / checkpoint: the file it edited")
+    p.add_argument("--message", default="", help="note: what the agent says it did")
+    p.add_argument("--hook-input", action="store_true",
+                   help="read an agent hook's JSON from stdin (Claude Code PostToolUse: tool_name, tool_input.file_path)")
+    p.add_argument("--quiet", action="store_true", help="print nothing (for hooks)")
+    p.add_argument("--days", type=float, default=30, help="prune: sessions that ended more than this many days ago")
+    p.add_argument("--json", action="store_true", help="timeline: print JSON")
     p.add_argument("--allow", action="append", default=[], metavar="GLOB",
                    help="paths the agent may change in this session (repeatable)")
     p.add_argument("--protect", action="append", default=[], metavar="GLOB",

@@ -24,7 +24,7 @@ test = ["pytest>=7"]
 browser = ["playwright>=1.40"]
 
 [project.scripts]
-repoviz = "repoviz.cli:main"
+repoviz = "repoviz.entry:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

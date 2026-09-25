@@ -39,6 +39,82 @@ keep working. Without sessions you can review:
 - the last commit (`last-commit`);
 - any range (`main...HEAD`, `v1..v2`, or `--base/--head`).
 
+### Checkpoints: one step at a time
+
+Agents often work for a long time without committing. A **checkpoint** records
+the working tree at one moment of a session, so you can review what happened
+between two moments instead of the whole wave:
+
+```bash
+repoviz session checkpoint --label "after step 2"   # record the working tree now
+repoviz session timeline                             # checkpoints and notes, oldest first
+repoviz review checkpoint:2-3                        # checkpoint 2 → 3: that step alone
+repoviz review checkpoint:3                          # everything since checkpoint 3
+repoviz review checkpoint:0-1                        # the baseline → checkpoint 1
+repoviz session note --tool Edit --file app/x.py --message "added retry"   # a timeline event, no files
+```
+
+- **Idempotent.** Recording when nothing changed since the previous checkpoint
+  does nothing, so calling it often is harmless. A checkpoint stores the commit
+  checked out plus copies of the files that differ from it (private, 0600, in
+  the state directory; identical contents are stored once). Commits made in
+  between are part of the step.
+- **Automatic.** While the live app's page is open, `repoviz serve` records an
+  *automatic* checkpoint whenever the working tree changed, at most every
+  `[activity] checkpoint_seconds` (30 s; 0 turns it off).
+- **Bounded.** A session keeps at most `[activity] max_checkpoints` (200). The
+  oldest automatic ones go first, and a removed checkpoint's changes are folded
+  into the next one, so the timeline still adds up. `repoviz session prune
+  --days 30` removes the checkpoints of sessions that ended more than 30 days
+  ago; their baseline and end state stay, so those waves can still be
+  reviewed.
+- **Review targets.** `repoviz review --list` and the AI Review tab offer
+  *Since checkpoint N* and *Last step: checkpoint N-1 → N* for the active
+  session. Any other step is `checkpoint:A-B` (or
+  `checkpoint:<session id>:A-B` for a past session).
+- **In the live app:**
+  - The Activity tab shows a timeline of the checkpoints and notes, newest
+    first. Each entry shows the files changed since the previous checkpoint and
+    their ±lines. Files changed in 3 or more checkpoints get a **reworked ×N**
+    pill.
+  - Clicking a checkpoint opens that step in AI Review.
+  - *Mark checkpoint* (Activity and AI Review tabs) records one now.
+- **In a static report:** the timeline of the active or last session is
+  embedded. Reviewing one step needs `repoviz serve`, and the page says so.
+
+**Agent hook recipe (Claude Code).** A `PostToolUse` hook records a checkpoint
+after every edit, labelled with the tool and the file. Add this to
+`.claude/settings.json` in the repository (or to your user settings):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "repoviz session checkpoint --hook-input --quiet" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`--hook-input` reads the hook's JSON from stdin (`tool_name`,
+`tool_input.file_path`, `cwd`), and `--quiet` prints nothing. Without an
+active session the command does nothing and exits 0, so the hook never gets in
+the agent's way.
+
+The command is answered without loading the analysis code. On a Django-sized
+working tree it takes about 0.12 s when nothing changed and 0.16 s when it
+records a checkpoint, because only files whose size or modification time
+changed are read again. Other agents with post-edit hooks can call the same
+command, with `--label` or `--tool` / `--file` instead of `--hook-input`.
+
+The hook is the agent calling repoviz. repoviz itself never runs repository
+code, and a checkpoint only reads files.
+
 ### Submodules
 
 Each Git submodule is a component of its own. Reviews look inside checked-out

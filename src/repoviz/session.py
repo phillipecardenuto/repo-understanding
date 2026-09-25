@@ -15,6 +15,7 @@ the analyzed repository):
             sessions/<id>/session.json
             sessions/<id>/files/<blob-hash>
             sessions/<id>/observations.json
+            sessions/<id>/timeline.json, checkpoints/<n>.json, statcache.json   (checkpoints.py)
             observations.json      (used when no session is active)
 """
 

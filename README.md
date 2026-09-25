@@ -75,6 +75,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz coupling [--path FILE] [--json]` | Files that usually change together, learned from Git history. |
 | `repoviz contracts [--format text\|json\|sarif\|github] [--baseline] [--suggest]` | Check the architecture contracts (`[[contracts]]`: layers, independence, forbidden, public interface, acyclic, required). Exit 3 on a violation not in the known-violations baseline. `--baseline` prints the baseline to commit; `--suggest` proposes a layers contract. |
 | `repoviz session start\|status\|scope\|end\|list [--allow G] [--protect G]` | Manage work sessions (waves) and their scope. |
+| `repoviz session checkpoint\|note\|timeline\|prune [--label L] [--hook-input]` | Record a step of the wave (fast, for agent hooks), add a note, list the timeline, remove old checkpoints. Review a step with `repoviz review checkpoint:2-3`. |
 | `repoviz mcp [--allow-writes]` | Read-only MCP server over stdio: agents ask where code belongs, what depends on it, whether a path is in scope, and review their own work. See [docs/mcp.md](docs/mcp.md). |
 
 Every command takes `-C PATH` (repository), `--config FILE`, `--exclude GLOB`,
@@ -269,6 +270,14 @@ affected-flow diagram shows changed symbols, their callers and callees, and the
 entry points and tests that can reach them (static call graph; module level for
 languages without call data). The live app refreshes automatically.
 
+During a session, a **timeline** lists its checkpoints (newest first), each with
+the files changed since the previous one and ±lines. Files changed in 3 or more
+checkpoints are marked *reworked ×N*. Click a checkpoint to review that step
+alone in AI Review. Checkpoints come from *Mark checkpoint*, `repoviz session
+checkpoint` (for example from an agent hook after every edit; see
+[docs/review.md](docs/review.md#checkpoints-one-step-at-a-time)), and
+automatically while the live page is open.
+
 ### Visual conventions (never colour alone)
 
 | | Fill / line | Border / style | Text marker |
@@ -333,6 +342,8 @@ repoviz session start --label "wave 3: billing" --allow "src/billing/**" --prote
 repoviz review                          # where it went, scope violations, review signals
 repoviz review --format prompt          # numbered file:line feedback to paste back to the agent
 repoviz review --by-commit              # the same, step by step (the UI's Commits panel)
+repoviz session checkpoint --label "step 2"   # mark a moment (or let an agent hook do it after each edit)
+repoviz review checkpoint:2-3           # just what happened between two checkpoints
 repoviz review main...claude/feature    # any branch against any other, since it left main
 repoviz review --fail-on protected --fail-on high   # guardrail for scripted loops (exit 3)
 repoviz review --fail-on risk:high      # exit 3 when the wave risk is high

@@ -644,3 +644,45 @@ def test_old_cycles_the_change_does_not_touch_are_faint(make_repo) -> None:
     _comp, diff = Repository(fresh.path).compare(mode="all")
     new = [e for e in views.changes_view(diff, level="module", scope="all").edges if e.cycle]
     assert new and all(e.cycle_introduced and not e.cycle_existing for e in new)
+
+
+def test_checkpoint_endpoint_and_automatic_checkpoints(make_repo, monkeypatch) -> None:
+    import repoviz.server as server_module
+
+    repo = make_repo({"app/__init__.py": "", "app/a.py": "A = 1\n"})
+    r = Repository(repo.path)
+    srv = create_server(r, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, body = request(srv, "POST", "/api/session/checkpoint", {})
+        assert status == 400 and b"no active session" in body
+        r.state.start_session(r.git, r.root, "wave")
+        status, _, _ = request(srv, "POST", "/api/session/checkpoint", {}, headers={"Content-Type": "application/json"})
+        assert status == 403  # the X-Repoviz header is required
+        Path(repo.path, "app/a.py").write_text("A = 2\n")
+        clock = [1000.0]
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: clock[0])
+        # The page's poll records an automatic checkpoint, travels with the timeline and changes the ETag.
+        status, headers, body = request(srv, "GET", "/api/activity", full=True)
+        tl = json.loads(body)["timeline"]
+        assert [(c["n"], c["origin"]) for c in tl["checkpoints"]] == [(1, "auto")]
+        Path(repo.path, "app/a.py").write_text("A = 3\n")
+        clock[0] += 5  # too soon for another automatic one
+        status, _, body = request(srv, "GET", "/api/activity")
+        assert len(json.loads(body)["timeline"]["checkpoints"]) == 1
+        status, _, body = request(srv, "POST", "/api/session/checkpoint", {"label": "by hand"})
+        out = json.loads(body)
+        assert status == 200 and out["created"] and out["checkpoint"]["n"] == 2 and "state" not in out["checkpoint"]
+        status, _, body = request(srv, "POST", "/api/session/checkpoint", {"label": "again"})
+        assert json.loads(body)["created"] is False and "nothing changed since checkpoint 2" in json.loads(body)["message"]
+        status, _, _ = request(srv, "GET", "/api/activity", headers={"X-Repoviz": "1", "If-None-Match": headers["ETag"]})
+        assert status == 200  # the timeline changed
+        clock[0] += 60
+        Path(repo.path, "app/a.py").write_text("A = 4\n")
+        _, _, body = request(srv, "GET", "/api/activity")
+        assert [c["n"] for c in json.loads(body)["timeline"]["checkpoints"]] == [1, 2, 3]
+        status, _, body = request(srv, "GET", "/api/review?id=checkpoint:2-3")
+        assert status == 200 and [f["path"] for f in json.loads(body)["files"]] == ["app/a.py"]
+    finally:
+        srv.shutdown()
+        srv.server_close()

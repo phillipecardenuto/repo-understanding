@@ -16,11 +16,11 @@ how to test it.
 | Read-only Git and trees | `gitutil.py`, `sources.py`, `submodules.py` | `docs/architecture.md` ("Layers", "Git hardening") |
 | Discovery and parsers | `discovery.py`, `classify.py`, `manifests.py`, `yamlish.py`, `config.py` | `docs/configuration.md` |
 | Graph building | `analyzers/*.py`, `pipeline.py`, `graph.py`, `ids.py`, `model.py` | `docs/data-model.md`, "Analyzer interface" |
-| Comparing states | `diff.py`, `flow.py`, `activity.py`, `session.py`, `repo.py`, `filechanges.py` (one file's recent changes) | "Caching and performance" |
+| Comparing states | `diff.py`, `flow.py`, `activity.py`, `session.py`, `checkpoints.py` (steps of a session, timeline), `repo.py`, `filechanges.py` (one file's recent changes) | "Caching and performance" |
 | Graph questions | `query.py` (why A depends on B, blast radius; mirrored in `app.js`) | `docs/architecture.md` ("Web application") |
 | Persistent cache | `diskcache.py` (per-file parse results in SQLite; JSON codecs in each analyzer) | "Caching and performance", `docs/configuration.md` ("Parse cache") |
 | Agent review | `review.py` (targets, scope, signals, feedback prompt), `risk.py` (risk score), `contracts.py` (architecture contracts, baseline), `values.py` (constants and settings before → after, safety rules), `depchanges.py` (declared and locked dependency changes) | `docs/review.md`, `docs/configuration.md` ("Architecture contracts") |
-| Front ends | `cli.py`, `server.py`, `render/html.py`, `render/views.py`, `render/mermaid.py` | "Web application" |
+| Front ends | `entry.py` (the `repoviz` command; sends hook calls to the light `checkpoint_cli.py`), `cli.py`, `server.py`, `render/html.py`, `render/views.py`, `render/mermaid.py` | "Web application" |
 | CI outputs | `ci.py` (SARIF, GitHub annotations, pull-request comment), `.github/actions/review/action.yml` | `docs/review.md` ("Pull requests and CI") |
 | Agent front end | `mcp.py` (read-only MCP server over stdio: tools, prompts, output caps) | `docs/mcp.md` |
 | Browser app | `web/app.js` (tabs, diagrams, icons, in-app guide), `web/app.css`, `web/index.html` | the `HELP` array in `app.js` |

@@ -231,7 +231,15 @@ edge records whether it is in a cycle in the base and in the target.
 - `observe()` returns an `etag` derived from the baseline, the working-tree
   revision ID and `git status`. The activity poll sends `If-None-Match` and gets
   `304 Not Modified` while nothing changes, so polling costs one status check
-  and no re-serialization or re-rendering.
+  and no re-serialization or re-rendering. The session's checkpoint timeline is
+  read fresh and spliced into the response, and its version is part of the
+  ETag, so a checkpoint recorded by an agent hook shows up at the next poll.
+- Checkpoints (`checkpoints.py`) are written under a per-session file lock,
+  because the server (automatic checkpoints) and a hook process can record at
+  the same time. A stat cache (size, modification time, inode) avoids reading
+  unchanged files again; a file modified in the last 2 s is always re-read.
+  `repoviz session checkpoint` is answered by `entry.py` → `checkpoint_cli.py`
+  without importing the analysis code.
 - Review reports are cached per target, revisions and scope. Notes are loaded
   fresh and spliced into the cached JSON.
 

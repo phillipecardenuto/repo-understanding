@@ -6,6 +6,31 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Checkpoints and an edit timeline inside a wave** ([#7](https://github.com/phillipecardenuto/repo-understanding/issues/7)).
+  - `repoviz session checkpoint [--label]` records the working tree as a step
+    of the session. It stores the commit checked out plus private,
+    deduplicated copies of the files that differ from it. Calling it when
+    nothing changed does nothing.
+  - Review one step with `repoviz review checkpoint:2-3`, or everything since
+    one with `checkpoint:3`. The target list offers *Since checkpoint N* and
+    *Last step* for the active session.
+  - The live server records **automatic** checkpoints while its page is open
+    (`[activity] checkpoint_seconds`, 30 s), and keeps at most
+    `max_checkpoints` (200) per session, folding the oldest automatic ones
+    into the next. `POST /api/session/checkpoint` and *Mark checkpoint*
+    buttons record one by hand. `repoviz session prune --days N` cleans up
+    old sessions.
+  - **Agent hooks:** `repoviz session checkpoint --hook-input --quiet` reads a
+    Claude Code `PostToolUse` payload and labels the checkpoint with the tool
+    and file. The recipe is in `docs/review.md`. It runs without loading the
+    analysis code, in about 0.12–0.16 s on a Django-sized tree.
+    `repoviz session note` adds a timeline event.
+  - The Activity tab shows the **timeline**: checkpoints and notes, files and
+    ±lines per step, and *reworked ×N* for files changed in 3 or more steps.
+    Clicking a checkpoint opens that step in AI Review. Static reports embed
+    the timeline; reviewing a step needs `repoviz serve`.
+  - The `repoviz` command now starts through `repoviz.entry`, so reinstall
+    (`pip install -e .`) to update the script.
 - **Third-party dependency changes with supply-chain signals** ([#11](https://github.com/phillipecardenuto/repo-understanding/issues/11)).
   - A changed manifest's card lists its dependencies, package by package:
     added, removed, upgraded ↑, downgraded ↓, moved between scopes, or now
