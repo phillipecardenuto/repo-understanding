@@ -73,7 +73,7 @@ Labels:
 
 | # | Item | Priority | Size |
 |---|---|---|---|
-| [#21](https://github.com/phillipecardenuto/repo-understanding/issues/21) | Analyze checked-out submodules as nested sub-projects | P1 | L |
+| [#21](https://github.com/phillipecardenuto/repo-understanding/issues/21) | Analyze checked-out submodules as nested sub-projects · **✓ done** | P1 | L |
 | [#22](https://github.com/phillipecardenuto/repo-understanding/issues/22) | System view from docker-compose: services linked to code, dev/prod merged, infrastructure separated · **✓ done** | P1 | L |
 | [#23](https://github.com/phillipecardenuto/repo-understanding/issues/23) | Runtime coupling edges: container images and service URLs in code | P1 | M |
 | [#25](https://github.com/phillipecardenuto/repo-understanding/issues/25) | Python: imports through `sys.path` edits; requirements.txt-only apps as projects | P2 | S |
@@ -112,9 +112,9 @@ Labels:
    These change the most for someone reviewing agent waves every day, and they
    have no prerequisites.
 2. **Guardrails:** #16 (contracts), #17 (CI) and #18 (MCP), done.
-3. **Multi-service systems:** #22 (compose system view), done; then #21
-   (submodules as sub-projects), #23 (runtime edges) and #24. #23 builds on the
-   service model from #22 (`services.py`).
+3. **Multi-service systems:** #22 (compose system view) and #21 (submodules as
+   sub-projects), done; then #23 (runtime edges) and #24. #23 builds on the
+   service model from #22 (`services.py`) and the nested submodule code from #21.
 4. **UI at scale:** #27, #29, #28 and #31.
 5. **Anytime:** #34 (the cache makes #6, #32 and #10 cheaper), #14, #25 and #11.
 
