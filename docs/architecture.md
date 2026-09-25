@@ -213,6 +213,32 @@ layout, zoom and pan stay where they are:
     size" notice.
   - Esc or × closes the drawer and puts the focus back on the selected node.
 
+Large diagrams (`Diagram` in `app.js`, mirrored by `render/views.py` for the
+CLI):
+
+- **Orientation.** Before drawing, `chooseDirection` (`views.choose_direction`)
+  ranks the view graph by longest path. It estimates the drawing both ways (ranks
+  × 250 px by the widest rank × 56 px left to right; the widest rank × 190 px by
+  ranks × 116 px top to bottom) and keeps the one that fits the viewport at the
+  larger zoom. When both fit at full size the view keeps its own direction. A view
+  with `orientable: false` (nested boxes, layers, System) is never turned. The
+  ⇄ / ⇅ override is stored per tab under `rv.orient.<tab>`.
+- **Fit** measures the label font size and never scales below 11 px. A larger
+  diagram fits its width and is panned. When it is more than twice the view at
+  that zoom, a mini-map (the node boxes, not a copy of the SVG) shows the visible
+  area and moves the view on click.
+- **Folds.** `structureView` (`views.structure_view`, `fold=`) replaces more than
+  8 leaves of one kind under one parent (test, docs, module, file) with a node
+  `fold_<parent>_<kind>`. `view.folds` records them. The selection, find matches
+  and files in the activity report never go into a fold. A click on a fold adds it
+  to the tab's unfolded set and redraws.
+- **Existing cycles.** `changesView` / `views.changes_view` mark a cycle edge
+  `cycleExisting` / `cycle_existing` when no member of its strongly connected
+  component changed. It is drawn thin, dotted and at half opacity, with the SVG
+  class `cycle-existing`. The other cycles get `cycle-new` or `cycle-kept`.
+- **Labels** longer than 40 characters are middle-truncated. Each node carries
+  an SVG `<title>` with the full name.
+
 Icons are defined once in `app.js` as SVG path data: 24×24, 2px round strokes,
 plus a light-background and a dark-background colour per icon. At startup they
 become a stylesheet in which each `.rvi-<name>` class paints its icon with a CSS

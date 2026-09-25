@@ -780,3 +780,113 @@ def test_a_stored_dependencies_level_wins(page, make_repo, tmp_path: Path) -> No
     assert "component level" in page.locator("#tab-dependencies .diagram-head .title").inner_text()
     assert page.locator("#tab-dependencies .notice[role=status]").is_hidden()
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- Readability at scale (#27)
+
+SCALE = "(tab) => parseFloat((document.querySelector('#tab-' + tab + ' .stage').style.transform.match(/scale\\(([\\d.]+)\\)/) || [0, 0])[1])"
+LABEL_PX = "(tab) => parseFloat(getComputedStyle(document.querySelector('#tab-' + tab + ' g.node .nodeLabel')).fontSize)"
+
+
+def _report(make_repo, tmp_path: Path, files: dict[str, str], name: str, change: dict[str, str] | None = None) -> str:
+    repo = make_repo(files)
+    if change:
+        repo.write(change)
+    report = tmp_path / f"{name}.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    return report.as_uri()
+
+
+def test_orientation_from_shape_and_readable_fit(page, make_repo, tmp_path: Path) -> None:
+    from test_outputs import branching_tree
+
+    uri = _report(make_repo, tmp_path, branching_tree(), "deep")  # 48 packages, 6 levels deep
+    page.add_init_script("localStorage.setItem('rv.structure', JSON.stringify({depth: 8}))")
+    page.goto(uri + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    assert page.locator("#tab-structure g.node").count() == 48
+    assert page.evaluate("repoviz.app.tabs.structure.diagram.view.direction") == "LR"
+    button = page.locator("#tab-structure .diagram-head button:has-text('auto')")
+    assert button.inner_text() == "⇄ auto" and "automatic (left to right" in button.get_attribute("title")
+    # Fit never goes below the zoom at which labels read at 11px.
+    assert page.evaluate(LABEL_PX, "structure") * page.evaluate(SCALE, "structure") >= 11 - 0.01
+    page.locator("#tab-structure button[title='Fit to view']").click()
+    assert page.evaluate(LABEL_PX, "structure") * page.evaluate(SCALE, "structure") >= 11 - 0.01
+    # The toggle overrides the choice (auto → LR → TB → auto), and the choice is remembered per view.
+    button.click()
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=30_000)
+    toggle = page.locator("#tab-structure .diagram-head button[title^='Layout']")
+    assert toggle.inner_text() == "⇄"
+    toggle.click()
+    page.wait_for_function("() => repoviz.app.tabs.structure.diagram.view.direction === 'TB'", timeout=30_000)
+    assert toggle.inner_text() == "⇅" and page.evaluate("localStorage.getItem('rv.orient.structure')") == '"TB"'
+    assert page.evaluate("document.querySelector('#tab-structure .diagram-card').textContent").count("flowchart TB") == 1
+    page.reload()
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    assert page.evaluate("repoviz.app.tabs.structure.diagram.view.direction") == "TB"
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_long_leaf_lists_fold_and_expand(page, make_repo, tmp_path: Path) -> None:
+    from test_outputs import TESTS_27
+
+    uri = _report(make_repo, tmp_path, TESTS_27, "fold", change={"pkg/tests/test_05.py": "def test_y():\n    pass\n"})
+    page.add_init_script("localStorage.setItem('rv.structure', JSON.stringify({depth: 4, files: true}))")
+    page.goto(uri + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    texts = page.evaluate("Array.from(document.querySelectorAll('#tab-structure g.node')).map(g => g.textContent)")
+    folds = [t for t in texts if "test files" in t]
+    assert len(folds) == 1 and "+ 26 test files" in folds[0] and "click to expand" in folds[0]
+    assert [t for t in texts if "test_" in t] == [t for t in texts if "test_05" in t]  # the changed one stays out
+    fold = page.locator("#tab-structure g.node:has-text('+ 26 test files')")
+    assert fold.locator("title").count() == 1  # full text in the tooltip
+    fold.click()
+    page.wait_for_function("() => Array.from(document.querySelectorAll('#tab-structure g.node')).filter(g => g.textContent.includes('test_')).length === 27", timeout=30_000)
+    assert page.locator("#tab-structure g.node:has-text('test files')").count() == 0
+    # A search match comes out of a fold.
+    page.reload()
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    page.fill("#tab-structure input[type=search]", "test_17")
+    page.wait_for_function("() => Array.from(document.querySelectorAll('#tab-structure g.node')).some(g => g.textContent.includes('test_17'))", timeout=30_000)
+    assert page.locator("#tab-structure g.node:has-text('+ 25 test files')").count() == 1
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_old_cycles_are_faint_and_new_ones_strong(page, make_repo, tmp_path: Path) -> None:
+    from test_outputs import CYCLE_27
+
+    page.add_init_script("localStorage.setItem('rv.changes', JSON.stringify({level: 'module', scope: 'all'}))")
+    page.goto(_report(make_repo, tmp_path, CYCLE_27, "old", change={"app/other.py": "from app import util\n"}) + "#tab=changes")
+    page.wait_for_function(ALL_RENDERED, arg="changes", timeout=60_000)
+    assert page.locator("#tab-changes path.cycle-existing").count() == 2  # and their labels
+    assert page.locator("#tab-changes .edgeLabel.cycle-existing").count() == 2
+    assert page.locator("#tab-changes .viewport .cycle-new, #tab-changes .viewport .cycle-kept").count() == 0
+    assert "existing cycle" in page.evaluate("document.querySelector('#tab-changes .viewport svg').textContent")
+    legend = page.locator("#tab-changes .legend").inner_text()
+    assert "existing cycle" in legend and "new cycle" in legend
+    fresh = {k: v for k, v in CYCLE_27.items() if k != "app/tasks.py"} | {"app/tasks.py": "X = 1\n"}
+    page.goto(_report(make_repo, tmp_path, fresh, "new", change={"app/tasks.py": "from app import routes\n"}) + "#tab=changes")
+    page.wait_for_function(ALL_RENDERED, arg="changes", timeout=60_000)
+    assert page.locator("#tab-changes path.cycle-new").count() == 2
+    assert page.locator("#tab-changes .viewport .cycle-existing").count() == 0
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_minimap_for_large_diagrams_only(page, make_repo, tmp_path: Path) -> None:
+    from test_outputs import branching_tree
+
+    page.add_init_script("localStorage.setItem('rv.structure', JSON.stringify({depth: 8}))")
+    page.goto(_report(make_repo, tmp_path, branching_tree((1, 2)), "small") + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    assert page.locator("#tab-structure .minimap").count() == 0
+    page.goto(_report(make_repo, tmp_path, branching_tree((3, 3, 3, 3)), "big") + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    mini = page.locator("#tab-structure .minimap")
+    assert mini.count() == 1 and mini.locator("rect.mini-node").count() > 100
+    before = page.evaluate("document.querySelector('#tab-structure .stage').style.transform")
+    view_before = mini.locator("rect.mini-view").get_attribute("y")
+    box = mini.bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] - 3)  # the bottom of the diagram
+    after = page.evaluate("document.querySelector('#tab-structure .stage').style.transform")
+    assert after != before and mini.locator("rect.mini-view").get_attribute("y") != view_before
+    assert page.errors == []  # type: ignore[attr-defined]

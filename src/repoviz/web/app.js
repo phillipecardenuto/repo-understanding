@@ -232,6 +232,8 @@
   /* Inline icon token for label and sublabel text; nodeLabel() turns it into markup after escaping. */
   const ic = (name) => `\u0001${name}\u0001`;
 
+  const MIN_LABEL_PX = 11;  // Fit never shrinks node labels below this size
+
   // ---------------------------------------------------------------- theme
   let THEME = null;
   const TYPE_ICONS = {
@@ -376,7 +378,7 @@
       if (e.status !== "removed") { target.set(key, (target.get(key) || 0) + e.occurrences); if (!(e.metadata || {}).type_checking_only) targetRuntime.add(key); }
       if (e.status !== "unchanged") changedPairs.add(key);
     }
-    const bc = cyclePairs(baseRuntime).pairs, tc = cyclePairs(targetRuntime).pairs;
+    const bc = cyclePairs(baseRuntime).pairs, tcp = cyclePairs(targetRuntime), tc = tcp.pairs;
     const edges = [];
     for (const key of [...new Set([...base.keys(), ...target.keys()])].sort()) {
       const inB = base.has(key), inT = target.has(key);
@@ -403,6 +405,12 @@
     }
     const changed = new Set([...groupStatus].filter(([, st]) => st !== "unchanged").map(([g]) => g));
     for (const e of edges) if (e.status !== "unchanged") { changed.add(e.source); changed.add(e.target); }
+    // An old cycle this change does not touch (no member changed) is drawn faint, so new ones stand out.
+    const touched = tcp.components.map((c) => c.some((m) => changed.has(m)));
+    const compOf = new Map(tcp.components.flatMap((c, i) => c.map((m) => [m, i])));
+    for (const e of edges) {
+      e.cycleExisting = !!(e.cycle && !e.cycleIntroduced && e.status === "unchanged" && compOf.has(e.source) && !touched[compOf.get(e.source)]);
+    }
     let visible, hiddenNeighbors = 0;
     if (o.scope === "all") visible = new Set(groupStatus.keys());
     else {
@@ -544,7 +552,7 @@
     if (ci && ci.layers && o.level !== "symbol") {  // a layers contract: its layers as numbered groups (Layer 1 is the highest)
       const layered = view.nodes.filter((n) => ci.layers.nodes[n.id] !== undefined);
       if (layered.length) {
-        view.direction = "TB";
+        view.direction = "TB"; view.orientable = false;  // layers read top to bottom
         const groups = new Map(ci.layers.layers.map((pattern, i) => ["layer_" + i, { label: `Layer ${i + 1}: ${pattern}` }]));
         view.subgraphs = new Map([...groups, ...view.subgraphs]);
         for (const n of layered) n.parent = "layer_" + ci.layers.nodes[n.id];
@@ -576,8 +584,17 @@
     return r.startsWith("too large") ? "too large" : r.startsWith("not checked out") ? "not checked out" : r.startsWith("excluded") ? "excluded" : r.startsWith("commit") ? "commit not fetched" : r.startsWith("turned off") ? "turned off" : "unknown";
   }
 
+  /* Long lists of leaves of one kind (27 test files, 17 docs) fold into one node; the rest of the tree stays readable. */
+  const FOLD_AT = 8;
+  const FOLD_WORD = { test: ["test file", "flask"], docs: ["doc", "book"], module: ["module", "file-code"], file: ["file", "file"] };
+  function foldKind(n) {
+    if (hasTag(n, "test")) return "test";
+    if (/\.(md|mdx|rst|adoc|txt)$/i.test(n.path || "")) return "docs";
+    return n.category === "module" ? "module" : n.component_type === "file" ? "file" : null;
+  }
   function structureView(si, o) {
-    const view = { title: "Structure", direction: o.layout === "nested" ? "TB" : "LR", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, nested: [] };
+    const view = { title: "Structure", direction: o.layout === "nested" ? "TB" : "LR", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, nested: [],
+      orientable: o.layout !== "nested", folds: new Map() };
     const root = o.root && si.nodes.has(o.root) ? o.root : rootOf(si);
     if (!root) return view;
     const childrenOf = (id) => (si.children.get(id) || []).map((c) => si.nodes.get(c)).filter((c) => {
@@ -592,6 +609,26 @@
       const counts = [...si.nodes.values()].filter((n) => n.category === "module" && meta(n).churn).map((n) => meta(n).churn.commits).sort((a, b) => a - b);
       hot = counts.length ? Math.max(MIN_HOT_COMMITS, counts[Math.floor(counts.length * 0.8)]) : 0;
     }
+    const isHot = (n) => o.hotspots && hot > 0 && n.category === "module" && meta(n).churn && meta(n).churn.commits >= hot;
+    /* Kids to draw: leaves of one kind beyond FOLD_AT become one fold node (as views.structure_view). Kept out of
+       a fold: o.keep (selected, found, changed) and hotspots. */
+    const limit = o.fold === undefined ? FOLD_AT : o.fold;
+    const withFolds = (parentId, kids) => {
+      if (!limit) return kids;
+      const groups = new Map();
+      for (const k of kids) { const kind = childrenOf(k.id).length ? null : foldKind(k); if (kind) push(groups, kind, k); }
+      const folded = new Set(), folds = [];
+      for (const [kind, members] of groups) {
+        const id = `fold_${parentId}_${kind}`;
+        const inside = members.filter((m) => !(o.keep && o.keep.has(m.id)) && !isHot(m));
+        if (members.length <= limit || inside.length < 2 || (o.unfolded && o.unfolded.has(id))) continue;
+        for (const m of inside) folded.add(m.id);
+        const [word, ic] = FOLD_WORD[kind];
+        view.folds.set(id, { parent: parentId, kind, count: inside.length });
+        folds.push({ id, label: `+ ${inside.length} ${word}s`, sublabel: "folded · click to expand", status: "unchanged", kind: "structural", shape: "stadium", icon: ic, parent: null, fold: true });
+      }
+      return [...kids.filter((k) => !folded.has(k.id)), ...folds];
+    };
     let count = 0;
     const label = (n, isRoot) => {
       let sub = n.component_type === "submodule" ? submoduleState(n) : n.component_type;
@@ -599,7 +636,7 @@
       if (!o.files && mods) sub += ` · ${plural(mods, "module")}`;
       if (o.hotspots && meta(n).churn) sub += ` · ${meta(n).churn.commits} commits`;
       return { id: n.id, label: isRoot ? displayName(n) : (n.category === "symbol" ? shortSymbol(n) : n.name), sublabel: sub, status: "unchanged",
-        kind: o.hotspots && meta(n).churn && n.category === "module" && meta(n).churn.commits >= hot && hot > 0 ? "hot" : kindOf(n),
+        kind: isHot(n) ? "hot" : kindOf(n),
         shape: n.category === "module" ? "round" : n.category === "symbol" ? "round" : "box", icon: icon(n), parent: null };
     };
     if (o.layout === "nested") {
@@ -610,7 +647,9 @@
           const sg = "sg_" + n.id;
           view.subgraphs.set(sg, { icon: icon(n), label: depth === 0 ? displayName(n) : n.name });
           view.nested.push({ id: sg, parent });
-          for (const k of kids) walk(k, depth + 1, sg);
+          for (const k of withFolds(n.id, kids)) {
+            if (k.fold) { count++; view.nodes.push(Object.assign(k, { parent: sg })); } else walk(k, depth + 1, sg);
+          }
         } else {
           count++;
           const v = label(n, depth === 0);
@@ -630,9 +669,13 @@
       const n = si.nodes.get(id);
       const v = label(n, id === root);
       const kids = childrenOf(id);
-      if (depth < o.depth) for (const k of kids) { queue.push([k.id, depth + 1]); view.edges.push({ source: id, target: k.id, status: "unchanged", relationship: "contains", count: 1 }); }
-      else if (kids.length) v.sublabel += ` · +${kids.length} more`;
       view.nodes.push(v);
+      if (depth < o.depth) {
+        for (const k of withFolds(id, kids)) {
+          view.edges.push({ source: id, target: k.id, status: "unchanged", relationship: "contains", count: 1 });
+          if (k.fold) { if (count < o.maxNodes) { count++; view.nodes.push(k); } else view.truncated++; } else queue.push([k.id, depth + 1]);
+        }
+      } else if (kids.length) v.sublabel += ` · +${kids.length} more`;
     }
     const keep = new Set(view.nodes.map((n) => n.id));
     view.edges = view.edges.filter((e) => keep.has(e.source) && keep.has(e.target));
@@ -662,7 +705,7 @@
   function serviceKindInfo(kind) { const k = (THEME && THEME.service_kinds) || {}; return k[kind] || k.other || { label: kind, ui_icon: "container" }; }
   function hasServices(si) { for (const n of si.nodes.values()) if (n.component_type === "service") return true; return false; }
   function systemView(si, o) {
-    const view = { title: "System", direction: "TB", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, origin: new Map() };
+    const view = { title: "System", direction: "TB", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, origin: new Map(), orientable: false };
     const services = [...si.nodes.values()].filter((n) => n.component_type === "service")
       .sort((a, b) => ((serviceKind(a) !== "first-party") - (serviceKind(b) !== "first-party")) || cmpStr(a.qualified_name, b.qualified_name));
     const shown = services.slice(0, (o && o.maxNodes) || 250);
@@ -788,10 +831,46 @@
   function mText(text, limit) {
     return mEsc(text, limit).replace(/\u0001([\w-]+)\u0001/g, (m, name) => iconMarkup(name)).replace(/\u0001[\w-]*/g, "");
   }
+  /* Long names are middle-truncated ("app.services…images"); the full name stays in the tooltip and the details panel. */
+  const MAX_LABEL = 40;
+  function midTrunc(text, max) {
+    const s = String(text); max = max || MAX_LABEL;
+    if (s.length <= max || s.includes("\u0001")) return s;
+    const keep = max - 1, head = Math.ceil(keep * 0.45);
+    return s.slice(0, head) + "…" + s.slice(s.length - (keep - head));
+  }
+  /* Orientation from shape (as views.choose_direction): estimate the drawing both ways (ranks along the flow ×
+     the widest rank across it) and keep the one that fits the screen (w × h) at the larger zoom; when both fit
+     at full size, the view's own direction stays.  A deep tree is drawn LR, a long thin chain TB. */
+  function chooseDirection(view, w, h) {
+    const ids = view.nodes.map((n) => n.id), idset = new Set(ids);
+    if (!ids.length) return view.direction || "LR";
+    const out = new Map(), indeg = new Map(ids.map((i) => [i, 0]));
+    for (const e of view.edges) {
+      if (!idset.has(e.source) || !idset.has(e.target) || e.source === e.target) continue;
+      push(out, e.source, e.target); indeg.set(e.target, indeg.get(e.target) + 1);
+    }
+    const rank = new Map(ids.map((i) => [i, 0])), queue = ids.filter((i) => !indeg.get(i));
+    while (queue.length) {  // longest-path ranks (nodes left in a cycle keep the rank reached so far)
+      const v = queue.shift();
+      for (const w of out.get(v) || []) {
+        rank.set(w, Math.max(rank.get(w), rank.get(v) + 1)); indeg.set(w, indeg.get(w) - 1);
+        if (!indeg.get(w)) queue.push(w);
+      }
+    }
+    const per = new Map();
+    for (const i of ids) per.set(rank.get(i), (per.get(rank.get(i)) || 0) + 1);
+    const depth = per.size, breadth = Math.max(...per.values());
+    w = w || 1600; h = h || 1000;
+    const fits = (dw, dh) => Math.min(1, w / dw, h / dh);
+    const lr = fits(depth * 250, breadth * 56), tb = fits(breadth * 190, depth * 116);
+    if (Math.abs(lr - tb) < 1e-9) return view.direction || "LR";
+    return lr > tb ? "LR" : "TB";
+  }
   function nodeLabel(n, mode) {
     const st = THEME.status[n.status] || {};
     const marker = (mode === "diff" || mode === "role") && n.status !== "unchanged" && st.icon ? st.icon + " " : "";
-    const first = marker + (n.icon ? iconMarkup(n.icon) + " " : "") + mText(n.label);
+    const first = marker + (n.icon ? iconMarkup(n.icon) + " " : "") + mText(midTrunc(n.label));
     let second = n.sublabel || "";
     if (mode === "diff" && n.status !== "unchanged") second = (st.word || n.status) + (second ? " · " + second : "");
     else if (mode === "role" && n.status !== "unchanged") second = second + " · " + (st.word || n.status);
@@ -804,7 +883,11 @@
     const st = t[e.status] || t.unchanged;
     let arrow = st.arrow, style = st;
     const markers = st.marker ? [st.marker] : [];
-    if (e.cycle) {
+    if (e.cycle && e.cycleExisting) {  // an old cycle this change does not touch: thin, dotted, faint
+      style = { stroke: t.cycle.stroke, width: 1, dash: "2 4", opacity: 0.5 };
+      arrow = "-.->";
+      markers.push("existing cycle");
+    } else if (e.cycle) {
       style = t.cycle;
       arrow = e.status === "added" ? "==>" : "-.->";
       markers.push(e.cycleIntroduced ? "⟲ new cycle" : t.cycle.marker);
@@ -822,6 +905,7 @@
     }
     const parts = [`stroke:${style.stroke}`, `stroke-width:${style.width}px`, "fill:none"];
     if (style.dash) parts.push(`stroke-dasharray:${style.dash}`);
+    if (style.opacity) parts.push(`stroke-opacity:${style.opacity}`);
     if (e.relationship === "contains") { arrow = "---"; }
     return { arrow, label: markers.join(" "), style: parts.join(",") };
   }
@@ -891,13 +975,15 @@
       this.viewport = h("div", { class: "viewport", tabindex: "0", role: "img", "aria-label": this.opts.title || "diagram" }, this.stage, this.overlay);
       this.titleEl = h("span", { class: "title", text: this.opts.title || "" });
       this.find = h("input", { type: "search", placeholder: "Find in diagram…", "aria-label": "Find in diagram", style: { width: "160px" } });
-      this.find.addEventListener("input", debounce(() => this.highlight(this.find.value), 150));
+      this.find.addEventListener("input", debounce(() => { this.highlight(this.find.value); if (this.opts.onFind) this.opts.onFind(this.find.value); }, 150));
       const btn = (label, title, fn) => h("button", { class: "btn small", type: "button", title, "aria-label": title, onclick: fn }, label);
       this.sourcePre = h("pre", { class: "mono" });
       this.info = h("span", { class: "muted", style: { fontSize: "12px" } });
       this.spotNote = h("div", { class: "spot-note", role: "status", hidden: true });
+      // Layout direction: auto (from the diagram's shape), or forced; remembered per view.
+      this.orientBtn = this.opts.orient ? btn("⇄", "", () => this.cycleOrientation()) : null;
       this.el = h("div", { class: "card diagram-card" },
-        h("div", { class: "diagram-head" }, this.titleEl, this.info, this.find,
+        h("div", { class: "diagram-head" }, this.titleEl, this.info, this.find, this.orientBtn,
           btn("＋", "Zoom in", () => this.zoom(1.25)), btn("－", "Zoom out", () => this.zoom(0.8)), btn("Fit", "Fit to view", () => this.fit()),
           btn("1:1", "Actual size", () => { this.t = { x: 10, y: 10, k: 1 }; this.apply(); }),
           btn("Copy", "Copy Mermaid source", () => this.copy()), btn("SVG", "Download SVG", () => this.downloadSvg()),
@@ -914,22 +1000,86 @@
       }
     }
     setTitle(t) { this.titleEl.textContent = t; this.viewport.setAttribute("aria-label", t); }
+    orientation() { return this.opts.orient ? storage.get("rv.orient." + this.opts.orient, "auto") : "auto"; }
+    cycleOrientation() {
+      const next = { auto: "LR", LR: "TB", TB: "auto" }[this.orientation()] || "auto";
+      storage.set("rv.orient." + this.opts.orient, next);
+      if (this.view) this.render(this.view, this.handlers);
+    }
+    updateOrientButton(dir) {
+      if (!this.orientBtn) return;
+      const mode = this.orientation(), sym = dir === "TB" ? "⇅" : "⇄";
+      this.orientBtn.textContent = mode === "auto" ? `${sym} auto` : sym;
+      const t = `Layout: ${mode === "auto" ? `automatic (${dir === "TB" ? "top to bottom" : "left to right"}, from the diagram's shape)` : dir === "TB" ? "top to bottom" : "left to right"}. Click for ${mode === "auto" ? "left to right" : mode === "LR" ? "top to bottom" : "automatic"}.`;
+      this.orientBtn.title = t; this.orientBtn.setAttribute("aria-label", t);
+    }
     setLegend(fn) { if (this.legendEl) { this.legendEl.innerHTML = ""; put(this.legendEl, fn()); } }
-    apply() { this.stage.style.transform = `translate(${this.t.x}px, ${this.t.y}px) scale(${this.t.k})`; }
+    apply() { this.stage.style.transform = `translate(${this.t.x}px, ${this.t.y}px) scale(${this.t.k})`; this.updateMinimap(); }
     zoom(f, cx, cy) {
       const r = this.viewport.getBoundingClientRect();
       cx = cx === undefined ? r.width / 2 : cx; cy = cy === undefined ? r.height / 2 : cy;
       const k = Math.min(8, Math.max(0.05, this.t.k * f));
       this.t.x = cx - (cx - this.t.x) * (k / this.t.k); this.t.y = cy - (cy - this.t.y) * (k / this.t.k); this.t.k = k; this.apply();
     }
-    fit() {
+    size() {
       const svg = $("svg", this.stage);
-      if (!svg) return;
-      const w = parseFloat(svg.getAttribute("width")) || svg.getBBox().width, hgt = parseFloat(svg.getAttribute("height")) || svg.getBBox().height;
-      const r = this.viewport.getBoundingClientRect();
-      if (!w || !hgt || !r.width) return;
-      const k = Math.min(1.2, Math.max(0.05, Math.min((r.width - 24) / w, (r.height - 24) / hgt)));
-      this.t = { k, x: (r.width - w * k) / 2, y: Math.max(8, (r.height - hgt * k) / 2) }; this.apply();
+      if (!svg) return null;
+      return { w: parseFloat(svg.getAttribute("width")) || svg.getBBox().width, h: parseFloat(svg.getAttribute("height")) || svg.getBBox().height };
+    }
+    /* Font size of node labels at scale 1 (Mermaid's HTML labels). */
+    labelPx() {
+      const el = $("g.node .nodeLabel", this.stage) || $("g.node foreignObject div", this.stage) || $("g.node text", this.stage);
+      const px = el ? parseFloat(getComputedStyle(el).fontSize) : 0;
+      return px > 0 ? px : 14;
+    }
+    /* Fit to view, but never below the zoom at which labels read at 11px: a larger diagram fits its width (or
+       stays readable) and is panned; a mini-map then shows where the view is. */
+    fit() {
+      const sz = this.size(), r = this.viewport.getBoundingClientRect();
+      if (!sz || !sz.w || !sz.h || !r.width) return;
+      const all = Math.min((r.width - 24) / sz.w, (r.height - 24) / sz.h);
+      const readable = MIN_LABEL_PX / this.labelPx();
+      let k = Math.min(1.2, Math.max(0.05, all));
+      if (k < readable) k = Math.max(readable, Math.min(1.2, (r.width - 24) / sz.w));
+      this.t = { k, x: sz.w * k <= r.width ? (r.width - sz.w * k) / 2 : 12, y: sz.h * k <= r.height ? Math.max(8, (r.height - sz.h * k) / 2) : 8 };
+      this.drawMinimap();
+      this.apply();
+    }
+    /* A small map of the whole diagram (node boxes, not a copy of the SVG) with the visible area; click to jump.
+       Only for diagrams more than twice the size of the view. */
+    drawMinimap() {
+      if (this.mini) { this.mini.remove(); this.mini = this.miniView = null; }
+      const sz = this.size(), r = this.viewport.getBoundingClientRect(), svg = $("svg", this.stage);
+      if (!sz || !svg || !r.width || (sz.w * this.t.k <= 2 * r.width && sz.h * this.t.k <= 2 * r.height)) return;
+      const ns = "http://www.w3.org/2000/svg";
+      let scale = Math.min(180 / sz.w, 130 / sz.h);
+      if (sz.w * scale < 48) scale = Math.min(48 / sz.w, Math.min(r.height - 40, 400) / sz.h);  // a tall diagram: a taller map
+      if (sz.h * scale < 36) scale = Math.min(Math.min(r.width - 40, 400) / sz.w, 36 / sz.h);  // a wide one: a wider map
+      const el = (tag, attrs) => { const x = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) x.setAttribute(k, v); return x; };
+      const mini = el("svg", { class: "minimap", width: Math.round(sz.w * scale), height: Math.round(sz.h * scale), viewBox: `0 0 ${sz.w} ${sz.h}`,
+        role: "img", "aria-label": "Mini-map: click to move the view there" });
+      mini.appendChild(el("rect", { x: 0, y: 0, width: sz.w, height: sz.h, class: "mini-bg" }));
+      const sr = svg.getBoundingClientRect(), f = sz.w / (sr.width || 1);
+      for (const g of (this.nodeEls || new Map()).values()) {
+        const b = g.getBoundingClientRect();
+        mini.appendChild(el("rect", { x: (b.left - sr.left) * f, y: (b.top - sr.top) * f, width: Math.max(2, b.width * f), height: Math.max(2, b.height * f), class: "mini-node" }));
+      }
+      this.miniView = el("rect", { class: "mini-view" });
+      mini.appendChild(this.miniView);
+      mini.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+      mini.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const mr = mini.getBoundingClientRect(), vr = this.viewport.getBoundingClientRect();
+        const px = ((ev.clientX - mr.left) / mr.width) * sz.w, py = ((ev.clientY - mr.top) / mr.height) * sz.h;
+        this.t.x = vr.width / 2 - px * this.t.k; this.t.y = vr.height / 2 - py * this.t.k; this.apply();
+      });
+      this.mini = mini;
+      this.viewport.appendChild(mini);
+    }
+    updateMinimap() {
+      if (!this.miniView) return;
+      const r = this.viewport.getBoundingClientRect(), k = this.t.k;
+      for (const [a, v] of [["x", -this.t.x / k], ["y", -this.t.y / k], ["width", r.width / k], ["height", r.height / k]]) this.miniView.setAttribute(a, v);
     }
     bindPanZoom() {
       const vp = this.viewport;
@@ -960,6 +1110,15 @@
     async render(view, handlers) {
       this.view = view;
       handlers = handlers || {};
+      this.handlers = handlers;
+      if (this.mini) { this.mini.remove(); this.mini = this.miniView = null; }
+      if (this.opts.orient && view.orientable !== false) {
+        const mode = this.orientation();
+        const r = this.viewport.getBoundingClientRect();
+        view.direction = mode === "auto" ? chooseDirection(view, r.width - 24, r.height - 24) : mode;
+        this.updateOrientButton(view.direction);
+        this.orientBtn.hidden = false;
+      } else if (this.orientBtn) this.orientBtn.hidden = true;
       this.text = toMermaid(view);
       this.sourcePre.textContent = this.text;
       const parts = [plural(view.nodes.length, "node"), plural(view.edges.length, "edge")];
@@ -1001,6 +1160,9 @@
         g.setAttribute("role", "button");
         const vn = view.nodes.find((n) => n.id === nid);
         g.setAttribute("aria-label", `${vn.label} (${vn.status !== "unchanged" ? vn.status + ", " : ""}${vn.sublabel || ""})`);
+        const tip = document.createElementNS("http://www.w3.org/2000/svg", "title");  // the full name, even when the label is shortened
+        tip.textContent = String(vn.label).replace(/\u0001[^\u0001]*\u0001/g, "").trim() + (vn.sublabel ? ` · ${vn.sublabel}` : "");
+        g.prepend(tip);
         const fire = (ev) => {
           if (this.suppressClick) return;
           ev.stopPropagation(); this.select(nid);
@@ -1025,6 +1187,7 @@
         if (!e) continue;
         const target = el.closest(".edgeLabel") || el;
         this.edgeEls.push({ e, el: target });
+        if (e.cycle) target.classList.add(e.cycleExisting ? "cycle-existing" : e.cycleIntroduced ? "cycle-new" : "cycle-kept");
         if (!handlers.onEdge) continue;
         if (target.tagName === "path") { target.style.pointerEvents = "stroke"; target.setAttribute("stroke-linecap", "round"); }
         target.style.cursor = "pointer";
@@ -1101,7 +1264,8 @@
     return [
       item("added", "✚ added"), item("removed", "✖ removed (dashed)"), item("modified", "✎ modified"), item("unchanged", "unchanged"),
       item("added", "+ new edge (thick)", "line"), item("removed", "− removed edge (dashed)", "line"), item("modified", "~ evidence changed", "line"),
-      item("unchanged", "unchanged edge", "line"), item("cycle", "⟲ in a cycle (purple, dashed)", "line"),
+      item("unchanged", "unchanged edge", "line"), item("cycle", "⟲ in a cycle (purple, dashed; \"⟲ new cycle\" when introduced)", "line"),
+      item("cycle-existing", "existing cycle the change does not touch (thin, dotted, faint)", "line"),
       h("span", { class: "item" }, "↦ was …: renamed or moved (one node, not a removal plus an addition)"),
     ];
   }
@@ -1367,7 +1531,7 @@
     save() { storage.set("rv.changes", this.opts); }
     async init() {
       const app = this.app, o = this.opts;
-      this.diagram = new Diagram({ title: "Changes", legend: diffLegend, emptyText: "No architectural changes with the current filters." });
+      this.diagram = new Diagram({ title: "Changes", legend: diffLegend, orient: "changes", emptyText: "No architectural changes with the current filters." });
       this.details = new DetailsPanel(app);
       this.statsEl = h("div", { class: "stats" });
       this.listsEl = h("div");
@@ -1510,7 +1674,9 @@
       const o = this.opts, app = this.app;
       this.si = app.snapshotIndex;
       if (o.root && !this.si.nodes.has(o.root)) o.root = null;
-      this.diagram = new Diagram({ title: "Structure", legend: kindLegend });
+      this.unfolded = new Set();
+      this.diagram = new Diagram({ title: "Structure", legend: kindLegend, orient: "structure",
+        onFind: () => { if (this.foldsSeen && this.viewName() !== "system") this.draw(); } });  // a match inside a fold comes out
       this.details = new DetailsPanel(app);
       this.crumbs = h("div", { class: "crumbs" });
       this.drawer = h("div", { class: "card changes-drawer", role: "region", "aria-label": "Code changes", hidden: true });
@@ -1564,13 +1730,14 @@
       if (system) return this.drawSystem();
       this.diagram.setLegend(kindLegend);
       this.drawCrumbs();
-      const view = structureView(this.si, this.opts);
+      const view = structureView(this.si, Object.assign({}, this.opts, { keep: this.keepSet(), unfolded: this.unfolded }));
+      if (view.folds.size) this.foldsSeen = true;
       const r = this.si.nodes.get(this.opts.root || rootOf(this.si));
       const counts = [...this.si.nodes.values()].filter((n) => n.category === "module" && meta(n).churn).map((n) => meta(n).churn.commits).sort((a, b) => a - b);
       this.hot = counts.length ? Math.max(MIN_HOT_COMMITS, counts[Math.floor(counts.length * 0.8)]) : 0;  // as in structureView
       this.diagram.setTitle(`Structure of ${r ? displayName(r) : "repository"}`);
       await this.diagram.render(view, {
-        onNode: (id) => this.nodeClicked(id),
+        onNode: (id) => { if (view.folds.has(id)) { this.unfolded.add(id); this.draw(); } else this.nodeClicked(id); },
         onCluster: (id) => this.details.showNode(this.si, id),
         onNodeDouble: (id) => { if ((this.si.children.get(id) || []).length) this.setRoot(id); },
       });
@@ -1614,6 +1781,20 @@
   }
 
   Object.assign(StructureTab.prototype, {
+    /* Nodes that never hide in a fold: the selection, what the find box matches, and files changed right now. */
+    keepSet() {
+      const keep = new Set(), d = this.diagram;
+      if (d && d.selected) keep.add(d.selected);
+      const q = d ? d.find.value.trim().toLowerCase() : "";
+      if (!this.byPath) { this.byPath = new Map(); for (const n of this.si.nodes.values()) if (n.path && n.category !== "symbol" && !this.byPath.has(n.path)) this.byPath.set(n.path, n.id); }
+      if (q) for (const n of this.si.nodes.values()) if (n.category !== "symbol" && ((n.name || "").toLowerCase().includes(q) || (n.path || "").toLowerCase().includes(q))) keep.add(n.id);
+      const act = this.app.bundle.activity || (this.app.tabs.activity && this.app.tabs.activity.data);
+      for (const e of (act && act.events) || []) {
+        if (e.module_id) keep.add(e.module_id);
+        if (e.path && this.byPath.has(e.path)) keep.add(this.byPath.get(e.path));
+      }
+      return keep;
+    },
     /* Marked as a churn hotspot in the current view (the "hot" nodes). */
     isHot(n) { return !!(this.opts.hotspots && n && n.category === "module" && meta(n).churn && this.hot > 0 && meta(n).churn.commits >= this.hot); },
     changesAvailable(n) {
@@ -1787,7 +1968,7 @@
       if (o.focus && !this.si.nodes.has(o.focus)) o.focus = null;
       this.si.contractInfo = contractInfo(app.bundle.contracts);
       if (!this.si.contractInfo) o.contracts = false;
-      this.diagram = new Diagram({ title: "Dependencies", legend: () => [...kindLegend(), runtimeLegend(), contractLegend()], spotlight: true });
+      this.diagram = new Diagram({ title: "Dependencies", legend: () => [...kindLegend(), runtimeLegend(), contractLegend()], spotlight: true, orient: "dependencies" });
       this.details = new DetailsPanel(app);
       this.focusInput = h("input", { type: "search", list: "rv-nodes", placeholder: "type a name…", size: 26, "aria-label": "Focus node" });
       this.datalist = h("datalist", { id: "rv-nodes" });
@@ -3077,7 +3258,8 @@
         { ul: ["**Level**: *Auto* picks components, packages, modules or symbols for a readable size. Go down a level to see detail.",
           "**Show**: *Changed only* is the tightest view. *Changed + neighbours* adds the direct context. *Everything* is for small graphs.",
           "**Relationships**: keep imports and depends-on for architecture; add calls when working at symbol level.",
-          "**Hide formatting-only** skips files whose code did not change (whitespace or comments). **Group by component** draws components as boxes."] },
+          "**Hide formatting-only** skips files whose code did not change (whitespace or comments). **Group by component** draws components as boxes.",
+          "An **existing cycle** that this change does not touch is drawn thin, dotted and faint, so a **⟲ new cycle** stands out. Touch one of its members and it is drawn strong again."] },
         { h: "Dig into a change" },
         { ul: ["Click a node or an edge label: the side panel explains *why* it changed and shows source evidence (file and line).",
           "Below the diagram: new and removed dependencies, cycles introduced or resolved, and every changed node with the reason."] },
@@ -3088,6 +3270,7 @@
         { ul: ["**View: System** (shown first when the repository has `docker-compose` / `compose` files) draws the running system. Each **first-party service** (built from this repository) is a box holding the code it runs: `uvicorn app.main:app` points at `app.main`, `celery -A app.worker` at `app.worker`, and a service without a command uses its Dockerfile's `CMD`. **Infrastructure** (databases, caches, queues, object stores, search, monitoring, proxies) is grouped apart, with an icon and a word per kind. Services are linked by **talks to** (thick: a URL or host in the environment names the other service, labelled with protocol and port), **starts after** (dashed: `depends_on`) and **shares volume** (dotted). A service declared in several files (`docker-compose.yml`, `docker-compose.prod.yml`…) is **one** service; click it to see its variants and what differs between them. Environment values are never shown, only variable names.",
           "**View: Files and components** shows the layout. The diagram starts at the repository root. **Double-click** a node (or use the breadcrumbs) to drill into a directory or package. **Depth** controls how many levels are shown.",
           "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
+          "**Long lists fold.** More than 8 test files, docs, modules or files under one parent become one node, such as *+ 27 test files*. Click it to expand. A changed file, the selected node and what **Find** matches stay outside a fold.",
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
           "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
           "**The header chips** count what the repository holds, each apart: code components, services, submodules, external packages and entry points. Click one to open its view. `repoviz discover` prints the same numbers.",
@@ -3121,13 +3304,16 @@
     { id: "diagrams", title: "Reading the diagrams", icon: "layers", intro: "Colours are never the only signal: every state also has a border style, a marker and a word.",
       blocks: [
         { kv: [["✚ added", "green fill, thick border"], ["✖ removed", "red fill, dashed border"], ["✎ modified", "amber fill, thick border"], ["unchanged", "neutral"],
-          ["+ new edge", "thick green arrow"], ["− removed edge", "red dashed"], ["~ evidence changed", "amber"], ["⟲ cycle", "purple dashed; *new cycle* when introduced"],
+          ["+ new edge", "thick green arrow"], ["− removed edge", "red dashed"], ["~ evidence changed", "amber"], ["⟲ cycle", "purple dashed; *new cycle* when introduced"], ["existing cycle", "thin, dotted, faint purple: an old cycle the change does not touch"],
           ["protected / out of scope", "thick dark-red / orange border (AI Review)"], ["dashed grey border", "external or structural-only (no dependency data)"],
           ["↦ was …", "renamed or moved: one node, not a removal plus an addition; its edges carry over"]] },
         { p: "Icons show the kind of each node: house (repository), package (component), folder (package or directory), code file (module), flask (tests), link (external or submodule), play (entry point), and so on. The Structure legend lists them all." },
         { h: "Navigating" },
         { ul: ["Drag to pan and scroll to zoom; **Fit** and **1:1** reset the view. With the diagram focused, arrows pan, `+` / `-` zoom and `0` fits.",
           "**Find in diagram** highlights matching nodes.",
+          "The **⇄ auto** button (Changes, Structure, Dependencies) sets the layout direction: *auto* picks left to right or top to bottom from the diagram's shape, whichever fits the screen at the larger zoom. Click to force ⇄ left to right, then ⇅ top to bottom, then back to auto. Each tab remembers its choice.",
+          "**Fit** never shrinks labels below 11 px. A larger diagram fits its width; pan to see the rest. When it is more than twice the view, a **mini-map** in the corner shows where you are: click it to move there.",
+          "Long names are shortened in the middle (`app.services…images`). Hover a node for its full name, or click it for the details panel.",
           "**Copy** copies the Mermaid source, **SVG** downloads the picture (icons included) and **.mmd** downloads the source for documents or pull requests."] },
       ] },
     { id: "keys", title: "Keyboard shortcuts", icon: "keyboard", intro: "Shortcuts are ignored while you type in a field.",

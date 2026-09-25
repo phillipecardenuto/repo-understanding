@@ -530,3 +530,108 @@ def test_discover_breaks_the_counts_down(make_repo, capsys) -> None:
     from repoviz.render.html import build_bundle
 
     assert build_bundle(Repository(repo.path), include_activity=False)["breakdown"] == bd  # the header's numbers
+
+
+# --------------------------------------------------------------------------- Readability at scale (#27)
+
+
+def branching_tree(branching: tuple[int, ...] = (2, 2, 2, 2, 1)) -> dict[str, str]:
+    """A package tree one level deeper than ``branching``: the default is 48 packages, 6 levels deep."""
+    files: dict[str, str] = {}
+    paths = ["pkg"]
+    for b in branching:
+        nxt: list[str] = []
+        for p in paths:
+            files[f"{p}/__init__.py"] = ""
+            nxt += [f"{p}/d{len(nxt) + i}" for i in range(b)]
+        paths = nxt
+    files.update({f"{p}/__init__.py": "" for p in paths})
+    return files
+
+
+def test_orientation_follows_the_shape(make_repo, capsys) -> None:
+    repo = make_repo(branching_tree())
+    deep = views.structure_view(Repository(repo.path).snapshot(), depth=8)
+    assert len(deep.nodes) == 48 and deep.orientable and views.choose_direction(deep) == "LR"  # 6 levels deep
+    chain = views.ViewGraph("chain", nodes=[views.VNode(f"n{i}", "x") for i in range(12)],
+                            edges=[views.VEdge(f"n{i}", f"n{i + 1}") for i in range(11)])
+    assert views.choose_direction(chain) == "TB"  # 12 × 250 px wide, or 12 × 116 px tall: TB fits at a larger zoom
+    small = views.ViewGraph("small", direction="LR", nodes=chain.nodes[:3], edges=chain.edges[:2])
+    assert views.choose_direction(small) == "LR" and views.choose_direction(views.ViewGraph("empty")) == "LR"
+    assert main(["mermaid", "-C", repo.path, "--view", "structure", "--depth", "8"]) == 0
+    assert capsys.readouterr().out.startswith("flowchart LR")
+    assert main(["mermaid", "-C", repo.path, "--view", "structure", "--depth", "8", "--direction", "TB"]) == 0
+    assert capsys.readouterr().out.startswith("flowchart TB")
+    # A layout whose direction is part of it keeps it.
+    system = make_repo(TWO_PACKAGES)
+    assert main(["mermaid", "-C", system.path, "--view", "system", "--direction", "LR"]) == 0
+    assert capsys.readouterr().out.startswith("flowchart TB")
+
+
+TESTS_27 = {"pkg/__init__.py": "", "pkg/core.py": "X = 1\n",
+            **{f"pkg/tests/test_{i:02}.py": "def test_x():\n    pass\n" for i in range(27)}}
+
+
+def test_long_leaf_lists_fold(make_repo, capsys) -> None:
+    repo = make_repo(TESTS_27)
+    snap = Repository(repo.path).snapshot()
+    tests_dir = next(n for n in snap.components if n.path == "pkg/tests")
+    view = views.structure_view(snap, depth=4, include_files=True)
+    fold_id = f"fold_{tests_dir.id}_test"
+    assert view.folds[fold_id] == {"parent": tests_dir.id, "kind": "test", "count": 27}
+    fold = next(n for n in view.nodes if n.id == fold_id)
+    assert fold.label == "+ 27 test files" and fold.shape == "stadium" and fold.icon == "🧪"
+    assert not any(n.label.startswith("test_") for n in view.nodes)
+    assert any(e.source == tests_dir.id and e.target == fold_id for e in view.edges)
+    # What must stay visible (a changed file) is pulled out of the fold.
+    changed = next(n for n in snap.nodes() if n.path == "pkg/tests/test_05.py")
+    kept = views.structure_view(snap, depth=4, include_files=True, keep={changed.id})
+    assert kept.folds[fold_id]["count"] == 26 and any(n.id == changed.id for n in kept.nodes)
+    everything = views.structure_view(snap, depth=4, include_files=True, fold=0)
+    assert not everything.folds and sum(n.label.startswith("test_") for n in everything.nodes) == 27
+    # Folding needs more than N members: 8 test files are drawn one by one.
+    small = views.structure_view(snap, depth=4, include_files=True, fold=30)
+    assert not small.folds
+    assert main(["mermaid", "-C", repo.path, "--view", "structure", "--files", "--depth", "4"]) == 0
+    out = capsys.readouterr()
+    assert f'{fold_id}(["🧪 + 27 test files' in out.out and "1 group(s) of files folded" in out.err
+    assert main(["mermaid", "-C", repo.path, "--view", "structure", "--files", "--depth", "4", "--fold", "0"]) == 0
+    assert "fold_" not in capsys.readouterr().out
+
+
+def test_long_labels_are_shortened_in_the_middle() -> None:
+    name = "repoviz.analyzers.javascript_resolver.more"
+    short = mermaid.mid_trunc(name)
+    assert len(short) == mermaid.MAX_LABEL and short == "repoviz.analyzers.…ascript_resolver.more"
+    assert mermaid.mid_trunc("short.name") == "short.name"
+    view = views.ViewGraph("t", mode="kind", nodes=[views.VNode("a", name)])
+    assert short in mermaid.to_mermaid(view) and name not in mermaid.to_mermaid(view)
+
+
+CYCLE_27 = {"app/__init__.py": "", "app/routes.py": "from app import tasks\n", "app/tasks.py": "from app import routes\n",
+            "app/other.py": "X = 1\n", "app/util.py": "Y = 1\n"}
+
+
+def test_old_cycles_the_change_does_not_touch_are_faint(make_repo) -> None:
+    repo = make_repo(CYCLE_27)
+    repo.write({"app/other.py": "from app import util\n"})  # a change away from the cycle
+    _comp, diff = Repository(repo.path).compare(mode="all")
+    view = views.changes_view(diff, level="module", scope="all")
+    cyc = [e for e in view.edges if e.cycle]
+    assert len(cyc) == 2 and all(e.cycle_existing and not e.cycle_introduced for e in cyc)
+    text = mermaid.to_mermaid(view)
+    assert text.count('"existing cycle"') == 2 and "⟲ cycle" not in text
+    faint = [l for l in text.splitlines() if "stroke-opacity:0.5" in l]
+    assert len(faint) == 2 and all("stroke-width:1px" in l and "stroke-dasharray:2 4" in l for l in faint)
+    # Touching a member of the cycle brings back the strong style.
+    repo.write({"app/tasks.py": "from app import routes\n\nZ = 2\n"})
+    _comp, diff = Repository(repo.path).compare(mode="all")
+    view = views.changes_view(diff, level="module", scope="all")
+    assert [e.cycle_existing for e in view.edges if e.cycle] == [False, False]
+    assert "⟲ cycle" in mermaid.to_mermaid(view)
+    # A new cycle is never faint.
+    fresh = make_repo({k: v for k, v in CYCLE_27.items() if k != "app/tasks.py"} | {"app/tasks.py": "X = 1\n"})
+    fresh.write({"app/tasks.py": "from app import routes\n"})
+    _comp, diff = Repository(fresh.path).compare(mode="all")
+    new = [e for e in views.changes_view(diff, level="module", scope="all").edges if e.cycle]
+    assert new and all(e.cycle_introduced and not e.cycle_existing for e in new)

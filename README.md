@@ -63,7 +63,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
-| `repoviz mermaid --view changes\|dependencies\|structure\|flow\|system` | Print Mermaid text (paste into docs or PRs). `system` draws the services from the Compose files. |
+| `repoviz mermaid --view changes\|dependencies\|structure\|flow\|system` | Print Mermaid text (paste into docs or PRs). `system` draws the services from the Compose files. `--direction auto\|LR\|TB` sets the orientation (auto: from the diagram's shape); `--fold N` folds long lists of leaves in the structure view. |
 | `repoviz discover [--json]` | What discovery found: languages, manifests, roots, entry points, CI… |
 | `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
 | `repoviz activity [--json]` | Files being modified now, with impact, tests and config flags. |
@@ -222,9 +222,33 @@ languages without call data). The live app refreshes automatically.
 | Evidence changed | amber | solid | "~ changed" |
 | Unchanged edge | gray | thin | – |
 | Edge in a cycle | purple | dashed | "⟲ cycle" / "⟲ new cycle" |
+| Old cycle the change does not touch | purple, faint | thin, dotted | "existing cycle" |
 
 Every diagram also carries an `accTitle`/`accDescr`, all data is available in
 tables, and diagrams can be navigated with the keyboard (arrows, +/-, 0 to fit).
+
+**Large diagrams stay readable.**
+
+- **Orientation from shape.** Changes, Structure and Dependencies pick
+  left-to-right or top-to-bottom, whichever fits the screen at the larger zoom:
+  a deep tree runs left to right, a long thin chain top to bottom. The ⇄ / ⇅
+  button cycles *auto*, left to right and top to bottom, and is remembered per
+  tab. Layers and the System view keep their own layout.
+- **Readable Fit.** **Fit** never shrinks labels below 11 px. A larger diagram
+  fits its width and you pan the rest; when it is more than twice the view, a
+  mini-map in the corner shows where you are, and a click there moves the view.
+- **Folded leaf lists.** More than 8 leaves of one kind under one parent (test
+  files, docs, modules, files) become one node, "+ 27 test files". Click it to
+  expand. Changed files, the selected node and find matches always stay outside
+  a fold.
+- **Long names** are shortened in the middle (`app.services…images`); the full
+  name is in the tooltip and the details panel.
+- **Old cycles** the change does not touch (no member changed) are drawn thin,
+  dotted and faint, labelled "existing cycle", so new cycles stand out.
+
+`repoviz mermaid` and `repoviz diff --format mermaid` do the same with
+`--direction auto|LR|TB` (default `auto`), and `--fold N` for the structure view
+(default 8; `0` never folds).
 
 Nodes carry a kind icon from repoviz's own line-icon set, each in its own colour:
 house (repository), package (project / component), folder (package /

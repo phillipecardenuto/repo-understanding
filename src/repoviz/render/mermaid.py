@@ -12,6 +12,7 @@ edge −     red dashed arrow labelled "− removed"
 edge ~     amber arrow labelled "~ changed"
 edge =     thin gray arrow
 cycle      purple dashed arrow labelled "⟲ cycle" (combined with the status marker)
+old cycle  thin, dotted, half-transparent purple arrow labelled "existing cycle" (a cycle this change does not touch)
 ========== ====================================================================
 """
 
@@ -22,7 +23,7 @@ from typing import Any
 from .theme import theme
 from .views import VEdge, VNode, ViewGraph
 
-__all__ = ["escape", "theme", "to_mermaid"]
+__all__ = ["escape", "mid_trunc", "theme", "to_mermaid"]
 
 
 _ESCAPES = {'"': "#quot;", "<": "#lt;", ">": "#gt;", "#": "#35;", "&": "#amp;", "`": "#96;", "\n": " ",
@@ -54,11 +55,25 @@ def _class_defs(prefix: str, table: dict[str, dict[str, Any]]) -> list[str]:
     return out
 
 
+#: Longer labels are shortened in the middle (``maxLabel`` in web/app.js): both ends of a path say the most.
+MAX_LABEL = 40
+
+
+def mid_trunc(text: str, limit: int = MAX_LABEL) -> str:
+    """``repoviz.analyzers.javascript_resolver`` → ``repoviz.analyze…javascript_resolver`` (as ``midTrunc``)."""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    keep = limit - 1
+    head = -(-keep * 45 // 100)  # ceil(keep * 0.45)
+    return text[:head] + "…" + text[len(text) - (keep - head):]
+
+
 def _node_label(n: VNode, mode: str) -> str:
     st = theme()["status"].get(n.status, {})
     marker = f"{st.get('icon', '')} " if mode == "diff" and n.status != "unchanged" else ""
     icon = f"{n.icon} " if n.icon else ""
-    first = f"{marker}{icon}{escape(n.label)}"
+    first = f"{marker}{icon}{escape(mid_trunc(n.label))}"
     second = n.sublabel
     if mode == "diff" and n.status != "unchanged":
         second = f"{st.get('word', n.status)}" + (f" · {n.sublabel}" if n.sublabel else "")
@@ -74,7 +89,11 @@ def _edge_style(e: VEdge) -> tuple[str, str, str]:
     arrow = st["arrow"]
     markers = [st["marker"]] if st["marker"] else []
     style = st
-    if e.cycle:
+    if e.cycle and e.cycle_existing:  # an old cycle this change does not touch: thin, dotted, faint
+        style = {"stroke": t["cycle"]["stroke"], "width": 1, "dash": "2 4", "opacity": 0.5}
+        arrow = "-.->"
+        markers.append("existing cycle")
+    elif e.cycle:
         style = t["cycle"]
         arrow = "-.->" if e.status != "added" else "==>"
         markers.append("⟲ new cycle" if e.cycle_introduced else t["cycle"]["marker"])
@@ -93,6 +112,8 @@ def _edge_style(e: VEdge) -> tuple[str, str, str]:
     parts = [f"stroke:{style['stroke']}", f"stroke-width:{style['width']}px", "fill:none"]
     if style.get("dash"):
         parts.append(f"stroke-dasharray:{style['dash']}")
+    if style.get("opacity"):
+        parts.append(f"stroke-opacity:{style['opacity']}")
     if e.relationship == "contains":
         arrow = "---"
     return arrow, " ".join(markers), ",".join(parts)

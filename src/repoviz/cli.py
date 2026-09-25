@@ -249,6 +249,20 @@ def _load_diff(args: argparse.Namespace) -> tuple[str, RepositoryDiff]:
     return comp.label, diff
 
 
+def _orient(view: Any, direction: str, auto: bool = True) -> None:
+    """``--direction``: ``auto`` picks LR or TB from the drawing's shape (as the web app does); a layout whose
+    direction is part of it (layers, the System view) is left alone."""
+    from .render import views
+
+    if not view.orientable:
+        return
+    if direction == "auto":
+        if auto:
+            view.direction = views.choose_direction(view)
+    else:
+        view.direction = direction
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     from .render import mermaid, views
 
@@ -258,6 +272,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
     elif args.format in ("mermaid", "markdown"):
         view = views.changes_view(diff, level=args.level, scope=args.scope, include_external=args.external,
                                   max_nodes=args.max_nodes, icons=mermaid.theme()["icons"])
+        _orient(view, args.direction)
         mm = mermaid.to_mermaid(view)
         text = mm if args.format == "mermaid" else format_diff_markdown(diff, label, mm)
     else:
@@ -316,7 +331,11 @@ def cmd_mermaid(args: argparse.Namespace) -> int:
                       file=sys.stderr)
         else:
             view = views.structure_view(snap, root=focus, depth=args.depth, include_files=args.files,
-                                        max_nodes=args.max_nodes, icons=icons)
+                                        max_nodes=args.max_nodes, icons=icons, fold=max(0, args.fold))
+            if view.folds:
+                print(f"repoviz: {len(view.folds)} group(s) of files folded (--fold 0 shows them all)",
+                      file=sys.stderr)
+    _orient(view, args.direction, auto=args.view in ("changes", "dependencies", "structure"))
     _write(mermaid.to_mermaid(view), args.output)
     if view.truncated:
         print(f"repoviz: {view.truncated} node(s) omitted (raise --max-nodes)", file=sys.stderr)
@@ -682,6 +701,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", choices=("changed", "neighbors", "all"), default="neighbors")
     p.add_argument("--external", action="store_true", help="include external packages in diagrams")
     p.add_argument("--max-nodes", type=int, default=150)
+    p.add_argument("--direction", choices=("auto", "LR", "TB"), default="auto",
+                   help="diagram orientation (auto: from the diagram's shape)")
     p.add_argument("--fail-on", action="append", choices=FAIL_CONDITIONS, metavar="CONDITION",
                    help="exit with status 3 when the condition holds (" + ", ".join(FAIL_CONDITIONS) + "); repeatable")
     p.add_argument("--base-snapshot", help="compare two saved snapshot files instead of revisions")
@@ -706,6 +727,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--services", action="store_true",
                    help="dependencies view: also draw Compose services' own links (images, builds, other services)")
     p.add_argument("--max-nodes", type=int, default=200)
+    p.add_argument("--direction", choices=("auto", "LR", "TB"), default="auto",
+                   help="orientation (auto: from the diagram's shape; layers and the system view keep theirs)")
+    p.add_argument("--fold", type=int, default=8, metavar="N",  # views.FOLD_AT
+                   help="structure view: more than N (default 8) leaves of one kind (test files, docs…) under "
+                        "one parent become one node; 0 never folds")
     p.set_defaults(func=cmd_mermaid)
 
     p = sub.add_parser("report", parents=[common], help="write a self-contained interactive HTML report")

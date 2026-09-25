@@ -6,6 +6,25 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Diagrams stay readable at scale** ([#27](https://github.com/phillipecardenuto/repo-understanding/issues/27)).
+  - **Orientation from shape.** Changes, Structure and Dependencies pick left
+    to right or top to bottom, whichever fits the screen at the larger zoom. A
+    ⇄ / ⇅ button overrides it, remembered per tab. Layers and the System view
+    keep their layout.
+  - **Readable Fit.** Fit never shrinks labels below 11 px. A larger diagram
+    fits its width and is panned; a mini-map appears when it is more than twice
+    the view, and a click on it moves the view.
+  - **Folded leaf lists.** More than 8 leaves of one kind under one parent
+    (test files, docs, modules, files) become one node, "+ 27 test files".
+    A click expands it. Changed, selected and found nodes stay outside.
+  - **Faint old cycles.** A cycle the change does not touch is drawn thin,
+    dotted and faint, labelled "existing cycle". New cycles keep the strong
+    style.
+  - **Long names** are shortened in the middle, with the full name in a
+    tooltip.
+  - `repoviz mermaid` and `repoviz diff --format mermaid` gain
+    `--direction auto|LR|TB`; `repoviz mermaid --view structure` gains
+    `--fold N`.
 - **Honest header counts and a smarter Dependencies default** ([#24](https://github.com/phillipecardenuto/repo-understanding/issues/24)).
   - The header counts code components, services (first-party), submodules,
     external packages and entry points apart. It used to show one

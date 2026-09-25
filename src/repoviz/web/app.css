@@ -164,6 +164,12 @@ main { padding: 14px 16px 40px; }
 .line.modified { border-color: var(--modified); border-top-width: 2px; }
 .line.unchanged { border-color: var(--faint); border-top-width: 1px; }
 .line.cycle { border-color: var(--cycle); border-top-style: dashed; }
+.line.cycle-existing { border-color: var(--cycle); border-top-style: dotted; border-top-width: 1px; opacity: .55; }
+.viewport .minimap { position: absolute; right: 10px; bottom: 10px; z-index: 3; cursor: pointer; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 2px 8px rgba(0, 0, 0, .18); }
+.minimap .mini-bg { fill: var(--panel-2); }
+.minimap .mini-node { fill: var(--faint); }
+.minimap .mini-view { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
 details.source { padding: 6px 10px; border-top: 1px solid var(--border); }
 details.source pre { max-height: 240px; overflow: auto; background: var(--code-bg); padding: 8px; border-radius: 6px; }
 

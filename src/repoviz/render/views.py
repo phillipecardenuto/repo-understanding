@@ -64,6 +64,7 @@ class VEdge:
     relationship: str = REL_IMPORTS
     contract: str = ""  # contracts this dependency breaks (the contracts overlay)
     label: str = ""  # extra edge text (a service link's protocol and port, a shared volume)
+    cycle_existing: bool = False  # an old cycle this change does not touch: drawn faint
 
 
 @dataclass
@@ -75,6 +76,8 @@ class ViewGraph:
     subgraphs: dict[str, tuple[str, str | None]] = field(default_factory=dict)
     truncated: int = 0
     mode: str = "diff"  # diff | kind | role
+    orientable: bool = True  # False: the direction is part of the layout (nested boxes, layers, System view)
+    folds: dict[str, dict[str, Any]] = field(default_factory=dict)  # fold node ID -> {parent, kind, count}
 
 
 class Grouper:
@@ -158,6 +161,59 @@ def _sublabel(node: ComponentNode, before: dict[str, Any] | None = None) -> str:
     return " · ".join(parts)
 
 
+def _scc_members(edges: Iterable[tuple[str, str]]) -> dict[str, int]:
+    """Node -> index of its cycle (strongly connected component of more than one node)."""
+    adj: dict[str, set[str]] = {}
+    nodes: set[str] = set()
+    for s, t in edges:
+        adj.setdefault(s, set()).add(t)
+        nodes |= {s, t}
+    member: dict[str, int] = {}
+    for i, comp in enumerate(strongly_connected_components(nodes, adj)):
+        if len(comp) > 1:
+            for n in comp:
+                member[n] = i
+    return member
+
+
+def choose_direction(view: ViewGraph, width: float = 1600, height: float = 1000) -> str:
+    """Orientation from shape (as ``chooseDirection`` in web/app.js): estimate the drawing both ways (ranks along
+    the flow × the widest rank across it) and keep the one that fits a ``width`` × ``height`` screen at the larger
+    zoom; when both fit at full size, the view's own direction stays.  A deep tree is drawn ``LR``, a long thin
+    chain ``TB``."""
+    ids = [n.id for n in view.nodes]
+    if not ids:
+        return view.direction
+    idset = set(ids)
+    out: dict[str, list[str]] = {}
+    indeg = {i: 0 for i in ids}
+    for e in view.edges:
+        if e.source in idset and e.target in idset and e.source != e.target:
+            out.setdefault(e.source, []).append(e.target)
+            indeg[e.target] += 1
+    rank = {i: 0 for i in ids}
+    queue = [i for i in ids if not indeg[i]]
+    while queue:  # longest-path ranks (nodes left in a cycle keep the rank reached so far)
+        v = queue.pop(0)
+        for w in out.get(v, ()):
+            rank[w] = max(rank[w], rank[v] + 1)
+            indeg[w] -= 1
+            if not indeg[w]:
+                queue.append(w)
+    per: dict[int, int] = {}
+    for i in ids:
+        per[rank[i]] = per.get(rank[i], 0) + 1
+    depth, breadth = len(per), max(per.values())
+
+    def fits(w: float, h: float) -> float:
+        return min(1.0, width / w, height / h)
+
+    lr, tb = fits(depth * 250, breadth * 56), fits(breadth * 190, depth * 116)
+    if abs(lr - tb) < 1e-9:
+        return view.direction
+    return "LR" if lr > tb else "TB"
+
+
 def _scc_pairs(edges: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
     adj: dict[str, set[str]] = {}
     nodes: set[str] = set()
@@ -217,6 +273,7 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
             changed_pairs.add(pair)
     base_cycles = _scc_pairs(base_runtime)
     target_cycles = _scc_pairs(target_runtime)
+    target_members = _scc_members(target_runtime)
 
     edges: list[VEdge] = []
     for pair in sorted(set(base_pairs) | set(target_pairs)):
@@ -243,6 +300,11 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
                     group_status[g] = MODIFIED
     changed = {g for g, st in group_status.items() if st != UNCHANGED}
     changed |= {x for e in edges if e.status != UNCHANGED for x in (e.source, e.target)}
+    # An old cycle this change does not touch (no member changed) is drawn faint, so new ones stand out.
+    touched = {i for n, i in target_members.items() if n in changed}
+    for e in edges:
+        e.cycle_existing = bool(e.cycle and not e.cycle_introduced and e.status == UNCHANGED
+                                and e.source in target_members and target_members[e.source] not in touched)
     hidden_neighbors = 0
     if scope == "all":
         visible = set(group_status)
@@ -378,7 +440,7 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
     keep = set(order[:max_nodes])
     in_layer = (layers or {}).get("nodes", {})
     if in_layer:
-        view.direction = "TB"
+        view.direction, view.orientable = "TB", False  # layers read top to bottom
         for i, pattern in enumerate(layers["layers"]):  # declared in order: highest layer first
             view.subgraphs[f"layer_{i}"] = (f"Layer {i + 1}: {pattern}", None)
     for v in order[:max_nodes]:
@@ -423,8 +485,27 @@ def submodule_state(node: ComponentNode) -> str:
     return " · ".join(parts)
 
 
+#: More leaves of one kind than this under one parent fold into one node (as ``FOLD_AT`` in web/app.js).
+FOLD_AT = 8
+FOLD_WORD = {"test": ("test file", "tests"), "docs": ("doc", "docs"), "module": ("module", "module"),
+             "file": ("file", "file")}
+DOC_SUFFIXES = (".md", ".mdx", ".rst", ".adoc", ".txt")
+
+
+def fold_kind(node: ComponentNode) -> str | None:
+    """What a leaf folds with: tests, docs, other modules or other files."""
+    if "test" in node.tags:
+        return "test"
+    if (node.path or "").lower().endswith(DOC_SUFFIXES):
+        return "docs"
+    return "module" if node.category == CATEGORY_MODULE else "file" if node.component_type == "file" else None
+
+
 def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, depth: int = 3,
-                   include_files: bool = False, max_nodes: int = 250, icons: dict[str, str] | None = None) -> ViewGraph:
+                   include_files: bool = False, max_nodes: int = 250, icons: dict[str, str] | None = None,
+                   fold: int = FOLD_AT, keep: Iterable[str] = ()) -> ViewGraph:
+    """The containment tree.  More than ``fold`` leaves of one kind under one parent (27 test files) become one
+    node, "+ 26 test files"; ``keep`` (and nothing else) stays out of a fold.  ``fold=0`` never folds."""
     icons = default_icons() if icons is None else icons
     nodes = snapshot.node_index()
     children = snapshot.children()
@@ -432,6 +513,35 @@ def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, dep
     view = ViewGraph(title="Structure", direction="LR", mode="kind")
     if start is None:
         return view
+    kept = set(keep)
+
+    def shown(nid: str) -> list[str]:
+        return [c for c in children.get(nid, []) if nodes[c].category != CATEGORY_SYMBOL
+                and (include_files or nodes[c].category != CATEGORY_MODULE and nodes[c].component_type != "file"
+                     or "entry-point" in nodes[c].tags)]
+
+    def with_folds(parent: str, kids: list[str]) -> list[str | VNode]:
+        if not fold:
+            return list(kids)
+        groups: dict[str, list[str]] = {}
+        for k in kids:
+            kind = None if shown(k) else fold_kind(nodes[k])
+            if kind:
+                groups.setdefault(kind, []).append(k)
+        folded: set[str] = set()
+        folds: list[str | VNode] = []
+        for kind, members in groups.items():
+            inside = [m for m in members if m not in kept]
+            if len(members) <= fold or len(inside) < 2:
+                continue
+            folded |= set(inside)
+            word, icon = FOLD_WORD[kind]
+            fid = f"fold_{parent}_{kind}"
+            view.folds[fid] = {"parent": parent, "kind": kind, "count": len(inside)}
+            folds.append(VNode(fid, f"+ {len(inside)} {word}s", "folded", UNCHANGED, "structural", "stadium", None,
+                               icons.get(icon, "")))
+        return [k for k in kids if k not in folded] + folds
+
     count = 0
     queue = [(start, 0)]
     while queue:
@@ -441,9 +551,7 @@ def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, dep
             view.truncated += 1
             continue
         count += 1
-        kids = [c for c in children.get(nid, []) if nodes[c].category != CATEGORY_SYMBOL
-                and (include_files or nodes[c].category != CATEGORY_MODULE and nodes[c].component_type != "file"
-                     or "entry-point" in nodes[c].tags)]
+        kids = shown(nid)
         sub = submodule_state(node) if node.component_type == "submodule" else node.component_type
         if not include_files:
             n_mod = sum(1 for c in children.get(nid, []) if nodes[c].category == CATEGORY_MODULE)
@@ -452,7 +560,15 @@ def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, dep
         view.nodes.append(VNode(nid, node.name if nid != start else node.qualified_name, sub, UNCHANGED, _kind(node),
                                 "round" if node.category == CATEGORY_MODULE else "box", None, _icon(node, icons)))
         if d < depth:
-            for c in sorted(kids, key=lambda k: nodes[k].name):
+            for c in with_folds(nid, sorted(kids, key=lambda k: nodes[k].name)):
+                if isinstance(c, VNode):  # a fold: a leaf of the drawing
+                    view.edges.append(VEdge(nid, c.id, UNCHANGED, relationship="contains"))
+                    if count < max_nodes:
+                        count += 1
+                        view.nodes.append(c)
+                    else:
+                        view.truncated += 1
+                    continue
                 queue.append((c, d + 1))
                 view.edges.append(VEdge(nid, c, UNCHANGED, relationship="contains"))
         elif kids:
@@ -482,7 +598,7 @@ def system_view(snapshot: RepositorySnapshot, *, max_nodes: int = 250) -> ViewGr
     nodes = snapshot.node_index()
     services = sorted((n for n in snapshot.components if n.component_type == "service"),
                       key=lambda n: (service_kind(n) != "first-party", n.qualified_name))
-    view = ViewGraph(title="System", direction="TB", mode="kind")  # service boxes side by side, infrastructure below
+    view = ViewGraph(title="System", direction="TB", mode="kind", orientable=False)  # boxes side by side, infrastructure below
     if not services:
         return view
     shown = services[:max_nodes]
