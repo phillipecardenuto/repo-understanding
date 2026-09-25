@@ -556,6 +556,37 @@ def cmd_impact(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_cache(args: argparse.Namespace) -> int:
+    """``repoviz cache info|clear``: the persistent parse cache of this repository (in the state directory)."""
+    from .diskcache import DiskCache, disabled_by_env
+
+    repo = _open(args)
+    disk = getattr(repo.file_cache, "disk", None)
+    if disk is None:
+        why = "REPOVIZ_NO_DISK_CACHE is set" if disabled_by_env() else "[cache] disk = false"
+        if not disabled_by_env() and repo.config.cache_disk:
+            why = "unavailable"
+        print(f"repoviz: the parse cache is off ({why})", file=sys.stderr)
+        disk = DiskCache(repo.state.dir, int(repo.config.cache_max_mb * 1e6))
+        if not disk.path.exists():
+            return EXIT_OK
+    if args.action == "clear":
+        n = disk.clear()
+        _write(f"Removed {n} cached parse result(s) from {disk.path}", args.output)
+        return EXIT_OK
+    info = disk.info()
+    if args.json:
+        _write(json.dumps(info, indent=1), args.output)
+        return EXIT_OK
+    out = [f"Parse cache: {info['path']}",
+           f"  {info['entries']} entries, {info['payload_mb']} MB of results"
+           + (f" ({info['file_mb']} MB on disk)" if "file_mb" in info else "") + f"; cap {info['max_mb']} MB"]
+    for ns, v in info["by_namespace"].items():
+        out.append(f"  {ns}: {v['entries']} entries, {v['payload_mb']} MB")
+    _write("\n".join(out), args.output)
+    return EXIT_OK
+
+
 def cmd_coupling(args: argparse.Namespace) -> int:
     repo = _open(args)
     if repo.git is None:
@@ -848,6 +879,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--suggest", action="store_true",
                    help="print a layers contract (TOML) suggested from the current imports between components")
     p.set_defaults(func=cmd_contracts)
+
+    p = sub.add_parser("cache", parents=[common], help="the persistent parse cache (in the state directory): "
+                       "info or clear")
+    p.add_argument("action", choices=("info", "clear"), nargs="?", default="info")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_cache)
 
     p = sub.add_parser("why", parents=[common], help="why A depends on B: the shortest import (or call) chains, "
                        "with file:line for every hop")

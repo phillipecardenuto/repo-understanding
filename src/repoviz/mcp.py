@@ -269,6 +269,10 @@ class McpServer:
     def __init__(self, repo: Any, *, allow_writes: bool = False) -> None:
         self.repo = repo
         self.allow_writes = allow_writes
+        if not allow_writes and getattr(repo.file_cache, "disk", None) is not None:
+            # nothing goes to the state directory, not even the parse cache: this long-running process keeps its
+            # parse results in memory instead
+            repo.file_cache = {}
         self.version = PROTOCOL_VERSIONS[0]
         self.handlers: dict[str, Callable[[dict[str, Any]], tuple[str, dict[str, Any]]]] = {
             "architecture_overview": self.architecture_overview, "where_does_this_go": self.where_does_this_go,

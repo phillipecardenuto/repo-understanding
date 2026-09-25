@@ -65,6 +65,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). History presets: `last-commit`, `last-merge`, `branch` (since it left the default branch) and `since:<tag or date>` (`since:v0.1.0`, `since:2024-06-01`). |
+| `repoviz cache [info\|clear]` | The persistent parse cache in the state directory: its size per analyzer, or empty it. Off with `REPOVIZ_NO_DISK_CACHE=1` or `[cache] disk = false`. |
 | `repoviz why A B [--json]` | Why A depends on B: up to 5 shortest import (or call) chains, each hop with file:line and code; the reverse direction when A does not depend on B. |
 | `repoviz impact X [--depth N] [--json]` | Blast radius: what uses X, transitively, by distance and fan-in, with the entry points and tests it reaches. |
 | `repoviz mermaid --view changes\|dependencies\|structure\|flow\|system` | Print Mermaid text (paste into docs or PRs). `system` draws the services from the Compose files. `--direction auto\|LR\|TB` sets the orientation (auto: from the diagram's shape); `--fold N` folds long lists of leaves in the structure view. |
@@ -371,6 +372,9 @@ See [docs/review.md](docs/review.md) for the full list and the configuration
 `repoviz serve --session` starts a session automatically, and the Activity tab
 can start or restart sessions. Session data lives in `~/.cache/repoviz`
 (override with `REPOVIZ_STATE_DIR` or `state_dir`), never inside the repository.
+Parse results are kept there too, so the next command, or a restarted
+`repoviz serve`, re-parses only files whose content changed. See
+[docs/configuration.md](docs/configuration.md#parse-cache).
 
 ### Let the agent ask first: the MCP server
 
@@ -514,8 +518,10 @@ See [docs/configuration.md](docs/configuration.md) for every option.
   are escaped.
 - Credential-like values are redacted from excerpts and diffs. Static reports
   show your home directory as `~`.
-- The state directory (session baselines are copies of your files, plus review
-  notes) is created with owner-only permissions (`0700` / `0600`).
+- The state directory holds session baselines (copies of your files), review
+  notes and the parse cache. It is created with owner-only permissions
+  (`0700` / `0600`). The parse cache stores compressed JSON only, so reading it
+  cannot run anything.
 - If Git refuses a repository ("dubious ownership"), the tool respects that and
   analyzes it as a plain directory, with a diagnostic explaining why.
 

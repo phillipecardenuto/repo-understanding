@@ -14,6 +14,7 @@ graph is precise for static ``import``/``export ... from``/``require``.
 
 from __future__ import annotations
 
+import dataclasses
 import posixpath
 import re
 from dataclasses import dataclass, field
@@ -228,6 +229,19 @@ class JsFileInfo:
     generated: bool = False
     fingerprint: str = ""
     loc: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        """Plain data for the persistent parse cache (``diskcache``); :meth:`from_json` reverses it."""
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> "JsFileInfo":
+        return cls(imports=[JsImport(**{**i, "bindings": {k: tuple(v) for k, v in i["bindings"].items()}})
+                            for i in d["imports"]],
+                   symbols=[JsSymbol(**s) for s in d["symbols"]],
+                   calls=[(c[0], c[1], tuple(c[2]), c[3]) for c in d["calls"]],
+                   local_exports={k: tuple(v) for k, v in d["local_exports"].items()},
+                   generated=d["generated"], fingerprint=d["fingerprint"], loc=d["loc"])
 
 
 _IMPORT_FROM = re.compile(r"\bimport\s+(type\s+)?([\w$*{}\s,]*?)\s*\bfrom\s*(['\"])([^'\"\n]+)\3")

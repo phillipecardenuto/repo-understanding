@@ -89,3 +89,39 @@ def test_static_report_hides_home_directory(make_repo, monkeypatch: pytest.Monke
     monkeypatch.setenv("HOME", home)
     page = render_static_html(build_bundle(Repository(repo.path)), compress=False)
     assert home not in page and "~/" in page
+
+
+
+def test_parse_cache_entries_are_never_unpickled_or_run(make_repo, tmp_path) -> None:
+    """A cache entry is JSON decoded into dataclasses: a planted pickle (or code in a string) is data, never run."""
+    import pickle
+    import sqlite3
+    import zlib
+
+    from repoviz.diskcache import _key_text
+
+    marker = tmp_path / "pwned"
+
+    class Evil:
+        def __reduce__(self):
+            return (open, (str(marker), "w"))
+
+    repo = make_repo({"m.py": "def f():\n    return 1\n"})
+    r = Repository(repo.path)
+    r.snapshot("WORKTREE")
+    db = r.file_cache.disk.path
+    r.file_cache.disk.close()
+    conn = sqlite3.connect(db)
+    keys = [k for (k,) in conn.execute("SELECT key FROM entries WHERE ns = 'python'")]
+    assert keys
+    conn.execute("UPDATE entries SET payload = ? WHERE key = ?", (zlib.compress(pickle.dumps(Evil())), keys[0]))
+    code = '{"error": "__import__(\'os\').system(\'touch %s\')", "x": 1}' % marker
+    conn.execute("INSERT OR REPLACE INTO entries VALUES (?, 'python', ?, 1, 0, 0)",
+                 (_key_text(("python", "0", "planted")), zlib.compress(code.encode())))
+    conn.commit()
+    conn.close()
+    again = Repository(repo.path)
+    snap = again.snapshot("WORKTREE")  # the damaged entry is a miss: parsed again
+    assert again.file_cache.stats["misses"] >= 1 and any(n.qualified_name == "m.f" for n in snap.symbols)
+    assert again.file_cache.disk.get(("python", "0", "planted"), lambda d: d)[1]["error"].startswith("__import__")
+    assert not marker.exists()

@@ -72,7 +72,9 @@ matches. Absolute paths are accepted when they are inside the repository.
   only exception is `set_scope`, which replaces the active session's allowed and
   protected globs. It exists only when the server is started with
   `repoviz mcp --allow-writes`, and even then it writes only to the state
-  directory.
+  directory. Without `--allow-writes`, the server does not use the persistent
+  parse cache either: it keeps its parse results in memory for as long as it
+  runs.
 - **Repository code is never run.** The server reads files and Git objects, as
   the rest of repoviz does.
 - **Paths stay inside the repository.** `..`, `.git/…` and absolute paths

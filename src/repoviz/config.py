@@ -148,6 +148,9 @@ class Config:
     history_min_degree: float = 0.5  # share of the file's commits that also changed the partner
     history_max_files_per_commit: int = 30  # larger commits (bulk renames, formatting) are ignored
     history_min_commits: int = 20  # fewer usable commits (e.g. a shallow clone): no coupling signals
+    # Persistent parse cache in the state directory ([cache]); REPOVIZ_NO_DISK_CACHE=1 turns it off too.
+    cache_disk: bool = True
+    cache_max_mb: float = 500.0
     # Where the values came from (for display/debugging).
     sources: list[str] = field(default_factory=list)
 
@@ -156,7 +159,7 @@ class Config:
         data.pop("sources", None)
         data.pop("poll_seconds", None)
         data.pop("max_diagram_nodes", None)
-        for key in [k for k in data if k.startswith(("review_", "history_", "contracts"))]:
+        for key in [k for k in data if k.startswith(("review_", "history_", "contracts", "cache_"))]:
             data.pop(key)
         return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -279,6 +282,19 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
                 if value < 0 or (key == "min_degree" and value > 1):
                     raise ConfigError(f"history.{key} is out of range")
                 setattr(cfg, f"history_{key}", value)
+    cache = take("cache")
+    if cache is not None:
+        if not isinstance(cache, dict):
+            raise ConfigError("'cache' must be a table")
+        if "disk" in cache:
+            cfg.cache_disk = bool(cache["disk"])
+        if "max_mb" in cache:
+            try:
+                cfg.cache_max_mb = float(cache["max_mb"])
+            except (TypeError, ValueError):
+                raise ConfigError("cache.max_mb must be a number") from None
+            if cfg.cache_max_mb <= 0:
+                raise ConfigError("cache.max_mb must be positive")
     subs = take("submodules")
     if subs is not None:
         if not isinstance(subs, dict):

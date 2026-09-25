@@ -48,6 +48,12 @@ EDGE_FLAGS = ("type_checking_only", "conditional_only", "lazy_only", "dynamic_on
 
 
 def _node_changes(before: ComponentNode, after: ComponentNode) -> tuple[list[str], dict[str, Any]]:
+    # Most nodes of two states are identical: one C-level comparison of each field settles them (every reason
+    # below needs one of these fields to differ).
+    if (before.fingerprint == after.fingerprint and before.component_type == after.component_type
+            and before.parent_id == after.parent_id and before.qualified_name == after.qualified_name
+            and before.tags == after.tags and before.metadata == after.metadata):
+        return [], {}
     reasons: list[str] = []
     prior: dict[str, Any] = {}
     if before.fingerprint and after.fingerprint and before.fingerprint != after.fingerprint:

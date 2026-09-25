@@ -13,6 +13,7 @@ from typing import Any
 from .analyzers import supported_languages
 from .config import Config, load_config
 from .discovery import RepositoryProfile, discover
+from .diskcache import file_cache_for
 from .gitutil import Git, GitError, RevisionError, probe_repository
 from .ids import stable_hash
 from .model import Diagnostic, RepositoryDiff, RepositorySnapshot
@@ -104,7 +105,6 @@ class Repository:
         self.git = Git(self.root) if git_root else None
         self.config = config or load_config(self.root, config_file, overrides)
         self.name = self.root.name
-        self.file_cache: dict[Any, Any] = {}
         self._snapshots: OrderedDict[tuple[str, ...], RepositorySnapshot] = OrderedDict()
         self._diffs: OrderedDict[tuple[str, ...], RepositoryDiff] = OrderedDict()
         self._couplings: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
@@ -112,6 +112,9 @@ class Repository:
         self._lock = threading.RLock()
         self._inflight: dict[tuple[Any, ...], threading.Lock] = {}
         self.state = StateStore(self.root, self.name, self.config.state_dir)
+        # per-file parse results: in memory, and on disk in the state directory (diskcache; off with
+        # REPOVIZ_NO_DISK_CACHE=1 or [cache] disk = false)
+        self.file_cache: Any = file_cache_for(self.state.dir, self.config)
 
     # -- identity -------------------------------------------------------------
 
@@ -262,6 +265,7 @@ class Repository:
             snap = build_snapshot(source, profile, self.config, repository_id=self.repository_id,
                                   repository_name=self.name, root=str(self.root), label=label, git=self.git,
                                   file_cache=self.file_cache)
+            self._flush_file_cache(snap)
             with self._lock:
                 self._snapshots[key] = snap
                 while len(self._snapshots) > self.SNAPSHOT_CACHE_SIZE:
@@ -270,6 +274,17 @@ class Repository:
                     self.file_cache.clear()
                 self._inflight.pop(("snapshot", *key), None)
         return snap
+
+    def _flush_file_cache(self, snap: RepositorySnapshot) -> None:
+        """New parse results go to disk; a cache that had to be rebuilt says so in the snapshot."""
+        flush = getattr(self.file_cache, "flush", None)
+        if flush is None:
+            return
+        flush()
+        disk = self.file_cache.disk
+        if disk is not None and disk.problem:
+            snap.diagnostics.append(Diagnostic("warning", "cache-reset", disk.problem, "cache"))
+            disk.problem = None
 
     def graph_index(self, spec: str | RevSpec = "WORKTREE") -> Any:
         """The query index (``query.GraphIndex``) of a snapshot: built once per snapshot, then reused by every

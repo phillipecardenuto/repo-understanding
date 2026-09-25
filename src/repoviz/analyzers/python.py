@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import dataclasses
 import importlib
 import importlib.util
 import posixpath
@@ -132,6 +133,19 @@ class PyFileInfo:
     loc: int = 0
     all_names: list[str] | None = None
     top_level_names: list[str] = field(default_factory=list)
+
+    def to_json(self) -> dict[str, Any]:
+        """Plain data for the persistent parse cache (``diskcache``); :meth:`from_json` reverses it."""
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> "PyFileInfo":
+        return cls(error=d["error"], error_line=d["error_line"], generated=d["generated"],
+                   imports=[RawImport(**{**i, "names": [tuple(n) for n in i["names"]]}) for i in d["imports"]],
+                   symbols=[RawSymbol(**{**s, "bases": [tuple(b) for b in s["bases"]]}) for s in d["symbols"]],
+                   calls=[RawCallSite(c["caller"], c["class_qual"], tuple(c["parts"]), c["line"]) for c in d["calls"]],
+                   unresolvable_calls=d["unresolvable_calls"], semantic_fingerprint=d["semantic_fingerprint"],
+                   loc=d["loc"], all_names=d["all_names"], top_level_names=d["top_level_names"])
 
 
 def _dotted(node: ast.AST) -> tuple[str, ...] | None:

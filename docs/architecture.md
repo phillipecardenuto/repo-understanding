@@ -161,6 +161,14 @@ edge records whether it is in a cycle in the base and in the target.
 
 - Per-file parse results are cached by content hash, so comparing HEAD with the
   working tree only re-parses changed files.
+- **Persistent parse cache.** Those results are also kept on disk
+  (`diskcache.py`: SQLite in WAL mode in the state directory, zlib-compressed
+  JSON, 500 MB cap with LRU eviction). A new process, a restarted server or a
+  snapshot at another revision parses only file contents it has never seen.
+  - `TwoLevelCache` looks like the dict the analyzers use: memory first, then
+    disk. New entries are written in one transaction after each snapshot.
+  - Several threads and processes can share the store: SQLite locking with a
+    busy timeout, and retries on "database is locked".
 - Snapshots are cached by `(source kind, revision id, config)`. A working-tree
   revision ID is a digest of its files' hashes, computed from a stat-keyed cache.
 - Python files are parsed in a process pool for large batches (disable with
@@ -180,8 +188,29 @@ edge records whether it is in a cycle in the base and in the target.
 - Review reports are cached per target, revisions and scope. Notes are loaded
   fresh and spliced into the cached JSON.
 
-For scale: Django (≈2,800 modules, 39k symbols) takes about 8 s for the first
-snapshot and 0.1 s for a cached one.
+For scale, measured in this container on the working tree. "Cold" is a new
+process with an empty cache. "Disk-warm" is a second process. "Memory" is a
+repeat inside one process, as in `repoviz serve`.
+
+| Repository | Snapshot: cold / disk-warm / memory | `repoviz review`: cold / disk-warm |
+|---|---|---|
+| Flask 3.0.3 (82 Python files) | 0.69 s / 0.47 s / 0.01 s | 0.88 s / 0.56 s |
+| ELIES (with 8 submodules) | 2.18 s / 1.56 s / 0.05 s | 3.41 s / 2.77 s |
+| Django (≈2,800 modules, 39k symbols) | 20.0 s / 14.4 s / 0.18 s | 20.8 s / 14.4 s |
+
+The disk cache removes parsing, about 30% of the work on Django. The rest is
+building the graph: symbols and their evidence, call resolution, IDs and the
+diff. That work depends on every file at once, so a per-file cache cannot
+keep it.
+
+What a disk cache of whole snapshots would give:
+
+- reloading Django's snapshot (63 MB of JSON) takes about 4.6 s, against about
+  7 s to rebuild it from cached parses;
+- writing it costs about 4.5 s after every cold build.
+
+So it is not worth it. Making the graph building itself incremental is the
+next step for large repositories.
 
 ## Web application
 

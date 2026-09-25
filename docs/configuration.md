@@ -146,6 +146,37 @@ code is never run.
 
 `analyze = false` restores the previous behaviour: one box per submodule.
 
+## Parse cache
+
+Parsing a file depends on its content alone, so repoviz keeps each result in
+`<state dir>/repos/<repository>/parse-cache.sqlite`. It is reused by the next
+`repoviz` command, a restarted `repoviz serve`, and any revision that has the
+same file content.
+
+```toml
+[cache]
+disk = true      # false: keep parse results in memory only
+max_mb = 500     # least recently used results go first beyond this size
+```
+
+**Hygiene.**
+
+- Entries are keyed by analyzer, analyzer version and the file's Git blob
+  hash. A new analyzer version starts its own entries, and the old ones age
+  out.
+- Configuration changes do not affect parsing, so they keep the cache.
+- The files are private (`0700` directory, `0600` files).
+- Payloads are compressed JSON, never pickle: reading an entry cannot run
+  anything.
+- A damaged file is moved aside (`parse-cache.sqlite.corrupt`), rebuilt, and
+  reported as a `cache-reset` warning in the next snapshot.
+
+**Commands.**
+
+- `repoviz cache` prints the size per analyzer.
+- `repoviz cache clear` empties it.
+- `repoviz mcp` without `--allow-writes` never writes it.
+
 ## Architecture contracts
 
 Contracts say who may import whom. repoviz checks them on the module import
@@ -270,5 +301,6 @@ baseline is read from the tree being checked, so it travels with the code:
 
 | Variable | Effect |
 |---|---|
-| `REPOVIZ_STATE_DIR` | where sessions and observations are stored |
+| `REPOVIZ_STATE_DIR` | where sessions, observations and the parse cache are stored |
 | `REPOVIZ_NO_PARALLEL=1` | parse Python files in-process (no worker pool) |
+| `REPOVIZ_NO_DISK_CACHE=1` | keep parse results in memory only (no `parse-cache.sqlite`) |

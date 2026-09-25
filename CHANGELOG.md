@@ -6,6 +6,25 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Persistent parse cache** ([#34](https://github.com/phillipecardenuto/repo-understanding/issues/34)).
+  - Per-file parse results (Python, JavaScript/TypeScript, Git churn) are kept
+    in `parse-cache.sqlite` in the state directory. The next command, a
+    restarted server, or a snapshot at another revision parses only file
+    contents it has never seen.
+  - The store is SQLite in WAL mode, holding compressed JSON (never pickle),
+    with private files. It has a 500 MB cap with least-recently-used eviction
+    and a schema version. A damaged store is moved aside and rebuilt, with a
+    warning.
+  - `repoviz cache [info|clear]`, `[cache] disk / max_mb`, and
+    `REPOVIZ_NO_DISK_CACHE=1`. `repoviz mcp` without `--allow-writes` keeps
+    it in memory.
+  - **Measured.** A second process is 1.3–3× faster: Flask 0.69 → 0.47 s,
+    ELIES 2.2 → 1.6 s, this repository 1.6 → 0.56 s. On Django, `repoviz
+    review` goes from 20.8 to 14.4 s, because parsing is only about 30% of
+    the work there (see `docs/architecture.md`).
+  - Also faster cold: redaction checks excerpts with plain substring tests
+    before running its patterns (about 7× cheaper), and the diff skips
+    identical nodes in one comparison.
 - **History comparisons, so a clean checkout is never an empty Changes tab** ([#31](https://github.com/phillipecardenuto/repo-understanding/issues/31)).
   - **New presets:**
     - `last-commit` (HEAD~1 → HEAD);
