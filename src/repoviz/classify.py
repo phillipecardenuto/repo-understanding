@@ -219,6 +219,48 @@ def container_kind(path: str) -> str | None:
     return None
 
 
+def compose_variant(path: str) -> str:
+    """The variant a compose file declares: ``docker-compose.prod.yml`` and ``docker-compose-prod.yml`` →
+    ``prod``, ``compose.override.yaml`` → ``override``, the plain file → ``base``."""
+    m = re.match(r"^(?:docker-)?compose[.-]([\w.-]+?)\.ya?ml$", posixpath.basename(path).lower())
+    return m.group(1) if m else "base"
+
+
+#: Infrastructure image names → kind (the image's last path segment, without tag, is matched; see image_kind).
+IMAGE_KINDS: dict[str, tuple[str, ...]] = {
+    "database": ("postgres", "postgis", "timescaledb", "mysql", "mariadb", "percona", "mongo", "mongodb",
+                 "cassandra", "scylla", "cockroach", "couchdb", "couchbase", "neo4j", "arangodb", "clickhouse",
+                 "mssql", "sqlserver", "oracle", "influxdb", "questdb", "surrealdb", "dynamodb-local", "cockroachdb",
+                 "supabase", "edgedb", "yugabyte"),
+    "cache": ("redis", "memcached", "valkey", "keydb", "dragonfly", "varnish"),
+    "queue": ("rabbitmq", "kafka", "redpanda", "nats", "activemq", "artemis", "pulsar", "nsq", "mosquitto",
+              "emqx", "elasticmq", "beanstalkd"),
+    "object-store": ("minio", "azurite", "seaweedfs", "localstack", "fake-gcs-server", "garage", "ceph"),
+    "search": ("elasticsearch", "opensearch", "solr", "meilisearch", "typesense", "milvus", "qdrant", "weaviate",
+               "chroma", "chromadb", "vespa", "manticore", "zincsearch"),
+    "monitoring": ("prometheus", "grafana", "jaeger", "all-in-one", "zipkin", "loki", "promtail", "tempo",
+                   "alertmanager", "flower", "kibana", "attu", "pgadmin", "pgadmin4", "adminer", "mongo-express",
+                   "redisinsight", "redis-commander", "portainer", "cadvisor", "node-exporter", "otel-collector",
+                   "opentelemetry-collector", "opentelemetry-collector-contrib", "datadog", "netdata",
+                   "uptime-kuma", "sentry", "mailhog", "mailpit", "phpmyadmin", "kafka-ui", "akhq"),
+    "proxy": ("nginx", "traefik", "haproxy", "caddy", "envoy", "httpd", "kong", "apache", "openresty", "squid"),
+    "coordination": ("etcd", "zookeeper", "consul", "vault"),
+}
+_IMAGE_KIND = {name: kind for kind, names in IMAGE_KINDS.items() for name in names}
+
+
+def image_kind(image: str | None) -> str | None:
+    """The infrastructure kind of a container image (``redis:7-alpine`` → ``cache``,
+    ``quay.io/coreos/etcd:v3.5`` → ``coordination``), or ``None`` when the image is not a known one."""
+    if not image:
+        return None
+    name = image.split("@")[0].rsplit("/", 1)[-1].split(":")[0].lower()
+    if name in _IMAGE_KIND:
+        return _IMAGE_KIND[name]
+    base = re.sub(r"[-_](server|standalone|alpine|oss|community|ce|ee|db)$", "", name)
+    return _IMAGE_KIND.get(base) or next((k for n, k in _IMAGE_KIND.items() if name.startswith(n + "-")), None)
+
+
 def deployment_kind(path: str) -> str | None:
     name = posixpath.basename(path)
     lower = name.lower()

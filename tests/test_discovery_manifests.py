@@ -244,3 +244,109 @@ def test_containers_and_commands() -> None:
     assert svcs["api"]["build_context"] == "api" and svcs["api"]["depends_on"] == ["db"]
     broken = parse("package.json", "{nope")
     assert broken.errors and broken.kind == "package.json"
+
+
+# --------------------------------------------------------------------------- compose system (#22)
+
+SYSTEM = {
+    "app/__init__.py": "",
+    "app/main.py": "app = object()\n",
+    "app/worker.py": "celery = object()\n",
+    "frontend/package.json": '{"name": "frontend", "scripts": {"start": "node server.js"}}',
+    "frontend/server.js": "console.log(1)\n",
+    "frontend/Dockerfile": "FROM node:20\nCOPY . /app\nCMD [\"node\", \"server.js\"]\n",
+    "Dockerfile": "FROM python:3.12\nCOPY . /app\n",
+    "docker-compose.yml": """
+services:
+  api:
+    build: .
+    image: acme/api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports: ["8000:8000"]
+    environment:
+      MONGODB_URL: mongodb://admin:hunter2secret@mongo:27017/app
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: s3cr3t-value-never-shown
+    depends_on: [mongo, redis]
+    volumes: [uploads:/data/uploads]
+  worker:
+    build: .
+    command: celery -A app.worker worker -l info
+    environment:
+      - CELERY_BROKER_URL=redis://redis:${REDIS_PORT:-6379}/0
+      - API_URL=http://api:8000
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads:/data/uploads
+      - ./local:/local
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://api:8000
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+  mongo:
+    image: mongo:7
+    volumes: [mongo_data:/data/db]
+volumes:
+  uploads:
+  mongo_data:
+""",
+    "docker-compose.prod.yml": """
+services:
+  api:
+    image: acme/api:1.4
+    command: gunicorn -b 0.0.0.0:8000 -k uvicorn.workers.UvicornWorker app.main:app
+    ports: ["80:8000"]
+  worker:
+    image: acme/api:1.4
+    command: celery -A app.worker worker -l warning
+  frontend:
+    image: acme/frontend:1.4
+  redis:
+    image: redis:7
+  mongo:
+    image: mongo:7
+""",
+}
+
+
+def test_compose_system_services(make_repo) -> None:
+    import json
+
+    repo = make_repo(SYSTEM)
+    r = Repository(repo.path)
+    snap = r.snapshot("WORKTREE")
+    idx = snap.node_index()
+    services = {n.name: n for n in snap.components if n.component_type == "service"}
+    assert sorted(services) == ["api", "frontend", "mongo", "redis", "worker"]  # one per name, not one per file
+    assert all(n.metadata["variants"] == ["base", "prod"] for n in services.values())
+    kinds = {name: n.metadata["service_kind"] for name, n in services.items()}
+    assert kinds == {"api": "first-party", "worker": "first-party", "frontend": "first-party", "redis": "cache",
+                     "mongo": "database"}
+    assert "infrastructure" in services["redis"].tags and "first-party" in services["api"].tags
+    assert services["api"].metadata["differences"]["ports"] == {"base": ["8000:8000"], "prod": ["80:8000"]}
+    edges = {(idx[e.source_id].name, idx[e.target_id].qualified_name, e.relationship): e for e in snap.dependency_edges}
+    assert ("api", "app.main", "runs") in edges and ("worker", "app.worker", "runs") in edges
+    assert ("frontend", "frontend/server", "runs") in edges  # from its Dockerfile's CMD, in its build context
+    assert ("api", "mongo", "starts-after") in edges and ("worker", "redis", "starts-after") in edges
+    talks = {(s, t): e.metadata["label"] for (s, t, rel), e in edges.items() if rel == "talks-to"}
+    assert talks[("api", "mongo")] == "mongodb:27017" and talks[("api", "redis")] == "port 6379"
+    assert talks[("worker", "redis")] == "redis:6379" and talks[("frontend", "api")] == "http:8000"
+    assert edges[("api", "worker", "shares-volume")].metadata["label"] == "uploads"
+    root = next(n for n in snap.components if n.component_type == "repository")
+    assert sorted(t for (s, t, rel) in edges if s == "api" and rel == "builds") == sorted(["Dockerfile", root.qualified_name])
+    assert ("redis", "redis:7-alpine", "depends-on") in edges  # infrastructure: its image
+    # entry points: one per first-party service, with its variants; no infrastructure command
+    prof = r.discover()
+    compose_eps = [e for e in prof.entry_points if e["kind"] == "compose-command"]
+    assert sorted(e["name"] for e in compose_eps) == ["api (compose)", "worker (compose)"]
+    assert all(e["variants"] == ["base", "prod"] for e in compose_eps)
+    assert not any("redis-server" in json.dumps(e) for e in prof.entry_points)
+    # environment values never reach the snapshot, only variable names
+    dumped = json.dumps(snap.to_dict())
+    assert "hunter2secret" not in dumped and "s3cr3t-value-never-shown" not in dumped and "JWT_SECRET" in dumped

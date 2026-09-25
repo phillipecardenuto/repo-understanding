@@ -288,6 +288,11 @@ def cmd_mermaid(args: argparse.Namespace) -> int:
                                          depth=args.depth, max_nodes=args.max_nodes, icons=icons,
                                          relationships=args.relationships or ("imports", "depends-on"),
                                          contract_edges=contract_edges, layers=layers)
+        elif args.view == "system":
+            view = views.system_view(snap, max_nodes=args.max_nodes)
+            if not view.nodes:
+                print("repoviz: no services found (the system view comes from docker-compose / compose files)",
+                      file=sys.stderr)
         else:
             view = views.structure_view(snap, root=focus, depth=args.depth, include_files=args.files,
                                         max_nodes=args.max_nodes, icons=icons)
@@ -663,7 +668,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_diff)
 
     p = sub.add_parser("mermaid", parents=[common], help="print a Mermaid diagram")
-    p.add_argument("--view", choices=("changes", "dependencies", "structure", "flow"), default="dependencies")
+    p.add_argument("--view", choices=("changes", "dependencies", "structure", "flow", "system"), default="dependencies",
+                   help="system = services from Compose files, their code and how they talk")
     _comparison_args(p)
     p.add_argument("--rev", default="WORKTREE", help="revision for dependencies/structure views")
     p.add_argument("--level", choices=("component", "package", "module", "project"), default="component")

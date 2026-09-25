@@ -656,3 +656,49 @@ def test_pr_comment_diagram_renders_with_mermaid(page, make_repo, tmp_path: Path
     assert all("<svg" in s and "Syntax error" not in s for s in svgs)
     assert "more" in diagrams[1] and "more" in svgs[1]
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_structure_system_view_from_compose(page, make_repo, tmp_path: Path) -> None:
+    from test_discovery_manifests import SYSTEM
+
+    repo = make_repo(SYSTEM)
+    repo.commit("system")
+    report = tmp_path / "system.html"
+    html = render_static_html(build_bundle(Repository(repo.path)))
+    assert "hunter2secret" not in html and "s3cr3t-value-never-shown" not in html  # environment values never shipped
+    report.write_text(html, encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    tab = page.locator("#tab-structure")
+    assert tab.locator(".toolbar select >> nth=0").input_value() == "system"  # the first view when services exist
+    assert "System: 5 services" in tab.locator(".diagram-head .title").inner_text()
+    svg = tab.locator(".viewport svg")
+    text = page.evaluate("document.querySelector('#tab-structure .viewport svg').textContent")
+    assert "Infrastructure" in text and "app.main" in text and "app.worker" in text
+    assert "talks to · mongodb:27017" in text and "starts after" in text and "shares volume · uploads" in text
+    legend = tab.locator(".legend").inner_text()
+    assert "talks to" in legend and "starts after" in legend and "database" in legend and "cache" in legend
+    assert tab.locator(".legend i.rvi-database").count() == 1  # an icon per kind, never colour alone
+    assert svg.locator("i.rvi-database").count() == 1 and svg.locator("i.rvi-zap").count() == 1
+    # the browser and the CLI (render/views.py) build the same graph
+    from repoviz.render import views
+
+    py = views.system_view(Repository(repo.path).snapshot("WORKTREE"))
+    js = page.evaluate("(() => { const v = repoviz.systemView(repoviz.app.snapshotIndex, {}); return {nodes: v.nodes.map(n => [n.id, n.label, n.sublabel, n.kind, n.parent]), edges: v.edges.map(e => [e.source, e.target, e.relationship, e.label || ''])}; })()")
+    assert js["nodes"] == [[n.id, n.label, n.sublabel, n.kind, n.parent] for n in py.nodes]
+    assert js["edges"] == [[e.source, e.target, e.relationship, e.label] for e in py.edges]
+    # a service shows its variants and what differs between them
+    api = page.evaluate("[...repoviz.app.snapshotIndex.nodes.values()].find(n => n.component_type === 'service' && n.name === 'api').id")
+    page.click(f"#tab-structure g.node[data-node-id='{api}']")
+    card = tab.locator(".service-card")
+    assert "variants" in card.inner_text() and "base" in card.inner_text() and "prod" in card.inner_text()
+    assert "80:8000" in card.inner_text() and "names only" in card.inner_text()
+    # the code inside a service box leads to the files view
+    copy = page.evaluate("[...document.querySelectorAll('#tab-structure g.node')].map(g => g.dataset.nodeId).find(id => id.startsWith('c_'))")
+    page.dblclick(f"#tab-structure g.node[data-node-id='{copy}']")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=30_000)
+    assert tab.locator(".toolbar select >> nth=0").input_value() == "files"
+    assert tab.locator(".crumbs").is_visible() and "Structure of" in tab.locator(".diagram-head .title").inner_text()
+    entry = tab.locator(".card", has=page.locator("h3", has_text="Entry points")).inner_text()
+    assert "api (compose)" in entry and "redis-server" not in entry
+    assert page.errors == []  # type: ignore[attr-defined]

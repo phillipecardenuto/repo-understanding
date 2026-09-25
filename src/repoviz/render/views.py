@@ -62,6 +62,7 @@ class VEdge:
     count: int = 1
     relationship: str = REL_IMPORTS
     contract: str = ""  # contracts this dependency breaks (the contracts overlay)
+    label: str = ""  # extra edge text (a service link's protocol and port, a shared volume)
 
 
 @dataclass
@@ -393,6 +394,77 @@ def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, dep
             view.nodes[-1].sublabel += f" · +{len(kids)} more"
     keep = {n.id for n in view.nodes}
     view.edges = [e for e in view.edges if e.source in keep and e.target in keep]
+    return view
+
+
+SYSTEM_EDGES = ("starts-after", "talks-to", "shares-volume")
+CODE_TYPES = {"directory", "package", "namespace-package", "project", "workspace-member", "submodule", "module",
+              "file", "repository"}
+
+
+def service_kind(node: ComponentNode) -> str:
+    return str(node.metadata.get("service_kind") or ("first-party" if "first-party" in node.tags else "other"))
+
+
+def system_view(snapshot: RepositorySnapshot, *, max_nodes: int = 250) -> ViewGraph:
+    """The runtime picture from Compose files: each first-party service is a box holding the code it runs (or
+    builds), infrastructure sits in its own group with an icon per kind, and services are linked by
+    ``starts-after`` (dashed), ``talks-to`` (thick, with protocol and port) and ``shares-volume`` (dotted).
+    ``web/app.js`` (``systemView``) builds the same graph."""
+    from .theme import theme
+
+    kinds = theme()["service_kinds"]
+    nodes = snapshot.node_index()
+    services = sorted((n for n in snapshot.components if n.component_type == "service"),
+                      key=lambda n: (service_kind(n) != "first-party", n.qualified_name))
+    view = ViewGraph(title="System", direction="TB", mode="kind")  # service boxes side by side, infrastructure below
+    if not services:
+        return view
+    shown = services[:max_nodes]
+    view.truncated = len(services) - len(shown)
+    keep = {n.id for n in shown}
+    out: dict[str, list[Any]] = {}
+    for e in snapshot.dependency_edges:
+        out.setdefault(e.source_id, []).append(e)
+    for n in shown:
+        kind = service_kind(n)
+        k = kinds.get(kind, kinds["other"])
+        variants = n.metadata.get("variants") or []
+        sub = k["label"] + (f" · {', '.join(variants)}" if len(variants) > 1 else "")
+        if kind == "first-party":
+            sg = f"sg_{n.id}"
+            view.subgraphs[sg] = (n.name, None)
+            view.nodes.append(VNode(n.id, n.qualified_name, sub, UNCHANGED, "service", "box", sg, k["icon"]))
+            code = []
+            for e in sorted(out.get(n.id, []), key=lambda e: (e.relationship != "runs", e.target_id)):
+                target = nodes.get(e.target_id)
+                if e.relationship not in ("runs", "builds") or target is None or target.component_type not in CODE_TYPES:
+                    continue
+                if e.relationship == "builds" and (target.component_type == "repository" and code or
+                                                   any(c[0].id == target.id for c in code)):
+                    continue  # the whole repository says little once we know what it runs
+                code.append((target, e.relationship))
+            for target, rel in code:
+                cid = f"c_{n.id}__{target.id}"
+                view.nodes.append(VNode(cid, target.qualified_name or target.name, target.component_type, UNCHANGED,
+                                        _kind(target), "round" if target.category == CATEGORY_MODULE else "box", sg,
+                                        _icon(target, default_icons())))
+                view.edges.append(VEdge(n.id, cid, UNCHANGED, relationship=rel))
+        else:
+            view.subgraphs.setdefault("sg_infra", ("Infrastructure", None))  # after the first-party services
+            view.nodes.append(VNode(n.id, n.qualified_name, sub, UNCHANGED, "infra", "stadium", "sg_infra", k["icon"]))
+    for n in shown:
+        links = [e for e in sorted(out.get(n.id, []), key=lambda e: (e.relationship, e.target_id))
+                 if e.direct and e.relationship in SYSTEM_EDGES and e.target_id in keep]
+        talks = {e.target_id for e in links if e.relationship == "talks-to"}
+        starts = {e.target_id for e in links if e.relationship == "starts-after"}
+        for e in links:
+            if e.relationship == "starts-after" and e.target_id in talks:
+                continue  # one line per pair: the talks-to line says it also starts after
+            label = str(e.metadata.get("label") or "") if e.relationship != "starts-after" else ""
+            if e.relationship == "talks-to" and e.target_id in starts:
+                label = ", ".join(x for x in (label, "starts after") if x)
+            view.edges.append(VEdge(n.id, e.target_id, UNCHANGED, relationship=e.relationship, label=label))
     return view
 
 

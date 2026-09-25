@@ -80,8 +80,12 @@ def _edge_style(e: VEdge) -> tuple[str, str, str]:
         markers.append("⟲ new cycle" if e.cycle_introduced else t["cycle"]["marker"])
     if e.count > 1:
         markers.append(f"×{e.count}")
-    if e.relationship not in ("imports", "contains", "calls"):
-        markers.insert(0, e.relationship)
+    rel_style = theme().get("relationship", {}).get(e.relationship)
+    if rel_style and e.status == "unchanged" and not e.cycle:  # runs, talks-to…: a line style of its own
+        style, arrow = rel_style, rel_style["arrow"]
+        markers.insert(0, rel_style["marker"] + (f" · {e.label}" if e.label else ""))
+    elif e.relationship not in ("imports", "contains", "calls"):
+        markers.insert(0, e.relationship + (f" · {e.label}" if e.label else ""))
     if e.contract:  # thick, dashed and labelled: never colour alone
         style = {"stroke": t["removed"]["stroke"], "width": 3.5, "dash": "7 4"}
         arrow = "-.->"
@@ -129,7 +133,7 @@ def to_mermaid(view: ViewGraph, *, acc_title: str | None = None) -> str:
     link_styles = []
     for i, e in enumerate(view.edges):
         arrow, label, style = _edge_style(e)
-        if label and arrow != "---":
+        if label and (arrow != "---" or e.relationship != "contains"):
             lines.append(f'  {e.source} {arrow}|"{escape(label, 60)}"| {e.target}')
         else:
             lines.append(f"  {e.source} {arrow} {e.target}")

@@ -161,6 +161,15 @@
     play: ["#059669", "#6ee7b7", CIRCLE, "M10 8.8v6.4a.6.6 0 0 0 .9.5l5.2-3.2a.6.6 0 0 0 0-1l-5.2-3.2a.6.6 0 0 0-.9.5Z"],
     link: ["#0891b2", "#67e8f9", "M10 13.5a4.5 4.5 0 0 0 6.4.4l2.8-2.8a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2", "M14 10.5a4.5 4.5 0 0 0-6.4-.4l-2.8 2.8a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"],
     container: ["#0369a1", "#7dd3fc", "M4.5 6.5h15A1.5 1.5 0 0 1 21 8v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17V8a1.5 1.5 0 0 1 1.5-1.5Z", "M7.5 9.5v6", "M12 9.5v6", "M16.5 9.5v6"],
+    server: ["#0e7490", "#67e8f9", "M4.5 4h15A1.5 1.5 0 0 1 21 5.5v4a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 9.5v-4A1.5 1.5 0 0 1 4.5 4Z", "M4.5 13h15a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5v-4A1.5 1.5 0 0 1 4.5 13Z", "dot:M7 7.5h.01", "dot:M7 16.5h.01"],
+    database: ["#0f766e", "#5eead4", "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Z", "M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6", "M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"],
+    zap: ["#dc2626", "#fca5a5", "M13 2.5 4.5 13.5H11l-1 8 8.5-11H12Z"],
+    inbox: ["#9333ea", "#d8b4fe", "M3 13h5l1.5 3h5l1.5-3h5", "M5.7 5h12.6L21 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5V13Z"],
+    archive: ["#b45309", "#fcd34d", "M3.5 4h17v4.5h-17Z", "M5 8.5V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8.5", "M10 12.5h4"],
+    search: ["#2563eb", "#93c5fd", "M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0Z", "m20.5 20.5-5.3-5.3"],
+    gauge: ["#db2777", "#f9a8d4", "M4 17a8 8 0 1 1 16 0", "m12 17 4-5.5", "dot:M12 17h.01"],
+    shuffle: ["#4b5563", "#d1d5db", "M4 7.5h13", "m14 4.5 3 3-3 3", "M20 16.5H7", "m10 13.5-3 3 3 3"],
+    hub: ["#0891b2", "#67e8f9", "M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z", "M12 3v6", "M12 15v6", "M3 12h6", "M15 12h6"],
     cloud: ["#0369a1", "#7dd3fc", "M7 19a4.5 4.5 0 0 1-.6-9A6 6 0 0 1 18 9.5a4.8 4.8 0 0 1-.5 9.5Z"],
     sliders: ["#64748b", "#cbd5e1", "M4 7h9", "M17 7h3", "M13 7a2 2 0 1 0 4 0 2 2 0 1 0-4 0", "M4 12h3", "M11 12h9", "M7 12a2 2 0 1 0 4 0 2 2 0 1 0-4 0", "M4 17h11", "M19 17h1", "M15 17a2 2 0 1 0 4 0 2 2 0 1 0-4 0"],
     workflow: ["#ea580c", "#fdba74", "M20 11a8 8 0 0 0-14.5-4.6L4 8", "M4 4v4h4", "M4 13a8 8 0 0 0 14.5 4.6L20 16", "M20 20v-4h-4"],
@@ -235,6 +244,7 @@
   /* Icon name for a model node. */
   const icon = (n) => {
     if (!n) return "";
+    if (n.component_type === "service") return serviceKindInfo(serviceKind(n)).ui_icon;
     if (hasTag(n, "test") && n.category !== "symbol") return "flask";
     if (n.component_type === "file") {
       if (hasTag(n, "manifest")) return "manifest";
@@ -597,6 +607,65 @@
     return view;
   }
 
+  /* System view: services from Compose files, the code each runs and how they relate.  Mirrors
+     render/views.py system_view (keep them in step).  Code nodes are copies inside each service's box;
+     view.origin maps a copy back to its node. */
+  const SYSTEM_EDGES = ["starts-after", "talks-to", "shares-volume"];
+  /* Relationships offered by the Changes and Dependencies filters. */
+  const RELATIONSHIPS = ["imports", "depends-on", "calls", "invokes", "builds", "runs", ...SYSTEM_EDGES];
+  const CODE_TYPES = new Set(["directory", "package", "namespace-package", "project", "workspace-member", "submodule", "module", "file", "repository"]);
+  const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  function serviceKind(n) { return meta(n).service_kind || (hasTag(n, "first-party") ? "first-party" : "other"); }
+  function serviceKindInfo(kind) { const k = (THEME && THEME.service_kinds) || {}; return k[kind] || k.other || { label: kind, ui_icon: "container" }; }
+  function hasServices(si) { for (const n of si.nodes.values()) if (n.component_type === "service") return true; return false; }
+  function systemView(si, o) {
+    const view = { title: "System", direction: "TB", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, origin: new Map() };
+    const services = [...si.nodes.values()].filter((n) => n.component_type === "service")
+      .sort((a, b) => ((serviceKind(a) !== "first-party") - (serviceKind(b) !== "first-party")) || cmpStr(a.qualified_name, b.qualified_name));
+    const shown = services.slice(0, (o && o.maxNodes) || 250);
+    view.truncated = services.length - shown.length;
+    const keep = new Set(shown.map((n) => n.id));
+    const outOf = (id) => (si.out.get(id) || []).filter((e) => e.direct);
+    for (const n of shown) {
+      const kind = serviceKind(n), k = serviceKindInfo(kind), variants = meta(n).variants || [];
+      const sub = k.label + (variants.length > 1 ? " · " + variants.join(", ") : "");
+      if (kind !== "first-party") {
+        if (!view.subgraphs.has("sg_infra")) view.subgraphs.set("sg_infra", "Infrastructure");  // after the first-party services
+        view.nodes.push({ id: n.id, label: n.qualified_name, sublabel: sub, status: "unchanged", kind: "infra", shape: "stadium", parent: "sg_infra", icon: k.ui_icon });
+        continue;
+      }
+      const sg = "sg_" + n.id;
+      view.subgraphs.set(sg, n.name);
+      view.nodes.push({ id: n.id, label: n.qualified_name, sublabel: sub, status: "unchanged", kind: "service", shape: "box", parent: sg, icon: k.ui_icon });
+      const code = [];
+      for (const e of outOf(n.id).sort((a, b) => ((a.relationship !== "runs") - (b.relationship !== "runs")) || cmpStr(a.target_id, b.target_id))) {
+        const t = si.nodes.get(e.target_id);
+        if (!["runs", "builds"].includes(e.relationship) || !t || !CODE_TYPES.has(t.component_type)) continue;
+        if (e.relationship === "builds" && ((t.component_type === "repository" && code.length) || code.some(([c]) => c.id === t.id))) continue;
+        code.push([t, e.relationship]);
+      }
+      for (const [t, rel] of code) {
+        const cid = `c_${n.id}__${t.id}`;
+        view.origin.set(cid, t.id);
+        view.nodes.push({ id: cid, label: t.qualified_name || t.name, sublabel: t.component_type, status: "unchanged", kind: kindOf(t), shape: t.category === "module" ? "round" : "box", parent: sg, icon: icon(t) });
+        view.edges.push({ source: n.id, target: cid, status: "unchanged", relationship: rel, count: 1 });
+      }
+    }
+    for (const n of shown) {
+      const links = outOf(n.id).filter((e) => SYSTEM_EDGES.includes(e.relationship) && keep.has(e.target_id))
+        .sort((a, b) => cmpStr(a.relationship, b.relationship) || cmpStr(a.target_id, b.target_id));
+      const talks = new Set(links.filter((e) => e.relationship === "talks-to").map((e) => e.target_id));
+      const starts = new Set(links.filter((e) => e.relationship === "starts-after").map((e) => e.target_id));
+      for (const e of links) {
+        if (e.relationship === "starts-after" && talks.has(e.target_id)) continue;  // one line per pair: talks-to says it
+        let label = e.relationship !== "starts-after" ? ((e.metadata || {}).label || "") : "";
+        if (e.relationship === "talks-to" && starts.has(e.target_id)) label = [label, "starts after"].filter(Boolean).join(", ");
+        view.edges.push({ source: n.id, target: e.target_id, status: "unchanged", relationship: e.relationship, count: 1, label });
+      }
+    }
+    return view;
+  }
+
   /* Affected flow view. */
   function flowView(flow) {
     const view = { title: "Affected flow", direction: "LR", mode: "role", nodes: [], edges: [], subgraphs: new Map(), truncated: 0 };
@@ -698,7 +767,11 @@
       markers.push(e.cycleIntroduced ? "⟲ new cycle" : t.cycle.marker);
     }
     if (e.count > 1) markers.push("×" + e.count);
-    if (e.relationship && !["imports", "contains", "calls"].includes(e.relationship)) markers.unshift(e.relationship);
+    const rel = (THEME.relationship || {})[e.relationship];
+    if (rel && e.status === "unchanged" && !e.cycle) {  // runs, talks-to…: a line style of its own (as in render/mermaid.py)
+      style = rel; arrow = rel.arrow;
+      markers.unshift(rel.marker + (e.label ? " · " + e.label : ""));
+    } else if (e.relationship && !["imports", "contains", "calls"].includes(e.relationship)) markers.unshift(e.relationship + (e.label ? " · " + e.label : ""));
     if (e.contract) {  // breaks an architecture contract: thick, dashed and labelled (never colour alone)
       style = { stroke: t.removed.stroke, width: 3.5, dash: "7 4" };
       arrow = "-.->";
@@ -749,7 +822,7 @@
     const ls = [];
     view.edges.forEach((e, i) => {
       const s = edgeStyle(e);
-      lines.push(s.label && s.arrow !== "---" ? `  ${e.source} ${s.arrow}|"${mEsc(s.label, 60)}"| ${e.target}` : `  ${e.source} ${s.arrow} ${e.target}`);
+      lines.push(s.label && (s.arrow !== "---" || e.relationship !== "contains") ? `  ${e.source} ${s.arrow}|"${mEsc(s.label, 60)}"| ${e.target}` : `  ${e.source} ${s.arrow} ${e.target}`);
       ls.push(`  linkStyle ${i} ${s.style}`);
     });
     return lines.concat(ls, classDefs("st_", THEME.status), classDefs("kind_", THEME.kind), classDefs("role_", THEME.role),
@@ -788,7 +861,7 @@
           btn(".mmd", "Download Mermaid source", () => download("diagram.mmd", this.text || "", "text/plain"))),
         this.spotNote,
         this.viewport,
-        this.opts.legend ? h("div", { class: "legend" }, this.opts.legend()) : null,
+        this.legendEl = this.opts.legend ? h("div", { class: "legend" }, this.opts.legend()) : null,
         h("details", { class: "source" }, h("summary", { class: "muted" }, "Mermaid source"), this.sourcePre));
       this.bindPanZoom();
       if (this.opts.spotlight) {
@@ -798,6 +871,7 @@
       }
     }
     setTitle(t) { this.titleEl.textContent = t; this.viewport.setAttribute("aria-label", t); }
+    setLegend(fn) { if (this.legendEl) { this.legendEl.innerHTML = ""; put(this.legendEl, fn()); } }
     apply() { this.stage.style.transform = `translate(${this.t.x}px, ${this.t.y}px) scale(${this.t.k})`; }
     zoom(f, cx, cy) {
       const r = this.viewport.getBoundingClientRect();
@@ -997,6 +1071,19 @@
       h("span", { class: "item" }, h("span", { class: "line cycle" }), "⟲ dependency cycle"),
       h("span", { class: "item muted" }, "dashed border: external or structural-only (no dependency data)"),
     ];
+  }
+  function systemLegend(kinds) {
+    const item = (name, text) => h("span", { class: "item" }, iconEl(name), " " + text);
+    const line = (rel, text) => {
+      const r = (THEME.relationship || {})[rel] || {};
+      const dash = !r.dash ? "solid" : Number(r.dash.split(" ")[0]) <= 2 ? "dotted" : "dashed";
+      return h("span", { class: "item" }, h("span", { class: "line", style: { borderTop: `${Math.max(2, r.width || 1.5)}px ${dash} ${r.stroke}` } }), text);
+    };
+    const all = THEME.service_kinds || {};
+    return [...Object.keys(all).filter((k) => !kinds || kinds.has(k)).map((k) => item(all[k].ui_icon, all[k].label)),
+      line("runs", "runs (its command)"), line("builds", "builds (its image's code)"), line("talks-to", "talks to (a URL or host in its environment)"),
+      line("starts-after", "starts after (depends_on)"), line("shares-volume", "shares a named volume"),
+      h("span", { class: "item muted" }, "boxes: first-party services with the code they run · dashed stadiums: infrastructure")];
   }
   function roleLegend() {
     const sw = (fill, stroke, dash, ...text) => h("span", { class: "item" }, h("span", { class: "swatch", style: { background: fill, borderColor: stroke, borderStyle: dash ? "dashed" : "solid" } }), ...text);
@@ -1263,7 +1350,7 @@
         field("Show", select([["changed", "Changed only"], ["neighbors", "Changed + neighbours"], ["all", "Everything"]], o.scope, (v) => { o.scope = v; redraw(); })),
         field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
         h("div", { class: "field" }, h("span", { text: "Relationships" }), h("div", { class: "group" },
-          ["imports", "depends-on", "calls", "invokes", "builds"].map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
+          RELATIONSHIPS.map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
         h("div", { class: "field" }, h("span", { text: "Options" }), h("div", { class: "group" },
           checkbox("external packages", o.external, (c) => { o.external = c; redraw(); }),
           checkbox("hide formatting-only", o.hideCosmetic, (c) => { o.hideCosmetic = c; redraw(); }),
@@ -1367,7 +1454,7 @@
   class StructureTab {
     constructor(app, root) {
       this.app = app; this.root = root;
-      this.opts = Object.assign({ depth: 3, files: false, symbols: false, layout: "tree", hotspots: false, maxNodes: (app.bundle.config || {}).max_diagram_nodes || 200, root: null }, storage.get("rv.structure", {}));
+      this.opts = Object.assign({ view: null, depth: 3, files: false, symbols: false, layout: "tree", hotspots: false, maxNodes: (app.bundle.config || {}).max_diagram_nodes || 200, root: null }, storage.get("rv.structure", {}));
     }
     save() { storage.set("rv.structure", this.opts); }
     async init() {
@@ -1384,21 +1471,31 @@
         }
       });
       const redraw = () => { this.save(); this.draw(); };
-      put(this.root, h("div", { class: "toolbar" },
+      this.services = hasServices(this.si);
+      // Files-view controls, hidden while the System view is shown.
+      this.fileControls = [
         h("div", { class: "field" }, h("span", { text: "Root" }), this.crumbs),
         field("Depth", numberInput(o.depth, 1, 12, (v) => { o.depth = v; redraw(); })),
         field("Layout", select([["tree", "Tree"], ["nested", "Nested boxes"]], o.layout, (v) => { o.layout = v; redraw(); })),
-        field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
         h("div", { class: "field" }, h("span", { text: "Show" }), h("div", { class: "group" },
           checkbox("modules / files", o.files, (c) => { o.files = c; redraw(); }),
           checkbox("symbols", o.symbols, (c) => { o.symbols = c; redraw(); }),
           checkbox("churn hotspots", o.hotspots, (c) => { o.hotspots = c; redraw(); }))),
-        h("span", { class: "muted", text: "Double-click a node to drill down." })),
+        h("span", { class: "muted", text: "Double-click a node to drill down." })];
+      this.systemNote = h("span", { class: "muted", text: "Services from the Compose files. Click a service for its variants; double-click its code to open it in the Files view." });
+      put(this.root, h("div", { class: "toolbar" },
+        this.services ? field("View", select([["system", "System (services)"], ["files", "Files and components"]], this.viewName(), (v) => { o.view = v; redraw(); })) : null,
+        this.fileControls,
+        field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
+        this.systemNote),
         h("div", { class: "split" }, h("div", null, this.diagram.el, this.drawer), this.details.el),
         profileCards(app.bundle.profile || app.bundle.snapshot.profile || {}, app.bundle.snapshot, app.bundle.contracts));
       this.draw();
     }
-    setRoot(id) { this.opts.root = id; this.save(); this.draw(); }
+    setRoot(id) { this.opts.root = id; if (this.viewName() === "system") this.opts.view = "files"; this.save(); this.syncViewSelect(); this.draw(); }
+    /* System when the repository declares services (unless the files view was chosen), else Files. */
+    viewName() { return this.services && this.opts.view !== "files" ? "system" : "files"; }
+    syncViewSelect() { const s = this.root.querySelector(".toolbar select"); if (s && this.services && s.value !== this.viewName()) s.value = this.viewName(); }
     drawCrumbs() {
       const si = this.si;
       this.crumbs.innerHTML = "";
@@ -1411,6 +1508,11 @@
       });
     }
     async draw() {
+      const system = this.viewName() === "system";
+      for (const c of this.fileControls) c.hidden = system;
+      this.systemNote.hidden = !system;
+      if (system) return this.drawSystem();
+      this.diagram.setLegend(kindLegend);
       this.drawCrumbs();
       const view = structureView(this.si, this.opts);
       const r = this.si.nodes.get(this.opts.root || rootOf(this.si));
@@ -1423,6 +1525,42 @@
         onNodeDouble: (id) => { if ((this.si.children.get(id) || []).length) this.setRoot(id); },
       });
     }
+    async drawSystem() {
+      const view = systemView(this.si, this.opts);
+      const n = view.nodes.filter((v) => v.kind === "service" || v.kind === "infra").length;
+      this.diagram.setTitle(`System: ${plural(n, "service")}`);
+      const kinds = new Set([...this.si.nodes.values()].filter((x) => x.component_type === "service").map(serviceKind));
+      this.diagram.setLegend(() => systemLegend(kinds));
+      const real = (id) => view.origin.get(id) || id;
+      await this.diagram.render(view, {
+        onNode: (id) => this.showService(real(id)),
+        onCluster: (id) => { if (id.startsWith("sg_") && this.si.nodes.has(id.slice(3))) this.showService(id.slice(3)); },
+        onNodeDouble: (id) => { if (view.origin.has(id)) this.setRoot(view.origin.get(id)); },
+      });
+    }
+  }
+
+  /* A service's card goes right under its summary, before metadata and edges. */
+  StructureTab.prototype.showService = function (id) {
+    const n = this.si.nodes.get(id);
+    this.details.showNode(this.si, id);
+    if (!n || n.component_type !== "service") return;
+    const first = this.details.el.querySelector("dl");
+    this.details.el.insertBefore(serviceCard(n), first ? first.nextSibling : null);
+  };
+
+  /* Variants and differences of a Compose service (details panel). */
+  function serviceCard(n) {
+    const m = meta(n), k = serviceKindInfo(serviceKind(n)), variants = m.variants || [];
+    const diffs = Object.entries(m.differences || {});
+    const show = (v) => (v === null || v === undefined || v === "" ? "—" : Array.isArray(v) ? v.join(", ") || "—" : String(v));
+    return h("div", { class: "service-card" },
+      h("h4", null, iconEl(k.ui_icon), " ", k.label, variants.length ? [" · variants ", variants.map((v) => pill(v))] : null),
+      diffs.length ? h("table", null, h("thead", null, h("tr", null, h("th", { text: "Differs" }), variants.map((v) => h("th", { text: v })))),
+        h("tbody", null, diffs.map(([f, vals]) => h("tr", null, h("td", { text: f.replace(/_/g, " ") }), variants.map((v) => h("td", { class: "mono", text: show(vals[v]) }))))))
+        : variants.length > 1 ? h("div", { class: "muted small", text: "Same image, command, ports and build in every variant." }) : null,
+      m.runs ? h("div", { class: "small" }, "Runs ", h("span", { class: "mono", text: m.runs }), m.runs_from ? h("span", { class: "faint", text: ` (from ${m.runs_from})` }) : null) : null,
+      (m.env_keys || []).length ? h("div", { class: "muted small", text: `Environment: ${plural(m.env_keys.length, "variable")} (names only; values are never shown).` }) : null);
   }
 
   Object.assign(StructureTab.prototype, {
@@ -1499,6 +1637,18 @@
     },
   });
 
+  /* Entry points grouped by the file that declares them; a Compose service lists its variants. */
+  function entryPointGroups(eps) {
+    if (!eps.length) return h("div", { class: "empty", text: "None found." });
+    const by = new Map();
+    for (const e of eps.slice(0, 200)) push(by, e.declared_in || "(unknown)", e);
+    return [...by].map(([file, list]) => h("div", null, h("h4", { class: "mono", text: `${file} (${list.length})` }),
+      h("ul", { class: "plain" }, list.map((e) => h("li", null, h("b", { text: e.name }), " ", pill(e.kind),
+        (e.variants || []).length > 1 ? [" ", e.variants.map((v) => pill(v))] : null,
+        h("div", { class: "mono faint", text: `${e.target}${e.line ? " · line " + e.line : ""}` }))))),
+      eps.length > 200 ? h("div", { class: "muted small", text: `First 200 of ${eps.length}.` }) : null);
+  }
+
   function profileCards(p, snap, contracts) {
     const list = (items, render, empty) => items && items.length ? h("ul", { class: "plain" }, items.map((x) => h("li", null, render(x)))) : h("div", { class: "empty", text: empty || "None found." });
     const langs = p.languages || [];
@@ -1531,7 +1681,7 @@
         h("div", { class: "card" }, h("h3", { text: "Generated & vendored code (excluded from analysis)" }),
           list((p.generated || []).concat((p.vendored || []).map((v) => Object.assign({ vendored: true }, v))), (g) => [h("span", { class: "mono", text: g.path }), " ", pill(g.vendored ? "vendored" : "generated"), h("span", { class: "faint", text: " " + (g.reason || "") })], "None detected.")),
         h("div", { class: "card" }, h("h3", { text: `Entry points (${(p.entry_points || []).length})` }),
-          list((p.entry_points || []).slice(0, 100), (e) => [h("b", { text: e.name }), " ", pill(e.kind), h("div", { class: "mono faint", text: `${e.target} · ${e.declared_in}${e.line ? ":" + e.line : ""}` })])),
+          entryPointGroups(p.entry_points || [])),
         (p.submodule_info || []).length ? h("div", { class: "card" }, h("h3", null, iconEl("link"), ` Git submodules (${p.submodule_info.length})`),
           h("div", { class: "muted small", text: "Separate repositories pinned to a commit. Reviews look inside them; the graphs do not analyze their code." }),
           list(p.submodule_info, (m) => [h("span", { class: "mono", text: m.path }), " ", h("span", { class: "mono faint", text: "@ " + (m.commit || "?").slice(0, 10) }),
@@ -1596,7 +1746,7 @@
         field("Direction", select([["both", "Both"], ["out", "Depends on (outgoing)"], ["in", "Used by (incoming)"]], o.direction2, (v) => { o.direction2 = v; redraw(); })),
         field("Max nodes", numberInput(o.maxNodes, 10, 2000, (v) => { o.maxNodes = v; redraw(); })),
         h("div", { class: "field" }, h("span", { text: "Relationships" }), h("div", { class: "group" },
-          ["imports", "depends-on", "calls", "invokes", "builds"].map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
+          RELATIONSHIPS.map((r) => checkbox(r, o.relationships.includes(r), (c) => { o.relationships = c ? [...o.relationships, r] : o.relationships.filter((x) => x !== r); redraw(); })))),
         h("div", { class: "field" }, h("span", { text: "Include" }), h("div", { class: "group" },
           checkbox("external", o.external, (c) => { o.external = c; redraw(); }), checkbox("stdlib", o.stdlib, (c) => { o.stdlib = c; redraw(); }),
           checkbox("tests", o.tests, (c) => { o.tests = c; redraw(); }), checkbox("type-only imports", o.typeOnly, (c) => { o.typeOnly = c; redraw(); }),
@@ -2843,7 +2993,8 @@
       ] },
     { id: "structure", title: "Structure", icon: "tree", tab: "structure", intro: "Learn the project: its layout and components, and what repoviz discovered about it.",
       blocks: [
-        { ul: ["The diagram starts at the repository root. **Double-click** a node (or use the breadcrumbs) to drill into a directory or package. **Depth** controls how many levels are shown.",
+        { ul: ["**View: System** (shown first when the repository has `docker-compose` / `compose` files) draws the running system. Each **first-party service** (built from this repository) is a box holding the code it runs: `uvicorn app.main:app` points at `app.main`, `celery -A app.worker` at `app.worker`, and a service without a command uses its Dockerfile's `CMD`. **Infrastructure** (databases, caches, queues, object stores, search, monitoring, proxies) is grouped apart, with an icon and a word per kind. Services are linked by **talks to** (thick: a URL or host in the environment names the other service, labelled with protocol and port), **starts after** (dashed: `depends_on`) and **shares volume** (dotted). A service declared in several files (`docker-compose.yml`, `docker-compose.prod.yml`…) is **one** service; click it to see its variants and what differs between them. Environment values are never shown, only variable names.",
+          "**View: Files and components** shows the layout. The diagram starts at the repository root. **Double-click** a node (or use the breadcrumbs) to drill into a directory or package. **Depth** controls how many levels are shown.",
           "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
           "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
@@ -3127,7 +3278,7 @@
     } catch (err) { fail("Could not load repository data: " + err.message); return; }
     const app = new App(api, bundle);
     APP = app;
-    window.repoviz = { app, toMermaid, changesView, dependencyView, structureView, flowView, activityView, indexDiff, indexSnapshot };
+    window.repoviz = { app, toMermaid, changesView, dependencyView, structureView, systemView, flowView, activityView, indexDiff, indexSnapshot };
     await app.init();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", main); else main();

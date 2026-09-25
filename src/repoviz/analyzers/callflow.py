@@ -58,6 +58,7 @@ class EntryTarget:
     target: str
     target_kind: str  # python-callable | python-module | file | command
     evidence: SourceEvidence | None = None
+    relationship: str = REL_INVOKES  # an entry point invokes its target; a service runs it (REL_RUNS)
 
 
 class CallIndex:
@@ -208,7 +209,7 @@ class CallIndex:
 
 class CallFlowAnalyzer(Analyzer):
     name = "callflow"
-    version = "1"
+    version = "2"
     capabilities = (CAP_CALLS, CAP_ENTRY_POINTS)
 
     def detect(self, ctx: AnalysisContext) -> Detection:
@@ -252,7 +253,7 @@ class CallFlowAnalyzer(Analyzer):
                         if target_id:
                             break
             if target_id and target_id in b.nodes:
-                b.add_edge(et.entry_id, target_id, REL_INVOKES, analyzer=self.name,
+                b.add_edge(et.entry_id, target_id, et.relationship, analyzer=self.name,
                            evidence=[et.evidence] if et.evidence else [], confidence=0.9)
                 b.stat(self.name, "entry_points_resolved")
             elif et.target_kind != "command":

@@ -488,3 +488,18 @@ def test_review_action_is_sticky_and_never_runs_the_repository() -> None:
     assert set(action["inputs"]) >= {"base", "head", "fail-on", "min-severity", "comment", "sarif"}
     workflow = yaml.safe_load((root / ".github/workflows/repoviz-review.yml").read_text())
     assert workflow["jobs"]["review"]["steps"][0]["with"]["fetch-depth"] == 0
+
+
+def test_mermaid_system_view(make_repo, capsys) -> None:
+    from test_discovery_manifests import SYSTEM
+
+    repo = make_repo(SYSTEM)
+    assert main(["mermaid", "-C", repo.path, "--view", "system"]) == 0
+    out = capsys.readouterr().out
+    assert 'subgraph sg_infra["Infrastructure"]' in out and "🗄 mongo" in out and "⚡ redis" in out
+    assert '==>|"talks to · mongodb:27017, starts after"|' in out  # one line per pair
+    assert '---|"shares volume · uploads"|' in out and "📄 app.main" in out
+    assert "stroke-dasharray:1 3" in out and "classDef kind_infra" in out
+    empty = make_repo({"a.py": "x = 1\n"})
+    assert main(["mermaid", "-C", empty.path, "--view", "system"]) == 0
+    assert "no services found" in capsys.readouterr().err

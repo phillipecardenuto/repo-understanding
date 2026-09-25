@@ -20,6 +20,7 @@ from . import classify, globs
 from .config import Config
 from .manifests import ManifestData, parse_project_file
 from .model import Diagnostic
+from .services import compose_services, service_entry_points
 from .sources import TreeSource
 from .submodules import gitmodules_urls
 
@@ -400,6 +401,10 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
             prof.entry_points.append({"name": ep.name, "kind": ep.kind, "target": ep.target,
                                       "target_kind": ep.target_kind, "declared_in": path, "line": ep.line,
                                       "project": proj["path"] if proj else None})
+    # Compose: one entry point per first-party service (all its variants), none for infrastructure images.
+    for ep in service_entry_points(compose_services(prof.manifest_data)[0]):
+        proj = prof.project_for(ep["declared_in"])
+        prof.entry_points.append(dict(ep, project=proj["path"] if proj else None))
     for f in included:
         base = posixpath.basename(f)
         if base == "__main__.py":

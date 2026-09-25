@@ -17,7 +17,7 @@ language. Keys with `null` or empty values are omitted. `schema_version` is `1`.
 | `generated_at` | ISO 8601 UTC |
 | `components`, `modules`, `symbols` | `ComponentNode` lists (split by `category`) |
 | `containment_edges` | `contains` edges derived from `parent_id` |
-| `dependency_edges` | `imports`, `depends-on`, `invokes`, `builds` … (direct **and** component-level aggregated edges, `direct: false`) |
+| `dependency_edges` | `imports`, `depends-on`, `invokes`, `builds`, `runs`, `starts-after`, `talks-to`, `shares-volume` … (direct **and** component-level aggregated edges, `direct: false`) |
 | `call_edges` | `calls` between symbols (or from module-level code) |
 | `cycles` | `Cycle` list (module, component and project level) |
 | `diagnostics` | discovery and analyzer diagnostics |
@@ -54,6 +54,38 @@ language. Keys with `null` or empty values are omitted. `schema_version` is `1`.
 | `cycle_ids` | cycles this edge participates in |
 | `confidence` | 0–1: 1.0 for resolved static imports, lower for dynamic imports, heuristic JS resolution, `self` calls… |
 | `metadata` | `type_checking_only`, `conditional_only`, `lazy_only`, `dynamic_only`, `test_only`, `external`, `imported_names`, `scope`, `spec`, `confirmed_by` … |
+
+## Services (Compose)
+
+`services.py` merges a directory's Compose files, and the manifest analyzer adds
+one `service` node per service name, whatever the number of variants. Its key is
+`service:<compose dir>:<name>`.
+
+**Tags.** A service node is tagged `service`, `component` and `deployment`, and
+either `first-party` or `infrastructure`.
+
+**Metadata.**
+
+- `service_kind`: `first-party`, `database`, `cache`, `queue`, `object-store`,
+  `search`, `monitoring`, `proxy`, `coordination` or `other`.
+- `variants` and `variant_files`.
+- `differences`: field → variant → value, for `image`, `command`, `ports` and
+  `build_context`.
+- `image`, `build_context`, `dockerfile`, `command`, `entrypoint`, `ports`,
+  `volumes` (named volumes only), `networks`, `env_keys` (names only, never
+  values), `env_files`, `profiles`.
+- `runs` and `runs_from`.
+
+**Edges.**
+
+| Relationship | From → to | Meaning |
+|---|---|---|
+| `builds` | service → directory, submodule or Dockerfile | its `build` context |
+| `runs` | service → module, callable or file | what its command runs (resolved like entry points), or its Dockerfile's `CMD` / `ENTRYPOINT` |
+| `depends-on` | infrastructure service → container image | its `image` |
+| `starts-after` | service → service | `depends_on` |
+| `talks-to` | service → service | an environment value names the other service (by name, `container_name` or `hostname`); `metadata.label` is the protocol and port, `metadata.env_keys` the variable names |
+| `shares-volume` | service → service | the same named volume (listed in `metadata.label`); a volume shared by more than 8 services is ignored |
 
 ## SourceEvidence
 

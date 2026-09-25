@@ -63,7 +63,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
-| `repoviz mermaid --view changes\|dependencies\|structure\|flow` | Print Mermaid text (paste into docs or PRs). |
+| `repoviz mermaid --view changes\|dependencies\|structure\|flow\|system` | Print Mermaid text (paste into docs or PRs). `system` draws the services from the Compose files. |
 | `repoviz discover [--json]` | What discovery found: languages, manifests, roots, entry points, CI… |
 | `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
 | `repoviz activity [--json]` | Files being modified now, with impact, tests and config flags. |
@@ -126,7 +126,33 @@ are tables of new and removed dependencies (with evidence), cycles introduced,
 resolved or changed, and every changed node with the reason it changed. The live
 app accepts any comparison; a static report offers the precomputed ones.
 
-**Structure.** Containment from the repository root down to modules and symbols,
+**Structure.** When the repository has Compose files, the tab opens on the
+**System** view: the running system, from `docker-compose*.yml` / `compose*.yaml`.
+
+- **One service per name.** A service declared in several files
+  (`docker-compose.yml`, `docker-compose.prod.yml`…) is one service with
+  variants. Click it to see what differs between them (image, command, ports).
+- **First-party services** (built from this repository) are boxes holding the
+  code they run. `uvicorn app.main:app` points to `app.main`,
+  `celery -A app.worker` to `app.worker`, a Dockerfile `CMD` to its script, and a
+  build context to its directory or submodule.
+- **Infrastructure** sits in its own group, with an icon and a word per kind:
+  database, cache, queue, object store, search, monitoring, proxy and
+  coordination.
+- **Links between services:**
+  - **talks to** (thick): an environment value names the other service, such as
+    `redis://redis:6379` or `API_HOST=api`. The line is labelled with the
+    protocol and port.
+  - **starts after** (dashed): `depends_on`.
+  - **shares volume** (dotted): a named volume they both mount.
+- **Privacy.** Environment values are never read into the model, only variable
+  names.
+- **Entry points.** Only first-party services are entry points (one per service,
+  with its variants). Infrastructure commands such as `etcd` or `minio server`
+  are not.
+
+The **Files and components** view shows containment from the repository root
+down to modules and symbols,
 as a tree or as nested boxes, with churn hotspots from Git history. Double-click
 a node to drill down. Click a churn hotspot to open its **code changes** under
 the graph (its last commits and the diff of one of them, with `+` / `−` on

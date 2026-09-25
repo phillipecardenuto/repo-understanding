@@ -10,8 +10,11 @@ Turns the manifests found by discovery into:
   names matching another project of the repository) and to external packages,
   with the manifest line as evidence and the declared scope (runtime, dev,
   optional, peer, build, test...);
-* container images, Docker Compose services (with their ``depends_on`` and
-  build contexts) and CI pipelines;
+* container images, CI pipelines and Docker Compose services: one service per
+  name across a directory's Compose variants (see ``services.py``), first-party
+  or infrastructure, with ``builds`` edges to the code they build, ``runs``
+  edges to what their command runs, and ``starts-after``, ``talks-to`` and
+  ``shares-volume`` edges between services;
 * entry-point nodes (console scripts, ``bin`` entries, Cargo binaries, Procfile
   processes, container commands...) that the call-flow analyzer links to the
   code they invoke.
@@ -23,7 +26,8 @@ import posixpath
 from typing import Any
 
 from ..manifests import DeclaredDependency, ManifestData, normalize_python_name
-from ..model import CATEGORY_COMPONENT, REL_BUILDS, REL_DEPENDS_ON, ComponentNode, SourceEvidence
+from ..model import CATEGORY_COMPONENT, REL_BUILDS, REL_DEPENDS_ON, REL_RUNS, ComponentNode, SourceEvidence
+from ..services import compose_services, service_entry_points
 from .base import (
     CAP_COMPONENTS,
     CAP_DEPENDENCIES,
@@ -48,7 +52,7 @@ def _norm(ecosystem: str, name: str) -> str:
 
 class ManifestAnalyzer(Analyzer):
     name = "manifest"
-    version = "1"
+    version = "2"
     capabilities = (CAP_COMPONENTS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS, CAP_EVIDENCE, CAP_DIAGNOSTICS)
 
     def detect(self, ctx: AnalysisContext) -> Detection:
@@ -86,7 +90,8 @@ class ManifestAnalyzer(Analyzer):
             if md.kind == "dockerfile":
                 self._dockerfile(ctx, b, md)
             elif md.kind == "compose":
-                self._compose(ctx, b, md)
+                node = b.ensure_file(md.path, self.name, component_type="compose")
+                node.metadata["compose_variant"] = md.metadata.get("variant")
             elif md.kind == "ci":
                 node = b.ensure_file(path, self.name, component_type="ci-pipeline")
                 node.metadata["ci_provider"] = md.metadata.get("provider")
@@ -105,6 +110,7 @@ class ManifestAnalyzer(Analyzer):
                 node.metadata["manifest_kind"] = md.kind
                 if md.metadata.get("parsed") is False:
                     node.metadata["dependency_details"] = "manifest recognised but not parsed"
+        self._services(ctx, b)
 
     def _dockerfile(self, ctx: AnalysisContext, b: SnapshotBuilder, md: ManifestData) -> None:
         node = b.ensure_file(md.path, self.name, component_type="container")
@@ -135,38 +141,36 @@ class ManifestAnalyzer(Analyzer):
                                evidence=[SourceEvidence(md.path, None, None, "COPY", self.name, f"COPY {src}")])
                     break
 
-    def _compose(self, ctx: AnalysisContext, b: SnapshotBuilder, md: ManifestData) -> None:
-        file_node = b.ensure_file(md.path, self.name, component_type="compose")
-        services = md.metadata.get("services") or {}
-        ids: dict[str, str] = {}
-        for name, svc in services.items():
-            key = f"service:{md.path}:{name}"
-            sid = b.id_for("svc", key)
-            ids[name] = sid
+    def _services(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
+        """One node per Compose service (all its variants), its code, and how services relate."""
+        services, edges = compose_services(ctx.profile.manifest_data)
+        self._service_ids: dict[str, str] = {}
+        for svc in services:
+            sid = b.id_for("svc", svc.key)
+            self._service_ids[svc.key] = sid
+            file_node = b.ensure_file(svc.path, self.name, component_type="compose")
             b.add_node(ComponentNode(
-                id=sid, name=name, qualified_name=f"{name} ({posixpath.basename(md.path)})", component_type="service",
-                category=CATEGORY_COMPONENT, path=md.path, parent_id=file_node.id, analyzer=self.name, key=key,
-                tags=["service", "component", "deployment"], start_line=svc.get("line"),
-                metadata={"image": svc.get("image"), "ports": svc.get("ports"), "build_context": svc.get("build_context")}))
-        for name, svc in services.items():
-            ev = [self.evidence(ctx, md.path, svc.get("line"), svc.get("line"), "service")]
-            for dep in svc.get("depends_on") or []:
-                if dep in ids:
-                    b.add_edge(ids[name], ids[dep], REL_DEPENDS_ON, analyzer=self.name, evidence=ev,
-                               metadata={"scope": "runtime"})
-            ctx_dir = svc.get("build_context")
-            if ctx_dir is not None:
-                target = b.path_node_id(ctx_dir) if ctx_dir else b.root_id
-                dockerfile = svc.get("dockerfile") or posixpath.join(ctx_dir, "Dockerfile").lstrip("/")
-                df = b.path_node_id(dockerfile)
-                if df:
-                    b.add_edge(ids[name], df, REL_BUILDS, analyzer=self.name, evidence=ev)
-                elif target:
-                    b.add_edge(ids[name], target, REL_BUILDS, analyzer=self.name, evidence=ev)
-            elif svc.get("image"):
-                ext = self._external(b, "container-image", str(svc["image"]).split("@")[0], str(svc["image"]))
-                b.add_edge(ids[name], ext, REL_DEPENDS_ON, analyzer=self.name, evidence=ev,
-                           metadata={"scope": "image"})
+                id=sid, name=svc.name, qualified_name=svc.display_name, component_type="service",
+                category=CATEGORY_COMPONENT, path=svc.path, parent_id=file_node.id, analyzer=self.name, key=svc.key,
+                tags=["service", "component", "deployment", "first-party" if svc.first_party else "infrastructure"],
+                start_line=svc.line, metadata=svc.metadata()))
+            ev = [self.evidence(ctx, svc.path, svc.line, svc.line, "service")]
+            if svc.build_context is not None:  # the code it builds, and its Dockerfile
+                code = b.path_node_id(svc.build_context) if svc.build_context else b.root_id
+                dockerfile = b.path_node_id(svc.dockerfile or posixpath.join(svc.build_context, "Dockerfile").lstrip("/"))
+                for target in dict.fromkeys(t for t in (code, dockerfile) if t):
+                    b.add_edge(sid, target, REL_BUILDS, analyzer=self.name, evidence=ev)
+            elif svc.image:
+                ext = self._external(b, "container-image", svc.image.split("@")[0], svc.image)
+                b.add_edge(sid, ext, REL_DEPENDS_ON, analyzer=self.name, evidence=ev, metadata={"scope": "image"})
+        for e in edges:
+            meta: dict[str, Any] = {"label": ", ".join(e.labels[:3]) + (" …" if len(e.labels) > 3 else "")}
+            if e.keys:
+                meta["env_keys"] = e.keys
+            b.add_edge(self._service_ids[e.source.key], self._service_ids[e.target.key], e.relationship,
+                       analyzer=self.name, evidence=[self.evidence(ctx, e.path, e.line, e.line, e.relationship)],
+                       metadata=meta)
+        self._services_found = services
 
     def _external(self, b: SnapshotBuilder, ecosystem: str, name: str, spec: str = "") -> str:
         key_name = _norm(ecosystem, name)
@@ -185,6 +189,7 @@ class ManifestAnalyzer(Analyzer):
 
     def discover_entry_points(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
         index = get_index(ctx)
+        self._service_entry_points(ctx, b, index)
         for path, md in sorted(ctx.profile.manifest_data.items()):
             if not md.entry_points:
                 continue
@@ -204,6 +209,32 @@ class ManifestAnalyzer(Analyzer):
                               "declared_in": path}))
                 ev = self.evidence(ctx, path, ep.line, ep.line, ep.kind) if ep.line else None
                 index.entry_targets.append(EntryTarget(eid, ep.target, ep.target_kind, ev))
+
+    def _service_entry_points(self, ctx: AnalysisContext, b: SnapshotBuilder, index: Any) -> None:
+        """Compose: one entry point per first-party service with a command, and a ``runs`` edge from each
+        first-party service to what it runs (its command, or its Dockerfile's CMD / ENTRYPOINT)."""
+        services = getattr(self, "_services_found", [])
+        ids = getattr(self, "_service_ids", {})
+        by_name = {(s.dir, s.name): s for s in services}
+        for ep in service_entry_points(services):
+            svc = by_name[(posixpath.dirname(ep["declared_in"]), ep["service"])]
+            key = f"entry:{svc.key}"
+            eid = b.id_for("entry", key)
+            b.add_node(ComponentNode(
+                id=eid, name=ep["name"], qualified_name=f"{ep['name']} [compose-command]", component_type="entry-point",
+                category=CATEGORY_COMPONENT, path=svc.path, parent_id=ids[svc.key], analyzer=self.name, key=key,
+                start_line=svc.line, tags=["entry-point"],
+                metadata={"entry_kind": "compose-command", "target": ep["target"], "target_kind": ep["target_kind"],
+                          "declared_in": svc.path, "service": svc.name, "variants": ep["variants"]}))
+            ev = self.evidence(ctx, svc.path, svc.line, svc.line, "compose-command") if svc.line else None
+            index.entry_targets.append(EntryTarget(eid, ep["target"], ep["target_kind"], ev))
+        for svc in services:
+            if svc.runs is not None and svc.key in ids:
+                path = svc.runs_from if svc.runs_from not in ("command", "entrypoint") else svc.path
+                line = svc.line if path == svc.path else None
+                ev = self.evidence(ctx, path, line, line, "runs") if line else \
+                    SourceEvidence(path, None, None, "runs", self.name, svc.runs[0])
+                index.entry_targets.append(EntryTarget(ids[svc.key], svc.runs[0], svc.runs[1], ev, REL_RUNS))
 
     def discover_dependencies(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
         prof = ctx.profile

@@ -160,6 +160,20 @@
       "color": "#7c2d12",
       "width": 2,
       "dash": null
+    },
+    "service": {
+      "fill": "#ecfeff",
+      "stroke": "#0e7490",
+      "color": "#164e63",
+      "width": 2,
+      "dash": null
+    },
+    "infra": {
+      "fill": "#f5f5f4",
+      "stroke": "#57534e",
+      "color": "#292524",
+      "width": 1.2,
+      "dash": "5 3"
     }
   },
   "icons": {
@@ -201,6 +215,95 @@
       "color": "#431407",
       "width": 3.5,
       "dash": null
+    }
+  },
+  "relationship": {
+    "runs": {
+      "stroke": "#059669",
+      "width": 1.8,
+      "dash": null,
+      "arrow": "-->",
+      "marker": "runs"
+    },
+    "builds": {
+      "stroke": "#7c3aed",
+      "width": 1.2,
+      "dash": "2 3",
+      "arrow": "-.->",
+      "marker": "builds"
+    },
+    "starts-after": {
+      "stroke": "#64748b",
+      "width": 1.5,
+      "dash": "6 4",
+      "arrow": "-.->",
+      "marker": "starts after"
+    },
+    "talks-to": {
+      "stroke": "#0369a1",
+      "width": 2.4,
+      "dash": null,
+      "arrow": "==>",
+      "marker": "talks to"
+    },
+    "shares-volume": {
+      "stroke": "#a16207",
+      "width": 1.6,
+      "dash": "1 3",
+      "arrow": "---",
+      "marker": "shares volume"
+    }
+  },
+  "service_kinds": {
+    "first-party": {
+      "label": "first-party service",
+      "icon": "🖥",
+      "ui_icon": "server"
+    },
+    "database": {
+      "label": "database",
+      "icon": "🗄",
+      "ui_icon": "database"
+    },
+    "cache": {
+      "label": "cache",
+      "icon": "⚡",
+      "ui_icon": "zap"
+    },
+    "queue": {
+      "label": "queue / broker",
+      "icon": "📨",
+      "ui_icon": "inbox"
+    },
+    "object-store": {
+      "label": "object store",
+      "icon": "🪣",
+      "ui_icon": "archive"
+    },
+    "search": {
+      "label": "search / vector DB",
+      "icon": "🔎",
+      "ui_icon": "search"
+    },
+    "monitoring": {
+      "label": "monitoring / admin",
+      "icon": "📈",
+      "ui_icon": "gauge"
+    },
+    "proxy": {
+      "label": "proxy",
+      "icon": "🔀",
+      "ui_icon": "shuffle"
+    },
+    "coordination": {
+      "label": "coordination",
+      "icon": "🧭",
+      "ui_icon": "hub"
+    },
+    "other": {
+      "label": "external image",
+      "icon": "🐳",
+      "ui_icon": "container"
     }
   }
 }

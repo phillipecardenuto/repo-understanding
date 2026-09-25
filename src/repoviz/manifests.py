@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import yamlish
-from .classify import ci_provider, container_kind, deployment_kind, manifest_kind
+from .classify import ci_provider, compose_variant, container_kind, deployment_kind, manifest_kind
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -158,9 +158,16 @@ def command_entry_target(command: str) -> tuple[str, str] | None:
     m = re.search(r"\bpython[\d.]*\s+(?:-[a-zA-Z]+\s+)*-m\s+([\w.]+)", cmd)
     if m:
         return m.group(1), "python-module"
-    m = re.search(r"\b(?:gunicorn|uvicorn|hypercorn|daphne|waitress-serve|granian)\b.*?\s([\w.]+):([\w.]+)", cmd)
+    servers = r"\b(?:gunicorn|uvicorn|hypercorn|daphne|waitress-serve|granian)\b"
+    m = re.search(servers + r".*?\s[\"']?([A-Za-z_][\w.]*):([A-Za-z_][\w.]*)(?=[\s\"'(]|$)", cmd)  # not a bind address
     if m:
         return f"{m.group(1)}:{m.group(2)}", "python-callable"
+    m = re.search(r"\bcelery\b.*?\s(?:-A|--app)[=\s]+([A-Za-z_][\w.]*)(?::([A-Za-z_][\w.]*))?", cmd)
+    if m:
+        return (f"{m.group(1)}:{m.group(2)}", "python-callable") if m.group(2) else (m.group(1), "python-module")
+    m = re.search(servers + r".*?\s([A-Za-z_]\w*(?:\.\w+)+)(?=\s|$)", cmd)  # a dotted module (default callable)
+    if m:
+        return m.group(1), "python-module"
     m = re.search(r"\bpython[\d.]*\s+(?:-[a-zA-Z]+\s+)*([\w./-]+\.py)\b", cmd)
     if m:
         return m.group(1).removeprefix("./"), "file"
@@ -1100,8 +1107,78 @@ def parse_dockerfile(path: str, text: str, exists: Callable[[str], bool]) -> Man
     return md
 
 
+_INTERPOLATION = re.compile(r"\$\{([A-Za-z_]\w*)(?::?[-?]([^}]*))?\}|\$([A-Za-z_]\w*)")
+_ENV_URL = re.compile(r"\b([a-z][a-z0-9+.-]*)://(?:[^@\s/]+@)?([A-Za-z0-9_.-]+)(?::(\d+))?")
+_HOST_KEY = re.compile(r"(?:^|_)(HOST|HOSTNAME|SERVER|ADDR|ADDRESS|ENDPOINT|URL|URI|DSN|BROKER|BACKEND)$", re.I)
+_HOST_PORT = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]*)(?::(\d+))?$")
+_NAMED_VOLUME = re.compile(r"^[A-Za-z0-9][\w.-]*$")
+
+
+def compose_defaults(value: str) -> str:
+    """``${VAR:-default}`` → ``default`` (what the value is when nothing is set); other variables → ``""``."""
+    return _INTERPOLATION.sub(lambda m: m.group(2) or "", value)
+
+
+def env_links(env: dict[str, str]) -> list[dict[str, Any]]:
+    """Hosts named by environment values: URLs (``redis://cache:6379``) and host-like keys (``REDIS_HOST=cache``,
+    with ``REDIS_PORT``).  Only the key, scheme, host and port are kept: never the value (it may hold a secret)."""
+    links: list[dict[str, Any]] = []
+    for key in sorted(env):
+        value = compose_defaults(env[key]).strip()
+        found = [(m.group(1), m.group(2), m.group(3)) for m in _ENV_URL.finditer(value)]
+        if not found and _HOST_KEY.search(key) and (m := _HOST_PORT.match(value)):
+            prefix = _HOST_KEY.sub("", key)
+            port = m.group(2) or compose_defaults(env.get(f"{prefix}_PORT", "")).strip()
+            found = [(None, m.group(1), port if port.isdigit() else None)]
+        for scheme, host, port in found:
+            links.append({"key": key, "scheme": scheme, "host": host, "port": int(port) if port else None})
+    return links
+
+
+def _compose_env(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        return {str(k): "" if v is None else str(v) for k, v in value.items()}
+    out: dict[str, str] = {}
+    for item in value or []:
+        if isinstance(item, str):
+            k, _, v = item.partition("=")
+            out[k.strip()] = v
+    return out
+
+
+def _compose_list(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [str(k) for k in value]
+    if isinstance(value, (str, int)):
+        return [str(value)]
+    return [str(v) for v in value or [] if isinstance(v, (str, int))]
+
+
+def _named_volumes(value: Any) -> list[str]:
+    """Named volumes (not bind mounts) of a service: ``data:/var/lib`` and ``{type: volume, source: data}``."""
+    out = []
+    for v in value or []:
+        if isinstance(v, dict):
+            src = str(v.get("source") or "") if v.get("type", "volume") == "volume" else ""
+        else:
+            src = str(v).split(":", 1)[0] if ":" in str(v) else ""
+        if src and _NAMED_VOLUME.match(src):
+            out.append(src)
+    return sorted(set(out))
+
+
+def _service_line(text: str, name: str) -> int | None:
+    m = re.search(r"(?m)^[ \t]+[\"']?" + re.escape(name) + r"[\"']?:[ \t]*(?:#.*)?$", text)
+    return text.count("\n", 0, m.start()) + 1 if m else find_line(text, f"{name}:")
+
+
 def parse_compose(path: str, text: str, exists: Callable[[str], bool]) -> ManifestData:
+    """Services of a Compose file: image, build, command, dependencies, ports, named volumes, networks, the
+    environment's keys and the hosts its values name.  Environment values themselves are not kept."""
+    from .redact import redact
+
     md = ManifestData(path=path, kind="compose", ecosystem="container")
+    md.metadata["variant"] = compose_variant(path)
     try:
         data = yamlish.safe_load(text) or {}
     except yamlish.YamlError as exc:
@@ -1109,7 +1186,7 @@ def parse_compose(path: str, text: str, exists: Callable[[str], bool]) -> Manife
         return md
     services: dict[str, Any] = {}
     for name, svc in ((data.get("services") or {}) if isinstance(data, dict) else {}).items():
-        svc = svc or {}
+        svc = svc if isinstance(svc, dict) else {}
         build = svc.get("build")
         context = dockerfile = None
         if isinstance(build, str):
@@ -1118,20 +1195,23 @@ def parse_compose(path: str, text: str, exists: Callable[[str], bool]) -> Manife
             context = _join(md.dir, build.get("context", "."))
             if build.get("dockerfile"):
                 dockerfile = _join(context, build["dockerfile"])
-        deps = svc.get("depends_on") or []
-        if isinstance(deps, dict):
-            deps = list(deps)
-        services[name] = {
-            "image": svc.get("image"), "build_context": context, "dockerfile": dockerfile,
-            "depends_on": [d for d in deps if isinstance(d, str)], "line": find_line(text, f"{name}:"),
-            "ports": [str(p) for p in svc.get("ports") or []],
+        command, entrypoint = svc.get("command"), svc.get("entrypoint")
+        command = " ".join(map(str, command)) if isinstance(command, list) else (str(command) if command else None)
+        entrypoint = " ".join(map(str, entrypoint)) if isinstance(entrypoint, list) else (
+            str(entrypoint) if entrypoint else None)
+        env = _compose_env(svc.get("environment"))
+        services[str(name)] = {
+            "image": str(svc["image"]) if svc.get("image") else None, "build_context": context,
+            "dockerfile": dockerfile, "command": redact(command) if command else None,
+            "entrypoint": redact(entrypoint) if entrypoint else None,
+            "depends_on": [d for d in _compose_list(svc.get("depends_on"))],
+            "line": _service_line(text, str(name)), "ports": [str(p) for p in svc.get("ports") or []],
+            "volumes": _named_volumes(svc.get("volumes")), "networks": _compose_list(svc.get("networks")),
+            "env_keys": sorted(env), "env_links": env_links(env), "env_files": _compose_list(svc.get("env_file")),
+            "profiles": _compose_list(svc.get("profiles")),
+            "container_name": str(svc["container_name"]) if svc.get("container_name") else None,
+            "hostname": str(svc["hostname"]) if svc.get("hostname") else None,
         }
-        cmd = svc.get("command")
-        if cmd:
-            cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-            tgt = command_entry_target(cmd_s)
-            md.entry_points.append(EntryPointDecl(f"{name} (compose)", "compose-command", tgt[0] if tgt else cmd_s,
-                                                  tgt[1] if tgt else "command", services[name]["line"]))
     md.metadata["services"] = services
     return md
 

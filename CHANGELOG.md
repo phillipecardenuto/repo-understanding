@@ -6,6 +6,26 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **System view from docker-compose** ([#22](https://github.com/phillipecardenuto/repo-understanding/issues/22)).
+  - Compose files in one directory are variants of one system, so a service
+    declared in `docker-compose.yml` and `docker-compose.prod.yml` is one
+    service with its variants and their differences.
+  - A service is first-party when this repository builds it. Otherwise it is
+    infrastructure, classified by image: database, cache, queue, object store,
+    search, monitoring, proxy or coordination.
+  - Services link to their code. `runs` edges come from `uvicorn`,
+    `gunicorn`, `celery -A`, `python -m` and node commands, or from the
+    Dockerfile `CMD`. `builds` edges go to the build context.
+  - Services link to each other: `starts-after` (`depends_on`), `talks-to` (an
+    environment URL or host names another service, labelled with protocol and
+    port) and `shares-volume`.
+  - The Structure tab opens on a new **System** view when services exist, with
+    a legend. `repoviz mermaid --view system` prints the same diagram.
+  - Entry points are one per first-party service, grouped by declaring file in
+    the Structure tab. Infrastructure commands (`etcd`, `minio server`) are no
+    longer listed.
+  - Environment values are never kept, only variable names.
+  - The Changes and Dependencies filters offer the new relationships.
 - **Read-only MCP server for coding agents** ([#18](https://github.com/phillipecardenuto/repo-understanding/issues/18)).
   - `repoviz mcp` speaks the Model Context Protocol over stdio (JSON-RPC 2.0,
     standard library only).
@@ -150,6 +170,10 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Fixed
 
+- Command targets: `gunicorn -b 0.0.0.0:8000 app.wsgi:application` resolved the
+  bind address instead of `app.wsgi:application`; quoted specs
+  (`gunicorn "app:create_app()"`) and dotted modules without a callable are
+  now recognised too.
 - A renamed nested function no longer reports `renamed-symbol-stale-references`
   for unrelated uses of its old name in other functions or modules: only its
   enclosing function is searched.
