@@ -47,7 +47,7 @@ from .render.html import (
     flow_node_ids,
     render_live_html,
 )
-from .repo import Repository, RepositoryError
+from .repo import HISTORY, Repository, RepositoryError
 
 log = logging.getLogger("repoviz.server")
 
@@ -141,7 +141,7 @@ class AppState:
     def diff(self, query: dict[str, str]) -> bytes:
         mode = query.get("mode") or None
         base, target, spec = query.get("base") or None, query.get("target") or None, query.get("spec") or None
-        if mode and mode not in ("all", "working", "staged", "unstaged", "session", "merge-base"):
+        if mode and mode not in ("all", "working", "staged", "unstaged", "session", "merge-base", *HISTORY):
             raise ApiError(400, f"unknown comparison mode {mode!r}")
         try:
             comp, diff = self.repo.compare(base, target, mode=mode, spec=spec)
@@ -155,6 +155,21 @@ class AppState:
                 self._diff_bodies.put(id(diff), hit)
         return _splice({"id": "live", "label": comp.label, "mode": comp.mode, "base": comp.base, "target": comp.target,
                         "base_label": comp.base_label, "target_label": comp.target_label}, hit[1])
+
+    def comparisons(self) -> dict[str, Any]:
+        """The Changes tab's picker: each comparison with how many files it touches (from Git, cheap), so the tab
+        can open on one that shows something (a clean checkout: this branch, the last merge or the last commit)."""
+        out = []
+        for mode, group in (("all", "Uncommitted"), ("staged", "Uncommitted"), ("unstaged", "Uncommitted"),
+                            ("session", "Uncommitted")):
+            if mode == "session" and self.repo.current_session() is None:
+                continue
+            comp = self.repo.resolve_comparison(mode=mode)
+            out.append({"mode": mode, "group": group, "label": comp.label, "files": self.repo.changed_file_count(comp)})
+        for comp in self.repo.history_comparisons():
+            out.append({"mode": comp.mode, "group": "History", "label": comp.label,
+                        "files": self.repo.changed_file_count(comp)})
+        return {"comparisons": out, "clean": not any(c["files"] for c in out if c["group"] == "Uncommitted")}
 
     def snapshot(self, query: dict[str, str]) -> dict[str, Any]:
         try:
@@ -403,6 +418,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.notes(self._query()))
                 elif path == "/api/file/changes":
                     self._json(200, state.file_changes(self._query()))
+                elif path == "/api/comparisons":
+                    self._json(200, state.comparisons())
                 elif path == "/api/path":
                     self._json(200, state.why(self._query()))
                 elif path == "/api/impact":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -37,6 +38,20 @@ PRESETS: dict[str, tuple[str, str, str]] = {
 }
 
 
+#: Comparisons over committed history, resolved against the repository when asked for; ``since:<tag or date>``
+#: is the fourth kind.  They give a clean checkout something to show.
+HISTORY = {
+    "last-commit": "Last commit",
+    "last-merge": "Last merge",
+    "branch": "This branch since it left the default branch",
+}
+
+
+#: What ``since:`` accepts as a date: ISO dates (and times), "N days/weeks/… ago" and "yesterday".
+DATE_LIKE = re.compile(r"^(\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?|\d+ (second|minute|hour|day|week|month|year)s? ago"
+                       r"|yesterday)$", re.IGNORECASE)
+
+
 class RepositoryError(RuntimeError):
     pass
 
@@ -61,6 +76,10 @@ def parse_comparison(text: str) -> tuple[str, str, str]:
     text = text.strip()
     if text.lower() in PRESETS:
         return PRESETS[text.lower()][0], PRESETS[text.lower()][1], text.lower()
+    if text.lower() in HISTORY:
+        return "", "HEAD", text.lower()
+    if text.lower().startswith("since:"):
+        return text[len("since:"):].strip(), "HEAD", "since"
     if "..." in text:
         a, _, b = text.partition("...")
         return f"merge-base:{a or 'HEAD'}:{b or 'WORKTREE'}", b or "WORKTREE", "merge-base"
@@ -289,6 +308,10 @@ class Repository:
                            spec: str | None = None) -> Comparison:
         if spec:
             base, target, mode = parse_comparison(spec)
+            if mode in HISTORY or mode == "since":
+                return self._history_comparison(mode, base)
+        elif mode in HISTORY or mode == "since":
+            return self._history_comparison(mode, base)
         elif mode and mode in PRESETS:
             base, target = PRESETS[mode][0], PRESETS[mode][1]
         elif mode == "merge-base":
@@ -300,6 +323,97 @@ class Repository:
         target_src_label = self._label(target)
         label = PRESETS[mode][2] if mode in PRESETS else f"{base_src_label} → {target_src_label}"
         return Comparison(base, target, label, base_src_label, target_src_label, mode or "custom")
+
+    def _history_comparison(self, mode: str, arg: str | None = None) -> Comparison:
+        """``last-commit`` (HEAD~1..HEAD), ``last-merge`` (the latest merge on HEAD, from its first parent),
+        ``branch`` (merge base with the default branch → HEAD) and ``since`` (a tag, branch, commit or date →
+        HEAD).  Both ends are commits, so the answer does not move with the working tree."""
+        if self.git is None or self.git.head() is None:
+            raise RepositoryError(f"{mode} needs a Git repository with commits")
+        head = self.git.head() or "HEAD"
+        subject = lambda sha: (self.git.try_run("log", "-1", "--format=%s", sha) or "").strip()[:80]  # noqa: E731
+        if mode == "last-commit":
+            parent = self.git.try_run("rev-parse", "--verify", "--quiet", f"{head}^1^{{commit}}")
+            base = parent.strip() if parent else "EMPTY"
+            return Comparison(base, head, f"Last commit: {subject(head)}", "HEAD~1" if parent else "empty tree",
+                              f"HEAD ({head[:10]})", "last-commit")
+        if mode == "last-merge":
+            out = (self.git.try_run("log", "--merges", "-1", "--format=%H", head) or "").strip()
+            if not out:
+                raise RepositoryError("no merge commit in HEAD's history")
+            base = self.git.resolve(f"{out}^1")
+            return Comparison(base, out, f"Last merge: {subject(out)}", f"{out[:10]}^1 (before the merge)",
+                              f"merge {out[:10]}", "last-merge")
+        if mode == "branch":
+            default, branch = self.git_info().get("default_branch"), self.git.branch()
+            if not default or not branch or default == branch or default.split("/")[-1] == branch:
+                raise RepositoryError("not on a feature branch (HEAD is the default branch, or it is detached)")
+            try:
+                base = self.git.merge_base(default, head)
+            except RevisionError as exc:
+                raise RepositoryError(str(exc)) from exc
+            return Comparison(base, head, f"Branch {branch} since it left {default}",
+                              f"merge base of {default} and {branch} ({base[:10]})", f"{branch} ({head[:10]})", "branch")
+        ref = (arg or "").strip()
+        if not ref:
+            raise RepositoryError("since: needs a tag, branch, commit or date (since:v1.0, since:2024-06-01)")
+        try:
+            base = self.git.resolve(ref)
+        except RevisionError:  # not a revision: a date (the last commit before it on the first-parent line)
+            if not DATE_LIKE.match(ref):  # Git reads any text as a date ("now"): accept real dates only
+                raise RepositoryError(f"{ref!r} is neither a revision nor a date (2024-06-01, '2 weeks ago')") from None
+            out = self.git.try_run("rev-list", "-1", "--first-parent", f"--before={ref}", head)
+            if not out or not out.strip():
+                raise RepositoryError(f"{ref!r} is neither a revision nor a date with commits before it") from None
+            base = out.strip()
+        return Comparison(base, head, f"Since {ref}", f"{ref} ({base[:10]})", f"HEAD ({head[:10]})", "since")
+
+    def changed_file_count(self, comp: Comparison) -> int | None:
+        """How many files a comparison touches, from Git alone (cheap: for labels and the default choice);
+        ``None`` when that needs an analysis (sessions)."""
+        if self.git is None or comp.mode == "session" or "SESSION" in (comp.base, comp.target):
+            return None
+        try:
+            if comp.target in ("WORKTREE", "INDEX", "WORKTREE-TRACKED"):
+                status = [e for e in self.git.status()]
+                if comp.mode == "staged":
+                    return sum(1 for e in status if e.staged)
+                if comp.mode == "unstaged":
+                    return sum(1 for e in status if e.kind != "untracked" and e.unstaged)
+                if comp.base in ("HEAD", "WORKTREE"):
+                    return len(status)
+                base = self.open_source(comp.base)
+                sha = getattr(base, "commit", None) or getattr(base, "sha", None)
+                if not sha:
+                    return None
+                return len(self.git.changed_paths(sha)) + sum(1 for e in status if e.kind == "untracked")
+            base_sha = None if comp.base == "EMPTY" else self.git.resolve(comp.base) if not comp.base.startswith(
+                "merge-base:") else self.git.merge_base(*comp.base.split(":", 2)[1:])
+            target_sha = self.git.resolve(comp.target)
+            if base_sha is None:
+                out = self.git.try_run("ls-tree", "-r", "--name-only", target_sha) or ""
+                return len([x for x in out.splitlines() if x])
+            return len(self.git.changed_paths(base_sha, target_sha))
+        except (GitError, RevisionError, RepositoryError):
+            return None
+
+    def history_comparisons(self) -> list[Comparison]:
+        """The history comparisons that exist here, in the order a clean checkout tries them: this branch, the
+        last merge, the last commit.  One range is listed once: a merge that is the last commit as the last
+        commit, a one-commit branch as the branch."""
+        found: dict[str, Comparison] = {}
+        for mode in ("branch", "last-merge", "last-commit"):
+            try:
+                found[mode] = self._history_comparison(mode)
+            except (RepositoryError, GitError, RevisionError):
+                continue
+        same = lambda a, b: a in found and b in found and (found[a].base, found[a].target) == (  # noqa: E731
+            found[b].base, found[b].target)
+        if same("last-merge", "last-commit"):
+            del found["last-merge"]
+        if same("branch", "last-commit"):
+            del found["last-commit"]
+        return list(found.values())
 
     @staticmethod
     def _label(spec: str) -> str:
@@ -390,6 +504,9 @@ class Repository:
                 pass
         if self.current_session() is not None:
             comps.append(self.resolve_comparison(mode="session"))
+        # committed history, so a report of a clean checkout still shows something (#31)
+        order = {"branch": 0, "last-commit": 1, "last-merge": 2}
+        comps += sorted(self.history_comparisons(), key=lambda c: order.get(c.mode, 3))
         return comps
 
     def close(self) -> None:

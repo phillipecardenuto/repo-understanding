@@ -63,7 +63,8 @@ def test_all_comparison_modes(shop_repo) -> None:
     all_mods, all_syms = added_modules(mode="all")
     assert all_mods == {"shop.api.staged", "shop.api.untracked"} and all_syms == {"shop.cli.extra": "added"}
     comps = r.default_comparisons()
-    assert [c.mode for c in comps] == ["all", "staged", "unstaged", "merge-base"]
+    # the branch's committed work too (#31); its one commit is also the last commit, listed once
+    assert [c.mode for c in comps] == ["all", "staged", "unstaged", "merge-base", "branch"]
 
 
 def test_diff_detects_dependency_changes_and_cycles(shop_repo) -> None:
@@ -360,3 +361,81 @@ def test_large_blobs_are_never_read(make_repo, monkeypatch) -> None:
     c = fc.file_changes(Repository(repo.path), "data.txt")
     assert c["omitted"] == "file too large" and reads == []  # sizes are checked first
     assert not c["uncommitted"]  # two large versions of the same size are not taken for an edit
+
+
+# --------------------------------------------------------------------------- History comparisons (#31)
+
+def merge_history_repo(make_repo):
+    """main: 2 commits; feature: 1 commit merged back with --no-ff; then feature2 with one more commit."""
+    repo = make_repo({"app/__init__.py": "", "app/core.py": "X = 1\n"})
+    repo.git("tag", "v0.1.0")
+    repo.write({"app/api.py": "from app import core\n\n\ndef get():\n    return core.X\n"})
+    repo.commit("add the api")
+    repo.git("checkout", "-q", "-b", "feature")
+    repo.write({"app/jobs.py": "from app import api\n", "app/more.py": "Y = 2\n"})
+    repo.commit("jobs")
+    repo.git("checkout", "-q", "main")
+    repo.git("merge", "-q", "--no-ff", "-m", "Merge feature", "feature")
+    return repo
+
+
+def test_history_presets(make_repo, capsys) -> None:
+    from repoviz.cli import main
+
+    repo = merge_history_repo(make_repo)
+    r = Repository(repo.path)
+    last = r.resolve_comparison(mode="last-commit")
+    assert last.mode == "last-commit" and last.label == "Last commit: Merge feature"
+    assert r.changed_file_count(last) == 2  # the merge brought jobs.py and more.py
+    merge = r.resolve_comparison(spec="last-merge")
+    assert merge.label == "Last merge: Merge feature" and merge.base == repo.git("rev-parse", "HEAD^1").strip()
+    _comp, diff = r.compare(mode="last-merge")
+    assert {c.node.path for c in diff.nodes.values() if c.status == "added" and c.node.category == "module"} == \
+        {"app/jobs.py", "app/more.py"}
+    since = r.resolve_comparison(spec="since:v0.1.0")
+    assert since.mode == "since" and since.base == repo.git("rev-parse", "v0.1.0^{commit}").strip()
+    assert r.changed_file_count(since) == 3
+    import datetime
+
+    soon = (datetime.date.today() + datetime.timedelta(days=2)).isoformat()
+    dated = r.resolve_comparison(spec=f"since:{soon}")  # a date: the last commit before it
+    assert dated.base == repo.git("rev-parse", "HEAD").strip() and r.changed_file_count(dated) == 0
+    try:
+        r.resolve_comparison(mode="branch")
+        raise AssertionError("main is not a feature branch")
+    except Exception as exc:
+        assert "not on a feature branch" in str(exc)
+    assert main(["diff", "-C", repo.path, "--mode", "last-merge"]) == 0
+    assert "[Last merge: Merge feature]" in capsys.readouterr().out
+    assert main(["diff", "-C", repo.path, "since:v0.1.0"]) == 0
+    assert "Since v0.1.0" in capsys.readouterr().out
+    assert main(["diff", "-C", repo.path, "since:no-such-thing"]) != 0
+
+
+def test_branch_preset_and_first_commit(make_repo) -> None:
+    repo = merge_history_repo(make_repo)
+    repo.git("checkout", "-q", "-b", "feature2")
+    repo.write({"app/extra.py": "Z = 3\n"})
+    repo.commit("extra")
+    r = Repository(repo.path)
+    branch = r.resolve_comparison(mode="branch")
+    assert branch.label == "Branch feature2 since it left main" and r.changed_file_count(branch) == 1
+    # the branch's one commit is the last commit: listed once, as the branch
+    assert [c.mode for c in r.history_comparisons()] == ["branch", "last-merge"]
+    first = make_repo({"a.py": "x = 1\n"})
+    only = Repository(first.path).resolve_comparison(mode="last-commit")
+    assert only.base == "EMPTY" and Repository(first.path).changed_file_count(only) == 1
+    assert Repository(first.path).history_comparisons()[0].mode == "last-commit"  # no merge, no branch
+
+
+def test_reports_carry_history_comparisons(make_repo) -> None:
+    from repoviz.render.html import build_bundle
+
+    repo = merge_history_repo(make_repo)
+    comps = build_bundle(Repository(repo.path), include_activity=False)["comparisons"]
+    by_mode = {c["mode"]: c for c in comps}
+    assert by_mode["all"]["files"] == 0  # a clean checkout
+    # the last commit is the last merge: listed once, as the last commit
+    assert by_mode["last-commit"]["files"] == 2 and by_mode["last-commit"]["label"] == "Last commit: Merge feature"
+    assert "last-merge" not in by_mode
+    assert by_mode["last-commit"]["diff"]["summary"]["nodes"]["added"] > 0

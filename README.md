@@ -64,7 +64,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz review [TARGET] [--format text\|markdown\|prompt\|json\|sarif\|github\|pr-comment] [--fail-on …] [--commit SHA] [--by-commit] [--from-report FILE]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. `sarif`, `github` (inline annotations) and `pr-comment` are for CI; `--from-report` re-renders a saved JSON report without analysing again. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
-| `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
+| `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). History presets: `last-commit`, `last-merge`, `branch` (since it left the default branch) and `since:<tag or date>` (`since:v0.1.0`, `since:2024-06-01`). |
 | `repoviz why A B [--json]` | Why A depends on B: up to 5 shortest import (or call) chains, each hop with file:line and code; the reverse direction when A does not depend on B. |
 | `repoviz impact X [--depth N] [--json]` | Blast radius: what uses X, transitively, by distance and fan-in, with the entry points and tests it reaches. |
 | `repoviz mermaid --view changes\|dependencies\|structure\|flow\|system` | Print Mermaid text (paste into docs or PRs). `system` draws the services from the Compose files. `--direction auto\|LR\|TB` sets the orientation (auto: from the diagram's shape); `--fold N` folds long lists of leaves in the structure view. |
@@ -146,6 +146,13 @@ The changed-nodes list puts the most relevant first:
 3. dependency changes;
 4. body changes;
 5. formatting-only.
+
+Each comparison in the picker says how many files it touches. The picker
+groups them as *Uncommitted*, *History* and *Custom*. On a clean checkout the
+tab opens on this branch, the last merge or the last commit (the first that has
+changes), with a note. The history comparisons are `last-commit`, `last-merge`,
+`branch` and `since:<tag or date>`. Reports include the last commit and this
+branch.
 
 Folders listed only because something inside changed are hidden behind **show
 folder rollups (N)**. As in AI Review, you can search it (`/`), filter it with

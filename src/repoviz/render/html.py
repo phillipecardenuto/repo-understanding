@@ -183,7 +183,7 @@ def comparison_payload(repo: Repository, comp: Comparison, index: int = 0, compa
     target = repo.snapshot(comp.target, comp.target_label)
     diff = repo.diff(base, target)
     return {"id": f"c{index}", "label": comp.label, "mode": comp.mode, "base": comp.base, "target": comp.target,
-            "base_label": comp.base_label, "target_label": comp.target_label,
+            "base_label": comp.base_label, "target_label": comp.target_label, "files": repo.changed_file_count(comp),
             "diff": compact_diff_of(diff, keep) if compact else diff.to_dict(),
             "_revisions": (base.revision_id, target.revision_id)}
 

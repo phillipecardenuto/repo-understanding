@@ -88,7 +88,7 @@ Labels:
 | [#28](https://github.com/phillipecardenuto/repo-understanding/issues/28) | "Why does A depend on B?" path finder and blast radius on click · **✓ done** | P2 | M |
 | [#29](https://github.com/phillipecardenuto/repo-understanding/issues/29) | Lists that scale: grouping, relevance sort, filter and search · **✓ done** | P2 | M |
 | [#30](https://github.com/phillipecardenuto/repo-understanding/issues/30) | Health metrics and hotspot overlays (complexity × churn, fan-in/out, ownership) | P2 | M |
-| [#31](https://github.com/phillipecardenuto/repo-understanding/issues/31) | History-based comparisons for clean checkouts on the Changes tab | P2 | S |
+| [#31](https://github.com/phillipecardenuto/repo-understanding/issues/31) | History-based comparisons for clean checkouts on the Changes tab · **✓ done** | P2 | S |
 | [#32](https://github.com/phillipecardenuto/repo-understanding/issues/32) | Architecture over time: a drift timeline across tags, releases or waves | P3 | M |
 | [#33](https://github.com/phillipecardenuto/repo-understanding/issues/33) | Moved-code detection and word-level highlights in diffs | P3 | M |
 | [#36](https://github.com/phillipecardenuto/repo-understanding/issues/36) | Inspect the code changes of churn hotspots in the Structure tab (maintainer's issue) · **✓ done** | P1 | M |
@@ -115,8 +115,8 @@ Labels:
 3. **Multi-service systems:** #22 (compose system view), #21 (submodules as
    sub-projects), #23 (runtime edges) and #24 (Dependencies defaults, header
    counts), all done.
-4. **UI at scale:** #27 (diagram readability), #29 (lists) and #28 (why and
-   blast radius), done; then #31.
+4. **UI at scale:** #27 (diagram readability), #29 (lists), #28 (why and blast
+   radius) and #31 (history comparisons), all done.
 5. **Anytime:** #34 (the cache makes #6, #32 and #10 cheaper), #14, #25 and #11.
 
 ## Dependencies between items

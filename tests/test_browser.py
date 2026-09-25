@@ -836,9 +836,9 @@ def test_orientation_from_shape_and_readable_fit(page, make_repo, tmp_path: Path
     assert page.evaluate(LABEL_PX, "structure") * page.evaluate(SCALE, "structure") >= 11 - 0.01
     # The toggle overrides the choice (auto → LR → TB → auto), and the choice is remembered per view.
     button.click()
-    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=30_000)
     toggle = page.locator("#tab-structure .diagram-head button[title^='Layout']")
-    assert toggle.inner_text() == "⇄"
+    page.wait_for_function("() => document.querySelector(\"#tab-structure .diagram-head button[title^='Layout']\").textContent === '⇄'", timeout=30_000)
+    assert page.evaluate("localStorage.getItem('rv.orient.structure')") == '"LR"'
     toggle.click()
     page.wait_for_function("() => repoviz.app.tabs.structure.diagram.view.direction === 'TB'", timeout=30_000)
     assert toggle.inner_text() == "⇅" and page.evaluate("localStorage.getItem('rv.orient.structure')") == '"TB"'
@@ -1164,6 +1164,60 @@ def test_why_and_blast_in_the_live_app(page, make_repo) -> None:
         page.wait_for_function("() => document.querySelector('#tab-dependencies .split > .card').textContent.includes('services.orders imports db.models')", timeout=10_000)
         page.evaluate("(id) => repoviz.app.tabs.dependencies.showBlast(id)", page.evaluate(NODE_NAMED, "db.models.query"))
         page.wait_for_function("() => document.querySelector('#tab-dependencies .blast-note') && document.querySelector('#tab-dependencies .blast-note').textContent.includes('1 entry point, 1 test')", timeout=10_000)
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# --------------------------------------------------------------------------- History comparisons (#31)
+
+def test_changes_opens_on_history_when_the_checkout_is_clean(page, make_repo, tmp_path: Path) -> None:
+    from test_changes_activity import merge_history_repo
+
+    repo = merge_history_repo(make_repo)
+    report = tmp_path / "clean.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=changes")
+    page.wait_for_function(ALL_RENDERED, arg="changes", timeout=60_000)
+    note = page.locator("#tab-changes .clean-note")
+    assert note.is_visible() and "Working tree is clean, showing the last commit instead" in note.inner_text()
+    assert page.locator("#tab-changes g.node").count() > 0  # not an empty diagram
+    groups = page.evaluate("[...document.querySelectorAll('#tab-changes select optgroup')].map(g => [g.label, [...g.children].map(o => o.textContent)])")
+    assert groups[0][0] == "Uncommitted" and groups[0][1][0].endswith("(no changes)")
+    assert groups[1] == ["History", ["Last commit: Merge feature (2 files)"]]
+    note.locator("a").click()  # "Choose another comparison" focuses the picker
+    assert page.evaluate("document.activeElement.tagName") == "SELECT"
+    # with uncommitted work, the tab opens on it, as before
+    repo.write({"app/core.py": "X = 2\n"})
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.reload()
+    page.wait_for_function(ALL_RENDERED, arg="changes", timeout=60_000)
+    assert page.locator("#tab-changes .clean-note").is_hidden()
+    assert page.evaluate("document.querySelector('#tab-changes select').selectedOptions[0].textContent").startswith("HEAD vs working tree")
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_live_changes_offers_history_with_sizes(page, make_repo) -> None:
+    from test_changes_activity import merge_history_repo
+
+    repo = merge_history_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=changes")
+        page.wait_for_function(ALL_RENDERED, arg="changes", timeout=60_000)
+        # the last commit is the merge: offered once, as the last commit
+        assert "showing the last commit instead" in page.locator("#tab-changes .clean-note").inner_text()
+        assert page.evaluate("document.querySelector('#tab-changes select').value") == "last-commit"
+        texts = page.evaluate("[...document.querySelectorAll('#tab-changes select option')].map(o => o.textContent)")
+        assert "Last commit: Merge feature (2 files)" in texts and "Since a tag or date…" in texts
+        assert not any(t.startswith("Last merge") for t in texts)
+        page.select_option("#tab-changes select >> nth=0", "since")
+        page.fill("#tab-changes input[aria-label^='Since']", "v0.1.0")
+        page.click("#tab-changes button:has-text('Compare')")
+        page.wait_for_function("() => document.querySelector('#tab-changes .toolbar .muted').textContent.startsWith('v0.1.0')", timeout=30_000)
+        assert page.locator("#tab-changes g.node").count() > 0
         assert page.errors == []  # type: ignore[attr-defined]
     finally:
         srv.shutdown()

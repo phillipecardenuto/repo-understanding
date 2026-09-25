@@ -6,6 +6,23 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **History comparisons, so a clean checkout is never an empty Changes tab** ([#31](https://github.com/phillipecardenuto/repo-understanding/issues/31)).
+  - **New presets:**
+    - `last-commit` (HEAD~1 → HEAD);
+    - `last-merge` (the latest merge on HEAD, from its first parent);
+    - `branch` (since it left the default branch, committed work only);
+    - `since:<tag or date>` (`since:v0.1.0`, `since:2024-06-01`,
+      `since:2 weeks ago`).
+
+    Available in `repoviz diff`, the API and the Changes tab.
+  - **Picker.** Grouped as *Uncommitted*, *History* and *Custom*, and each
+    option says how many files it touches (counted by Git, cheaply).
+  - **Clean checkout.** The tab opens on this branch, the last merge or the
+    last commit (the first with changes) and shows a note. With uncommitted
+    work it opens on that, as before. A comparison you pick is remembered;
+    an automatic one is not.
+  - **Static reports** include the last commit (and the last merge when it
+    differs), so they are never empty.
 - **Why does A depend on B? And what breaks if X changes?** ([#28](https://github.com/phillipecardenuto/repo-understanding/issues/28)).
   - **`repoviz why A B`.**
     - Prints up to 5 shortest import chains between two components,

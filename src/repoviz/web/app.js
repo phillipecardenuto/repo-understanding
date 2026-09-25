@@ -120,6 +120,7 @@
     why(si, a, b) { return this.get("/api/path?" + new URLSearchParams({ from: a, to: b }).toString()); }
     impact(si, id) { return this.get("/api/impact?" + new URLSearchParams({ node: id, max_items: "200" }).toString()); }
     comparison(params) { return this.get("/api/diff?" + new URLSearchParams(params).toString()); }
+    comparisons() { return this.get("/api/comparisons"); }
     activity() { return this.get("/api/activity", true); }
     snapshot(rev) { return this.get("/api/snapshot?" + new URLSearchParams({ rev }).toString()); }
     sessionStart(label) { return this.post("/api/session/start", { label }); }
@@ -1521,6 +1522,35 @@
     for (const [v, text] of options) s.appendChild(h("option", { value: v, selected: v === value }, text));
     return s;
   }
+  /* A select with option groups: [[groupLabel, [[value, text], …]], …] (empty groups are left out). */
+  function groupedSelect(groups, value, onchange) {
+    const s = h("select", { onchange: () => onchange(s.value) });
+    for (const [label, options] of groups) {
+      if (!options.length) continue;
+      const g = h("optgroup", { label });
+      for (const [v, text] of options) g.appendChild(h("option", { value: v, selected: v === value }, text));
+      s.appendChild(g);
+    }
+    return s;
+  }
+  const filesText = (n) => (n === null || n === undefined ? "" : n === 0 ? " (no changes)" : ` (${plural(n, "file")})`);
+  const HISTORY_ORDER = ["branch", "last-merge", "last-commit"];
+  const HISTORY_WORD = { branch: "this branch", "last-merge": "the last merge", "last-commit": "the last commit" };
+  const COMPARISON_GROUP = (mode) => (["all", "staged", "unstaged", "session"].includes(mode) ? "Uncommitted" : mode in HISTORY_WORD || mode === "since" ? "History" : "Custom");
+  /* The comparison a tab opens on: the stored one unless it is known to be empty; else the session, the uncommitted
+     changes, then (a clean checkout) this branch, the last merge or the last commit.  Returns [choice, fellBack]. */
+  function pickComparison(options, stored, session) {
+    const byKey = new Map(options.map((c) => [c.key, c]));
+    const empty = (c) => c && c.files === 0;
+    if (stored && byKey.has(stored) && !empty(byKey.get(stored))) return [stored, false];
+    if (["custom", "merge-base", "since"].includes(stored)) return [stored, false];  // typed in by the user
+    const session_ = options.find((c) => c.mode === "session");
+    if (session && session_) return [session_.key, false];
+    const all = options.find((c) => c.mode === "all");
+    if (all && !empty(all)) return [all.key, false];
+    for (const m of HISTORY_ORDER) { const c = options.find((x) => x.mode === m && x.files); if (c) return [c.key, true]; }
+    return [(all || options[0] || {}).key || stored, false];
+  }
   /* A diff: line numbers, an explicit + / − marker on every changed line (never colour alone), code.
      `row(tr, line)` may decorate each line's row and return extra rows to insert after it (the review's notes);
      line = { t: "+" | "-" | " ", text, oldNo, newNo }. */
@@ -1888,25 +1918,44 @@
       this.listsEl = h("div");
       this.statusEl = h("span", { class: "muted" });
       const bar = h("div", { class: "toolbar" });
+      this.cleanNote = h("div", { class: "notice clean-note", role: "status", hidden: true });
       if (app.api.live) {
         const rev = app.bundle.revisions || {};
         const dl = h("datalist", { id: "rv-revs" }, ["WORKTREE", "INDEX", "HEAD", "SESSION", ...(rev.branches || []), ...(rev.tags || []), ...(rev.remote_branches || []), ...(rev.commits || []).map((c) => c.short)].map((v) => h("option", { value: v })));
         const baseIn = h("input", { value: o.base, list: "rv-revs", size: 14, "aria-label": "Base revision" });
         const targetIn = h("input", { value: o.target, list: "rv-revs", size: 14, "aria-label": "Target revision" });
         const mbIn = h("input", { value: o.mbRef || rev.default_branch || "", list: "rv-revs", size: 14, "aria-label": "Merge-base reference" });
+        const sinceIn = h("input", { value: o.since || (rev.tags || [])[0] || "", list: "rv-revs", size: 14, placeholder: "tag or date", "aria-label": "Since (tag, branch, commit or date)" });
         const custom = h("span", { class: "group" }, field("Base", baseIn), field("Target", targetIn));
         const mb = h("span", { class: "group" }, field("Merge base with", mbIn));
-        const presets = [["all", "HEAD vs working tree (staged + unstaged + untracked)"], ["staged", "Staged changes only"], ["unstaged", "Unstaged changes only"],
-          ["session", "Current work session"], ["merge-base", "Merge base vs working tree"], ["custom", "Custom: revision vs revision…"]];
-        const sync = () => { custom.hidden = o.mode !== "custom"; mb.hidden = o.mode !== "merge-base"; };
-        put(bar, field("Comparison", select(presets, o.mode, (v) => { o.mode = v; sync(); if (v !== "custom" && v !== "merge-base") this.load(); })), custom, mb,
-          h("button", { class: "btn primary", onclick: () => { o.base = baseIn.value.trim() || "HEAD"; o.target = targetIn.value.trim() || "WORKTREE"; o.mbRef = mbIn.value.trim(); this.load(); } }, "Compare"), dl);
+        const since = h("span", { class: "group" }, field("Since", sinceIn));
+        // Sizes (files touched, from Git) label the options and pick the default: never an empty comparison.
+        let sizes = { comparisons: [] };
+        try { sizes = await app.api.comparisons(); } catch (err) { /* older server: no sizes */ }
+        const known = new Map((sizes.comparisons || []).map((c) => [c.mode, c]));
+        const base = [["all", "HEAD vs working tree (staged + unstaged + untracked)"], ["staged", "Staged changes only"], ["unstaged", "Unstaged changes only"], ["session", "Current work session"]];
+        const text = (m, t) => (known.has(m) ? (known.get(m).label || t) + filesText(known.get(m).files) : t);
+        const groups = [
+          ["Uncommitted", base.filter(([m]) => m !== "session" || app.bundle.session).map(([m, t]) => [m, text(m, t)])],
+          ["History", [...HISTORY_ORDER.filter((m) => known.has(m)).map((m) => [m, text(m, m)]), ["since", "Since a tag or date…"]]],
+          ["Custom", [["merge-base", "Merge base vs working tree"], ["custom", "Custom: revision vs revision…"]]]];
+        // a comparison the user picked is remembered; an automatic choice is made again on every visit
+        const [choice, fellBack] = pickComparison([...known.values()].map((c) => Object.assign({ key: c.mode }, c)), o.modePicked ? o.mode : null, !!app.bundle.session);
+        o.mode = choice || o.mode;
+        this.picker = groupedSelect(groups, o.mode, (v) => { o.mode = v; o.modePicked = true; this.cleanNote.hidden = true; sync(); if (!["custom", "merge-base", "since"].includes(v)) this.load(); });
+        const sync = () => { custom.hidden = o.mode !== "custom"; mb.hidden = o.mode !== "merge-base"; since.hidden = o.mode !== "since"; };
+        put(bar, field("Comparison", this.picker), custom, mb, since,
+          h("button", { class: "btn primary", onclick: () => { o.base = baseIn.value.trim() || "HEAD"; o.target = targetIn.value.trim() || "WORKTREE"; o.mbRef = mbIn.value.trim(); o.since = sinceIn.value.trim(); o.modePicked = true; this.load(); } }, "Compare"), dl);
         sync();
+        if (fellBack) this.showCleanNote(o.mode);
       } else {
         const comps = app.bundle.comparisons || [];
-        // Default to the active work session: that is what the agent changed.
-        if (!comps.some((c) => c.id === o.comparison)) o.comparison = (comps.find((c) => c.mode === "session") || comps[0] || {}).id || null;
-        put(bar, field("Comparison (precomputed)", select(comps.map((c) => [c.id, c.label]), o.comparison, (v) => { o.comparison = v; this.load(); })));
+        const [choice, fellBack] = pickComparison(comps.map((c) => Object.assign({ key: c.id }, c)), o.comparisonPicked ? o.comparison : null, !!app.bundle.session);
+        o.comparison = choice || null;
+        const groups = ["Uncommitted", "History", "Custom"].map((g) => [g, comps.filter((c) => COMPARISON_GROUP(c.mode) === g).map((c) => [c.id, c.label + filesText(c.files)])]);
+        this.picker = groupedSelect(groups, o.comparison, (v) => { o.comparison = v; o.comparisonPicked = true; this.cleanNote.hidden = true; this.load(); });
+        put(bar, field("Comparison (precomputed)", this.picker));
+        if (fellBack) this.showCleanNote((comps.find((c) => c.id === o.comparison) || {}).mode);
       }
       const redraw = () => { this.save(); this.draw(); };
       put(bar, 
@@ -1920,8 +1969,15 @@
           checkbox("hide formatting-only", o.hideCosmetic, (c) => { o.hideCosmetic = c; redraw(); }),
           checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
         this.statusEl);
-      put(this.root, bar, this.statsEl, h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el), this.listsEl);
+      put(this.root, bar, this.cleanNote, this.statsEl, h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el), this.listsEl);
       await this.load();
+    }
+    /* A clean checkout opens on history instead of an empty comparison, and says so. */
+    showCleanNote(mode) {
+      this.cleanNote.innerHTML = "";
+      put(this.cleanNote, iconEl("check"), ` Working tree is clean, showing ${HISTORY_WORD[mode] || "history"} instead · `,
+        h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); this.picker.focus(); } }, "Choose another comparison"));
+      this.cleanNote.hidden = false;
     }
     async load() {
       this.save();
@@ -1930,7 +1986,8 @@
       try {
         let comp;
         if (app.api.live) {
-          const params = o.mode === "custom" ? { base: o.base, target: o.target } : o.mode === "merge-base" ? { mode: "merge-base", base: o.mbRef } : { mode: o.mode };
+          const params = o.mode === "custom" ? { base: o.base, target: o.target } : o.mode === "merge-base" ? { mode: "merge-base", base: o.mbRef }
+            : o.mode === "since" ? { spec: "since:" + (o.since || "") } : { mode: o.mode };
           comp = await app.api.comparison(params);
         } else comp = await app.api.comparison(o.comparison);
         this.comp = comp;
@@ -3813,8 +3870,11 @@
         { h: "Choose the comparison" },
         { kv: [["HEAD vs working tree", "everything not committed yet (staged, unstaged and untracked)"], ["Staged / unstaged", "only what is in the index, or only what is not"],
           ["Current work session", "everything since the session started, including commits: the default when a session is active"],
-          ["Branch changes (merge base)", "what a branch changed since it left the default branch, like a pull request"], ["Custom", "any two revisions, e.g. `v1.2` → `HEAD`"]] },
-        { p: "Static reports offer the comparisons precomputed when the report was generated; the live app computes any of them on demand." },
+          ["Branch changes (merge base)", "what a branch changed since it left the default branch, like a pull request"],
+          ["History: this branch, last merge, last commit", "committed work only: the branch since it left the default branch, the latest merge (from its first parent), or `HEAD~1` → `HEAD`"],
+          ["Since a tag or date", "`v0.1.0`, `2024-06-01` or `2 weeks ago` → `HEAD` (live app)"], ["Custom", "any two revisions, e.g. `v1.2` → `HEAD`"]] },
+        { p: "Each option says how many files it touches. On a **clean checkout** the tab opens on this branch, the last merge or the last commit (the first that has changes) and says so; a comparison you pick yourself is remembered." },
+        { p: "Static reports offer the comparisons precomputed when the report was generated (including the last commit and this branch); the live app computes any of them on demand." },
         { h: "Make the diagram readable" },
         { ul: ["**Level**: *Auto* picks components, packages, modules or symbols for a readable size. Go down a level to see detail.",
           "**Show**: *Changed only* is the tightest view. *Changed + neighbours* adds the direct context. *Everything* is for small graphs.",

@@ -278,10 +278,11 @@ Server endpoints:
 | Endpoint | Description |
 |---|---|
 | `GET /api/bundle` | profile, revisions, working-tree snapshot, theme |
-| `GET /api/diff?mode=all\|staged\|unstaged\|session\|merge-base&base=&target=&spec=` | a comparison |
+| `GET /api/diff?mode=all\|staged\|unstaged\|session\|merge-base\|last-commit\|last-merge\|branch&base=&target=&spec=` | a comparison (`spec=since:v1.0` for a tag or date) |
 | `GET /api/snapshot?rev=` | any snapshot |
 | `GET /api/activity` | activity report with diff and affected flow |
 | `GET /api/revisions`, `/api/profile`, `/api/health` | metadata |
+| `GET /api/comparisons` | the Changes tab's picker: each comparison (uncommitted and history) with how many files it touches, from Git alone, and whether the working tree is clean |
 | `GET /api/path?from=&to=[&rev=]` | why one node depends on another (`query.why`): shortest import or call chains with evidence; names, paths or node IDs |
 | `GET /api/impact?node=[&depth=][&rev=]` | blast radius (`query.blast_radius`): dependents by distance, entry points and tests reached |
 | `GET /api/file/changes?path=[&commit=SHA\|WORKTREE]` | one file's last commits (newest first) and the diff of one of them (by default its uncommitted edits, else its latest commit); used by the Structure tab's *Code changes* drawer |

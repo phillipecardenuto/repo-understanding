@@ -31,7 +31,7 @@ from . import __version__
 from .config import ConfigError
 from .gitutil import GitError
 from .model import RepositoryDiff, RepositorySnapshot
-from .repo import PRESETS, Repository, RepositoryError
+from .repo import HISTORY, PRESETS, Repository, RepositoryError
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_GATE = 0, 1, 2, 3
 FAIL_CONDITIONS = ("new-cycle", "new-dependency", "new-component-dependency", "new-external-dependency",
@@ -733,12 +733,14 @@ def format_review_markdown(report: dict[str, Any]) -> str:
 
 
 def _comparison_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("spec", nargs="?", help="comparison: a preset (" + ", ".join(k for k in PRESETS if k != "working")
-                   + "), A..B, A...B (merge base of A and B vs B) or A (A vs working tree). Default: all")
+    p.add_argument("spec", nargs="?", help="comparison: a preset (" + ", ".join([k for k in PRESETS if k != "working"] + list(HISTORY))
+                   + "), since:<tag or date>, A..B, A...B (merge base of A and B vs B) or A (A vs working tree). "
+                   "Default: all")
     p.add_argument("--base", help="base revision (commit, branch, tag, HEAD, INDEX, SESSION, EMPTY)")
     p.add_argument("--target", help="target revision (default WORKTREE)")
-    p.add_argument("--mode", choices=sorted(set(PRESETS) | {"merge-base"}),
-                   help="preset comparison; merge-base uses --base (default: the default branch)")
+    p.add_argument("--mode", choices=sorted(set(PRESETS) | {"merge-base"} | set(HISTORY)),
+                   help="preset comparison; merge-base uses --base (default: the default branch); last-commit, "
+                   "last-merge and branch compare committed history")
 
 
 def build_parser() -> argparse.ArgumentParser:
