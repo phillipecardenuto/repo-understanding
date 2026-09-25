@@ -158,3 +158,46 @@ def adjacency_of(edges: Iterable[DependencyEdge], reverse: bool = False) -> dict
         else:
             adj[e.source_id].add(e.target_id)
     return adj
+
+
+def shortest_paths(starts: Iterable[str], goals: Iterable[str], adjacency: dict[str, set[str]], *,
+                   max_paths: int = 3, max_depth: int = 12, max_visits: int = 200_000) -> list[list[str]]:
+    """Up to ``max_paths`` shortest paths from any of ``starts`` to any of ``goals`` (``[]`` when none within
+    ``max_depth`` hops), in a deterministic order.  A node that is both a start and a goal is not a goal."""
+    goal_set = set(goals)
+    parents: dict[str, list[str]] = {}
+    dist: dict[str, int] = {}
+    frontier = sorted(set(starts))
+    for s in frontier:
+        dist[s] = 0
+    found: list[str] = []
+    depth = visits = 0
+    while frontier and not found and depth < max_depth and visits < max_visits:
+        depth += 1
+        nxt: list[str] = []
+        for cur in frontier:
+            for n in sorted(adjacency.get(cur, ())):
+                visits += 1
+                if n not in dist:
+                    dist[n] = depth
+                    parents[n] = [cur]
+                    nxt.append(n)
+                elif dist[n] == depth:
+                    parents[n].append(cur)
+                if n in goal_set and n not in found and dist.get(n) == depth:
+                    found.append(n)
+        frontier = nxt
+    paths: list[list[str]] = []
+
+    def walk(node: str, suffix: list[str]) -> None:
+        if len(paths) >= max_paths:
+            return
+        if dist.get(node) == 0:  # reached a start (suffix runs goal → start)
+            paths.append(list(reversed(suffix)))
+            return
+        for p in parents.get(node, ()):
+            walk(p, suffix + [p])
+
+    for g in sorted(found):
+        walk(g, [g])
+    return paths[:max_paths]

@@ -39,7 +39,9 @@ flowchart LR
 | `history` | Change coupling from Git history: for each file, the files that changed in most of its commits (one `git log`, cached per commit in `Repository.coupling`). |
 | `render.views`, `render.mermaid` | View graphs and Mermaid serialization (the CLI and tests). |
 | `web/app.js` | The browser app. It mirrors `render.views`/`render.mermaid` so filters work offline. |
-| `server`, `render.html`, `cli` | The three front ends. |
+| `server`, `render.html`, `cli` | The three front ends for people. |
+| `mcp` | The front end for agents: a read-only MCP server over stdio (JSON-RPC, standard library only). See [mcp.md](mcp.md). |
+| `ci` | SARIF, GitHub annotations and the pull-request comment, from a review report. |
 
 ## Analyzer interface
 

@@ -20,6 +20,7 @@ how to test it.
 | Agent review | `review.py` (targets, scope, signals, feedback prompt), `risk.py` (risk score), `contracts.py` (architecture contracts, baseline) | `docs/review.md`, `docs/configuration.md` ("Architecture contracts") |
 | Front ends | `cli.py`, `server.py`, `render/html.py`, `render/views.py`, `render/mermaid.py` | "Web application" |
 | CI outputs | `ci.py` (SARIF, GitHub annotations, pull-request comment), `.github/actions/review/action.yml` | `docs/review.md` ("Pull requests and CI") |
+| Agent front end | `mcp.py` (read-only MCP server over stdio: tools, prompts, output caps) | `docs/mcp.md` |
 | Browser app | `web/app.js` (tabs, diagrams, icons, in-app guide), `web/app.css`, `web/index.html` | the `HELP` array in `app.js` |
 
 `render/views.py` + `render/mermaid.py` (Python, used by the CLI) and `web/app.js`

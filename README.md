@@ -70,6 +70,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz coupling [--path FILE] [--json]` | Files that usually change together, learned from Git history. |
 | `repoviz contracts [--format text\|json\|sarif\|github] [--baseline] [--suggest]` | Check the architecture contracts (`[[contracts]]`: layers, independence, forbidden, public interface, acyclic, required). Exit 3 on a violation not in the known-violations baseline. `--baseline` prints the baseline to commit; `--suggest` proposes a layers contract. |
 | `repoviz session start\|status\|scope\|end\|list [--allow G] [--protect G]` | Manage work sessions (waves) and their scope. |
+| `repoviz mcp [--allow-writes]` | Read-only MCP server over stdio: agents ask where code belongs, what depends on it, whether a path is in scope, and review their own work. See [docs/mcp.md](docs/mcp.md). |
 
 Every command takes `-C PATH` (repository), `--config FILE`, `--exclude GLOB`,
 `--source-root DIR` and `-o FILE`.
@@ -243,6 +244,29 @@ See [docs/review.md](docs/review.md) for the full list and the configuration
 `repoviz serve --session` starts a session automatically, and the Activity tab
 can start or restart sessions. Session data lives in `~/.cache/repoviz`
 (override with `REPOVIZ_STATE_DIR` or `state_dir`), never inside the repository.
+
+### Let the agent ask first: the MCP server
+
+`repoviz mcp` gives the agent the same map through the Model Context Protocol.
+It answers:
+
+- `where_does_this_go`: the component, layer and allowed imports of a file, even
+  a new one;
+- `impact`: callers, importers, entry points and tests;
+- `dependency_path`: why A depends on B;
+- `check_scope`: whether planned files are allowed, protected or out of scope;
+- `review_current` and `contracts_check`: a self-review before handing over;
+- `architecture_overview`.
+
+Every tool is read-only and capped, and it never runs repository code.
+
+```bash
+claude mcp add repoviz -- repoviz mcp -C .
+```
+
+The prompts `plan_check` and `self_review` wrap the usual before-and-after
+checks. See [docs/mcp.md](docs/mcp.md) for the tools, the safety rules and a
+sample transcript.
 
 With Claude Code, you can record activity while the agent edits by adding a hook
 in `.claude/settings.json`:

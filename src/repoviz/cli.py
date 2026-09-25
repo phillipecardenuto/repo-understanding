@@ -430,6 +430,15 @@ def format_contracts_text(rep: dict[str, Any]) -> str:
     return "\n".join(out) + "\n"
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Serve MCP over stdio until the client closes stdin (logs go to stderr; stdout carries only the protocol)."""
+    from .mcp import McpServer
+
+    repo = _open(args)
+    McpServer(repo, allow_writes=args.allow_writes).serve(sys.stdin.buffer, sys.stdout.buffer)
+    return EXIT_OK
+
+
 def cmd_coupling(args: argparse.Namespace) -> int:
     repo = _open(args)
     if repo.git is None:
@@ -718,6 +727,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=30)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_coupling)
+
+    p = sub.add_parser("mcp", parents=[common],
+                       help="read-only MCP server over stdio, so coding agents can ask about the architecture, "
+                       "impact and scope (e.g. `claude mcp add repoviz -- repoviz mcp -C .`)")
+    p.add_argument("--allow-writes", action="store_true",
+                   help="also offer set_scope, which changes the active session's scope in the state directory "
+                   "(never the repository)")
+    p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("session", parents=[common], help="manage work sessions (waves of agent work)")
     p.add_argument("action", choices=("start", "status", "scope", "end", "list"))

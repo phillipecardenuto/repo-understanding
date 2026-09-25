@@ -509,7 +509,7 @@ render the rest with `--from-report review.json` (no Git access, no analysis).
 | Format | What it is |
 |---|---|
 | `sarif` | SARIF 2.1.0 for code scanning: one rule per signal kind and one result per finding. Its level is `error` for high, `warning` for medium and `note` otherwise. Each result carries `partialFingerprints.repovizFinding/v1`, the stable finding id, so code scanning tracks it across pushes. |
-| `github` | GitHub workflow commands (`::error file=…,line=…::…`) that show as inline annotations on the changed lines. `--min-severity` (default `low`) sets the lowest severity shown. Values are escaped as GitHub requires. |
+| `github` | GitHub workflow commands (`::error file=…,line=…::…`) that show as inline annotations on the changed lines. `--min-severity` (default `medium`) sets the lowest severity shown. Values are escaped as GitHub requires. |
 | `pr-comment` | Markdown for a pull-request comment. It starts with the hidden marker `<!-- repoviz-review -->`, so a bot can find and update its own comment. It has a Mermaid map of the touched components, or of the files when only one component changed. Protected (🔒), out-of-scope (⚠) and high-signal (❗) nodes are marked in text, and new dependencies use thick labelled arrows. Then come the top signals and every file sorted by risk, folded in `<details>`. `--link-base URL` links each file and line (for example `https://github.com/OWNER/REPO/blob/SHA`). The map is capped at 40 nodes ("… N more") and the comment at 65,000 characters: the file list is shortened first, and the comment says so. |
 
 `repoviz contracts --format github` annotates new contract violations (the ones

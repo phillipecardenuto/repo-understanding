@@ -6,6 +6,21 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Read-only MCP server for coding agents** ([#18](https://github.com/phillipecardenuto/repo-understanding/issues/18)).
+  - `repoviz mcp` speaks the Model Context Protocol over stdio (JSON-RPC 2.0,
+    standard library only).
+  - Seven tools: `architecture_overview`, `where_does_this_go` (component,
+    layer and allowed imports, even for a new file), `impact` (callers,
+    importers, entry points and tests, with call sites), `dependency_path`
+    (shortest import chains), `check_scope` (planned files against the session
+    scope), `review_current` and `contracts_check`.
+  - Two prompts: `plan_check` and `self_review`.
+  - Answers are capped (`max_items`, and about 4k tokens) and deterministic.
+    Paths must stay inside the repository.
+  - Nothing is written unless `--allow-writes` is given, which adds
+    `set_scope` for the active session.
+  - Registration with `claude mcp add repoviz -- repoviz mcp -C .`; see
+    `docs/mcp.md`.
 - **Pull-request review in CI** ([#17](https://github.com/phillipecardenuto/repo-understanding/issues/17)).
   - `repoviz review --format sarif|github|pr-comment`: SARIF 2.1.0 with stable
     fingerprints, inline GitHub annotations, and a sticky pull-request comment
