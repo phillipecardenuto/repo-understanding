@@ -19,7 +19,7 @@ INTERESTING_KINDS = ("programming", "markup")
 
 class FilesystemAnalyzer(Analyzer):
     name = "filesystem"
-    version = "1"
+    version = "2"
     capabilities = (CAP_COMPONENTS, CAP_CONTAINMENT, CAP_DIAGNOSTICS)
     mandatory = True
 
@@ -36,7 +36,9 @@ class FilesystemAnalyzer(Analyzer):
             tags=["component"], metadata={"files": prof.file_count, "analyzed_files": prof.analyzed_file_count},
         ))
         # Files and directories are created in the first phase so that every other
-        # analyzer enriches existing structural nodes.
+        # analyzer enriches existing structural nodes.  Submodules first: an analyzed submodule's files
+        # hang under its node.
+        self._submodules(ctx, b)
         self._structure(ctx, b)
 
     def _structure(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
@@ -101,11 +103,21 @@ class FilesystemAnalyzer(Analyzer):
                               files=g.get("files"))
         for v in prof.vendored:
             self._tag_dir(ctx, b, v["path"], "vendored", v.get("reason", ""), create=True, files=v.get("files"))
+        for sub in prof.submodules:
+            if sub in dir_counts:
+                b.nodes[b.file_id(sub)].metadata["files"] = dir_counts[sub]
+
+    def _submodules(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
+        prof = ctx.profile
         commits = ctx.source.submodule_commits() if prof.submodules else {}
         urls = gitmodules_urls(ctx.source.read_text(".gitmodules") or "") if prof.submodules else {}
+        info = {i["path"]: i for i in prof.submodule_info}
         for sub in prof.submodules:
-            # A submodule is a separate repository: it is its own component, pinned to a commit.
-            meta: dict[str, object] = {"dependency_details": "unavailable (Git submodule)"}
+            # A submodule is a separate repository: it is its own component, pinned to a commit.  When it is
+            # checked out (and not excluded or too large), its code is analyzed under it.
+            state = info.get(sub, {})
+            meta: dict[str, object] = {} if state.get("analyzed") else {
+                "dependency_details": f"unavailable (Git submodule: {state.get('not_analyzed', 'not analyzed')})"}
             if commits.get(sub):
                 meta["commit"] = commits[sub]
             if urls.get(sub):
@@ -113,6 +125,9 @@ class FilesystemAnalyzer(Analyzer):
             dirty = ctx.source.submodule_dirty(sub)
             if dirty:
                 meta["uncommitted_files"] = len(dirty)
+            for key in ("analyzed", "not_analyzed", "behind", "behind_ref", "languages", "recorded_commit"):
+                if state.get(key) not in (None, [], ""):
+                    meta[key] = state[key]
             node = b.ensure_file(sub, self.name, component_type="submodule", tags=["submodule", "component"],
                                  metadata=meta)
             node.category = CATEGORY_COMPONENT

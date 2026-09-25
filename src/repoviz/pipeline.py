@@ -83,6 +83,18 @@ def finalize_graph(b: SnapshotBuilder, config: Config) -> list:
                          "repository root.", "pipeline", node.path)
             node.parent_id = root
 
+    # Inside an analyzed submodule the submodule is the component: its top-level packages are drill-down detail
+    # (five submodules would otherwise each add a "src" or "app" component).  Nested projects stay components.
+    subs = {n.id for n in nodes.values() if "submodule" in n.tags}
+    if subs:
+        for node in nodes.values():
+            if "component" in node.tags and not {"project", "submodule", "configured"} & set(node.tags):
+                cur, seen = nodes.get(node.parent_id or ""), 0
+                while cur is not None and seen < 64 and cur.id not in subs:
+                    cur, seen = nodes.get(cur.parent_id or ""), seen + 1
+                if cur is not None:
+                    node.tags.remove("component")
+
     # 2. Explicitly configured components.
     configured: list[tuple[str, list[str]]] = []
     for rule in config.components:
@@ -128,7 +140,11 @@ def finalize_graph(b: SnapshotBuilder, config: Config) -> list:
                               and nodes[a].metadata.get("roles", {}).get("test")]
                 result = test_roots[-1] if test_roots else None
             if result is None:
-                result = next((a for a in chain if a != root and "component" in nodes[a].tags), None)
+                # Inside an analyzed submodule, the submodule is the component (its packages are drill-down
+                # detail); only a project of its own (a nested manifest) is a finer component.
+                sub_at = next((i for i, a in enumerate(chain) if "submodule" in nodes[a].tags), -1)
+                result = next((a for i, a in enumerate(chain) if a != root and "component" in nodes[a].tags
+                               and (sub_at < 0 or i >= sub_at or "project" in nodes[a].tags)), None)
                 if result is None:
                     result = next((a for a in chain if "top-level" in nodes[a].tags), None)
                 if result is None:

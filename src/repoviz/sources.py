@@ -163,6 +163,11 @@ class TreeSource(ABC):
         """Files inside a submodule whose content differs from its commit in this state (relative paths)."""
         return []
 
+    def submodule_recorded(self, path: str) -> str | None:
+        """The commit the superproject records for a submodule (for a working tree: the index, which may
+        differ from the checked-out commit)."""
+        return self.submodule_commits().get(path)
+
     def submodule_file(self, path: str, rel: str) -> bytes | None:
         """Content of such a file (``None`` when it was deleted)."""
         return None
@@ -383,6 +388,9 @@ class WorkingTreeSource(_DiskMixin, TreeSource):
 
     def submodule_dirty(self, path: str) -> list[str]:
         return list(self._submodule_state(path)[1]) if path in self.submodules else []
+
+    def submodule_recorded(self, path: str) -> str | None:
+        return self._index_sub.get(path)
 
     def submodule_file(self, path: str, rel: str) -> bytes | None:
         p = self.root / path / rel

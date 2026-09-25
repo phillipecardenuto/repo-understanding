@@ -135,9 +135,11 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
             if key in git_info:
                 setattr(prof, key, git_info[key])
     prof.submodules = list(getattr(source, "submodules", []))
+    nested: dict[str, Any] = getattr(source, "inner", None) or {}  # submodules analyzed with the superproject
     if prof.submodules:
         commits = source.submodule_commits()
         urls = gitmodules_urls(source.read_text(".gitmodules") or "")
+        skipped: dict[str, str] = getattr(source, "skipped", None) or {}
         for sub in prof.submodules:
             info: dict[str, Any] = {"path": sub, "commit": commits.get(sub), "url": urls.get(sub)}
             if root:
@@ -145,6 +147,21 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
             dirty = source.submodule_dirty(sub)
             if dirty:
                 info["uncommitted_files"] = len(dirty)
+            recorded = source.submodule_recorded(sub)
+            if recorded and commits.get(sub) and recorded != commits[sub]:  # checked out at another commit
+                info["recorded_commit"] = recorded
+            info["analyzed"] = sub in nested
+            if sub in skipped:
+                info["not_analyzed"] = skipped[sub]
+            elif sub not in nested and not config.submodules_analyze:
+                info["not_analyzed"] = "turned off ([submodules] analyze = false)"
+            if root and info.get("checked_out"):
+                from .submodules import commits_behind, open_submodule
+
+                sub_git = open_submodule(Path(root), sub)
+                behind = commits_behind(sub_git) if sub_git is not None else None
+                if behind is not None:
+                    info["behind"], info["behind_ref"] = behind
             prof.submodule_info.append(info)
 
     all_files = source.files()
@@ -341,6 +358,8 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
                     not any(r == conventional or conventional.startswith(r + "/") and r for r in roots):
                 roots.setdefault(conventional, {"path": conventional, "language": None,
                                                 "origin": "heuristic: conventional directory"})
+    for sub in nested:  # a submodule is its own repository: its root is an import root of its code
+        roots.setdefault(sub, {"path": sub, "language": None, "origin": "submodule"})
     prof.source_roots = sorted(roots.values(), key=lambda r: r["path"])
 
     # 7. tests ----------------------------------------------------------------------------
@@ -402,7 +421,7 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
                                       "target_kind": ep.target_kind, "declared_in": path, "line": ep.line,
                                       "project": proj["path"] if proj else None})
     # Compose: one entry point per first-party service (all its variants), none for infrastructure images.
-    for ep in service_entry_points(compose_services(prof.manifest_data)[0]):
+    for ep in service_entry_points(compose_services(prof.manifest_data, list(nested))[0]):
         proj = prof.project_for(ep["declared_in"])
         prof.entry_points.append(dict(ep, project=proj["path"] if proj else None))
     for f in included:
@@ -466,13 +485,27 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
                 f"{lang['display']}, so these files are shown as structural nodes only.",
                 "discovery", details={"language": lang["language"], "files": lang["files"]}))
     if prof.submodules:
-        missing = [i["path"] for i in prof.submodule_info if i.get("checked_out") is False]
+        for info in prof.submodule_info:  # what each analyzed submodule holds, for its card and group label
+            if info.get("analyzed"):
+                prefix = info["path"] + "/"
+                langs: dict[str, int] = {}
+                files = 0
+                for f, (lang, kind) in prof.file_languages.items():
+                    if f.startswith(prefix):
+                        files += 1
+                        if lang and kind == "programming":
+                            langs[lang] = langs.get(lang, 0) + 1
+                info["files"] = files
+                info["languages"] = [classify.display_language(k) for k, _ in
+                                     sorted(langs.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
+        analyzed = [i["path"] for i in prof.submodule_info if i.get("analyzed")]
+        others = [f"{i['path']} ({i['not_analyzed']})" for i in prof.submodule_info if i.get("not_analyzed")]
         prof.diagnostics.append(Diagnostic(
-            "info", "submodules", f"{len(prof.submodules)} Git submodule(s): each is a component pinned to a commit. "
-            "Reviews and comparisons look inside them (commits and changed files); the structure and dependency "
-            "graphs do not analyze their code." + (f" Not checked out: {', '.join(missing)} (run 'git submodule "
-                                                   "update --init')." if missing else ""),
-            "discovery", details={"submodules": prof.submodules}))
+            "info", "submodules", f"{len(prof.submodules)} Git submodule(s), each pinned to a commit. "
+            + (f"{len(analyzed)} are analyzed as nested sub-projects (their code is in the graphs). " if analyzed else
+               "Their code is not in the graphs; reviews and comparisons still look inside them. ")
+            + (f"Not analyzed: {'; '.join(others)}." if others else ""),
+            "discovery", details={"submodules": prof.submodules, "analyzed": analyzed}))
     prof.duration_ms = (time.perf_counter() - started) * 1000
     return prof
 

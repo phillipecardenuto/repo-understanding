@@ -29,7 +29,6 @@ import ast
 import builtins
 import importlib
 import importlib.util
-import os
 import posixpath
 import re
 import sys
@@ -55,6 +54,7 @@ from .base import (
     Analyzer,
     Detection,
     SnapshotBuilder,
+    parse_parallel,
 )
 from .callflow import ModuleScope, RawCall, get_index
 
@@ -455,9 +455,6 @@ def parse_python(text: str, path: str = "<file>") -> PyFileInfo:
     return info
 
 
-PARALLEL_THRESHOLD = 300
-
-
 def _parse_item(item: tuple[str, str]) -> tuple[str, PyFileInfo]:
     path, text = item
     return path, parse_python(text, path)
@@ -465,20 +462,7 @@ def _parse_item(item: tuple[str, str]) -> tuple[str, PyFileInfo]:
 
 def parse_many(texts: dict[str, str]) -> dict[str, PyFileInfo]:
     """Parse files, using worker processes for large batches (pure function, so safe to parallelize)."""
-    items = list(texts.items())
-    if len(items) >= PARALLEL_THRESHOLD and os.environ.get("REPOVIZ_NO_PARALLEL") != "1":
-        try:
-            import concurrent.futures as cf
-            import multiprocessing
-
-            workers = min(8, os.cpu_count() or 1)
-            if workers > 1:
-                method = "fork" if "fork" in multiprocessing.get_all_start_methods() and sys.platform != "darwin" else "spawn"
-                with cf.ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context(method)) as pool:
-                    return dict(pool.map(_parse_item, items, chunksize=32))
-        except Exception:  # fall back to serial parsing (restricted environments, pickling issues...)
-            pass
-    return dict(_parse_item(item) for item in items)
+    return parse_parallel(_parse_item, list(texts.items()))
 
 
 # --------------------------------------------------------------------------
@@ -524,7 +508,7 @@ class PythonAnalyzer(Analyzer):
         """Map path -> (qualified name, source root, is_package)."""
         declared = sorted((r["path"] for r in ctx.profile.source_roots
                            if r.get("language") in (None, "python") and r.get("origin", "").split(":")[0] in
-                           ("configured", "manifest")), key=lambda p: -len(p))
+                           ("configured", "manifest", "submodule")), key=lambda p: -len(p))
         dirs_with_init = {posixpath.dirname(f) for f in files if posixpath.basename(f) in ("__init__.py", "__init__.pyi")}
         out: dict[str, tuple[str, str, bool]] = {}
         for f in files:

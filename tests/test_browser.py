@@ -702,3 +702,33 @@ def test_structure_system_view_from_compose(page, make_repo, tmp_path: Path) -> 
     entry = tab.locator(".card", has=page.locator("h3", has_text="Entry points")).inner_text()
     assert "api (compose)" in entry and "redis-server" not in entry
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_submodules_as_groups_in_structure(page, make_repo, tmp_path: Path) -> None:
+    from test_large_repo_fixes import _git
+
+    lib = make_repo({"src/engine.py": "def run():\n    return 1\n", "src/util.py": "from src.engine import run\n"})
+    main = make_repo({"app/__init__.py": "", "app/main.py": "print('hi')\n"})
+    _git(main.path, "submodule", "add", "-q", lib.path, "modules/engine")
+    _git(main.path, "commit", "-qm", "add engine")
+    Path(main.path, "modules/engine/src/util.py").write_text("from src.engine import run\nrun()\n")  # uncommitted
+    report = tmp_path / "subs.html"
+    report.write_text(render_static_html(build_bundle(Repository(main.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    chip = page.locator("#repo-info .chip-button")
+    assert chip.inner_text().strip() == "1 submodule (1 modified)"
+    sub = page.evaluate("[...repoviz.app.snapshotIndex.nodes.values()].find(n => n.component_type === 'submodule').id")
+    label = page.evaluate(f"document.querySelector(\"#tab-structure g.node[data-node-id='{sub}']\").textContent")
+    assert "submodule · @" in label and "2 files" in label and "Python" in label and "✎ 1 uncommitted" in label
+    page.dblclick(f"#tab-structure g.node[data-node-id='{sub}']")  # a group: drill into its code
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=30_000)
+    assert page.evaluate("repoviz.app.tabs.structure.opts.root") == sub
+    assert "src" in page.evaluate("document.querySelector('#tab-structure .viewport svg').textContent")
+    page.click("#tabbtn-review")
+    chip.click()
+    card = page.locator("#submodules-card")
+    page.wait_for_function("() => document.querySelector('#tab-structure').offsetParent !== null", timeout=10_000)
+    assert card.is_visible() and "modules/engine" in card.inner_text() and "analyzed" in card.inner_text()
+    assert "✎ 1 uncommitted" in card.inner_text()
+    assert page.errors == []  # type: ignore[attr-defined]

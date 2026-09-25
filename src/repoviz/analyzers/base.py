@@ -17,7 +17,9 @@ Analyzers never execute repository code and only read content through the
 
 from __future__ import annotations
 
+import os
 import posixpath
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
@@ -279,6 +281,9 @@ class SnapshotBuilder:
             return self.root_id
         ident = self.dir_id(path)
         if ident not in self.nodes:
+            sub = self.nodes.get(self.file_id(path))
+            if sub is not None and "submodule" in sub.tags:
+                return sub.id  # an analyzed submodule holds its files itself (one node per path, stable ID)
             parent = self.ensure_dir(posixpath.dirname(path), analyzer)
             self.add_node(ComponentNode(
                 id=ident, name=posixpath.basename(path), qualified_name=path, component_type="directory",
@@ -361,3 +366,29 @@ class SnapshotBuilder:
                                           source_id=node.parent_id, target_id=node.id, relationship=REL_CONTAINS,
                                           analyzer="pipeline", occurrences=1))
         return out
+
+
+#: Parse batches of at least this many files in worker processes (``REPOVIZ_NO_PARALLEL=1`` turns it off).
+PARALLEL_THRESHOLD = 64
+
+
+def parse_parallel(func: Any, items: list[tuple[str, str]], threshold: int = PARALLEL_THRESHOLD) -> dict[str, Any]:
+    """``{path: result}`` of ``func((path, text))`` for every item, in worker processes for large batches.
+
+    ``func`` must be a module-level, pure parsing function (it only reads the text it is given: parsing never
+    runs the repository's code, so it is safe to spread over processes).  Falls back to serial parsing in
+    restricted environments."""
+    if len(items) >= threshold and os.environ.get("REPOVIZ_NO_PARALLEL") != "1":
+        try:
+            import concurrent.futures as cf
+            import multiprocessing
+
+            workers = min(8, os.cpu_count() or 1)
+            if workers > 1:
+                method = ("fork" if "fork" in multiprocessing.get_all_start_methods() and sys.platform != "darwin"
+                          else "spawn")
+                with cf.ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context(method)) as pool:
+                    return dict(pool.map(func, items, chunksize=max(4, len(items) // (workers * 4))))
+        except Exception:  # restricted environments, pickling issues…
+            pass
+    return dict(func(item) for item in items)

@@ -189,8 +189,18 @@ class Repository:
         label = rev if rev == sha else f"{rev} ({sha[:10]})"
         return GitRevisionSource(self.git, sha, label=label)
 
+    def analysis_source(self, source: TreeSource) -> TreeSource:
+        """What the analysis reads: ``source`` plus its checked-out submodules (``[submodules] analyze``)."""
+        cfg = self.config
+        if not cfg.submodules_analyze or self.git is None or not source.submodules:
+            return source
+        from .submodules import nested_source
+
+        return nested_source(self.root, source, exclude=cfg.submodules_exclude, max_files=cfg.submodules_max_files,
+                             max_mb=cfg.submodules_max_mb)
+
     def discover(self, source: TreeSource | None = None) -> RepositoryProfile:
-        source = source or self.open_source("WORKTREE")
+        source = self.analysis_source(source or self.open_source("WORKTREE"))
         enabled = {cls.name for cls in enabled_analyzer_classes(self.config)}
         langs = {lang: [a for a in names if a in enabled] for lang, names in supported_languages().items()}
         profile = discover(source, self.config, root=str(self.root), name=self.name,
@@ -227,6 +237,7 @@ class Repository:
             cached = self._cached(self._snapshots, key)
             if cached is not None:
                 return self._relabel(cached, label)
+            source = self.analysis_source(source)  # only on a miss: the key already covers the submodules' state
             profile = self.discover(source)
             snap = build_snapshot(source, profile, self.config, repository_id=self.repository_id,
                                   repository_name=self.name, root=str(self.root), label=label, git=self.git,

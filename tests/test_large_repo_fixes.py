@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from repoviz.render.views import submodule_state
 from repoviz.repo import Repository
 from repoviz.review import build_review, resolve_target
 
@@ -160,3 +161,85 @@ def test_dirty_submodule_file_at_session_start_is_not_blamed_on_the_agent(with_s
     Path(main.path, "app/main.py").write_text("print('changed')\n")
     report = build_review(Repository(main.path), resolve_target(Repository(main.path), "session"))
     assert [f["path"] for f in report["files"]] == ["app/main.py"]
+
+
+# --------------------------------------------------------------------------- submodules as sub-projects (#21)
+
+
+def test_submodule_code_is_analyzed_as_a_nested_sub_project(with_submodule) -> None:
+    main, _lib = with_submodule
+    snap = Repository(main.path).snapshot("WORKTREE")
+    idx = snap.node_index()
+    sub = next(n for n in snap.components if n.component_type == "submodule")
+    engine = snap.find(path="modules/engine/src/engine.py")
+    assert engine is not None and engine.category == "module"
+    run = next(s for s in snap.symbols if s.path == engine.path and s.name == "run")
+    assert idx[run.parent_id].id == engine.id
+    chain, cur = [], engine
+    while cur.parent_id:
+        cur = idx[cur.parent_id]
+        chain.append(cur.id)
+    assert sub.id in chain and engine.metadata["component_id"] == sub.id  # nested under the submodule component
+    assert sum(1 for n in snap.nodes() if n.path == "modules/engine") == 1  # one node for the submodule's path
+    assert sub.metadata["analyzed"] is True and sub.metadata["languages"] == ["Python"]
+    assert "dependency_details" not in sub.metadata  # its code is in the graph now
+    [info] = snap.profile["submodule_info"]
+    assert info["analyzed"] is True and info["files"] == 2 and info["behind"] == 0
+
+
+def test_changes_inside_a_submodule_reach_the_changes_diagram(with_submodule) -> None:
+    main, _lib = with_submodule
+    engine = Path(main.path, "modules/engine/src/engine.py")
+    engine.write_text("def run():\n    return 2\n\n\ndef stop():\n    return 0\n")
+    r = Repository(main.path)
+    _comp, diff = r.compare(mode="all")
+    changed = {c.node.path: c.status for c in diff.nodes.values() if c.status != "unchanged" and c.node.path}
+    assert changed.get("modules/engine/src/engine.py") == "modified"
+    assert any(c.node.name == "stop" and c.status == "added" for c in diff.nodes.values())
+    # the same work stays one entry per file in reviews (no double counting)
+    report = build_review(r, resolve_target(r, "all"))
+    paths = [f["path"] for f in report["files"]]
+    assert paths.count("modules/engine/src/engine.py") == 1
+
+
+def test_superproject_depending_on_a_submodule_package_gets_a_cross_repository_edge(make_repo) -> None:
+    lib = make_repo({"engine/__init__.py": "def run():\n    return 1\n",
+                     "pyproject.toml": '[project]\nname = "engine"\nversion = "1.0"\n'})
+    main = make_repo({"app/__init__.py": "", "app/main.py": "import engine\n",
+                      "pyproject.toml": '[project]\nname = "app"\nversion = "1.0"\ndependencies = ["engine>=1"]\n'})
+    _git(main.path, "submodule", "add", "-q", lib.path, "vendor/engine")
+    _git(main.path, "commit", "-qm", "engine")
+    snap = Repository(main.path).snapshot("WORKTREE")
+    idx = snap.node_index()
+    [edge] = [e for e in snap.dependency_edges if e.metadata.get("cross_repository")]
+    assert idx[edge.source_id].component_type == "repository" and idx[edge.target_id].component_type == "submodule"
+    assert edge.relationship == "depends-on" and idx[edge.target_id].qualified_name == "vendor/engine"
+    assert "project" in idx[edge.target_id].tags and idx[edge.target_id].metadata["project_name"] == "engine"
+
+
+def test_submodule_exclusion_and_size_caps(with_submodule) -> None:
+    main, _lib = with_submodule
+    toml = Path(main.path, ".repoviz.toml")
+    for config, reason, short in (('[submodules]\nexclude = ["modules/*"]\n', "excluded", "not analyzed (excluded)"),
+                                  ("[submodules]\nmax_files = 1\n", "too large: 2 files", "not analyzed (too large)"),
+                                  ("[submodules]\nanalyze = false\n", "turned off", "not analyzed (turned off)")):
+        toml.write_text(config)
+        snap = Repository(main.path).snapshot("WORKTREE")
+        sub = next(n for n in snap.components if n.component_type == "submodule")
+        assert sub.metadata["analyzed"] is False and sub.metadata["not_analyzed"].startswith(reason), config
+        assert snap.find(path="modules/engine/src/engine.py") is None
+        assert short in submodule_state(sub) and sub.metadata["dependency_details"].startswith("unavailable")
+
+
+def test_services_run_the_code_of_their_own_submodule(make_repo) -> None:
+    svc = make_repo({"app/__init__.py": "", "app/main.py": "app = object()\n", "Dockerfile": "FROM python:3.12\n"})
+    main = make_repo({"app/__init__.py": "", "app/main.py": "app = object()\n", "Dockerfile": "FROM python:3.12\n",
+                      "docker-compose.yml": "services:\n  api:\n    build: .\n    command: uvicorn app.main:app\n"
+                                            "  scorer:\n    build: ./services/scorer\n"
+                                            "    command: uvicorn app.main:app --port 9000\n"})
+    _git(main.path, "submodule", "add", "-q", svc.path, "services/scorer")
+    _git(main.path, "commit", "-qm", "scorer")
+    snap = Repository(main.path).snapshot("WORKTREE")
+    idx = snap.node_index()
+    runs = {idx[e.source_id].name: idx[e.target_id].path for e in snap.dependency_edges if e.relationship == "runs"}
+    assert runs == {"api": "app/main.py", "scorer": "services/scorer/app/main.py"}  # the same module name, twice

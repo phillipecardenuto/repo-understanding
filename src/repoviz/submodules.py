@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from .gitutil import Git, GitError
-from .ids import content_hash
-from .sources import is_binary
+from .ids import content_hash, stable_hash
+from .sources import GitRevisionSource, OverlaySource, TreeSource, WorkingTreeSource, is_binary
 
 MAX_FILES_PER_SUBMODULE = 300
 MAX_FILE_BYTES = 1_000_000
@@ -222,3 +222,134 @@ def submodule_changes(root: Path, base: Any, target: Any) -> list[SubmoduleChang
 
 def _cap(data: bytes | None) -> bytes | None:
     return data if data is None or len(data) <= MAX_FILE_BYTES else TOO_LARGE
+
+
+# --------------------------------------------------------------------------- nested analysis (#21)
+
+
+class NestedSource(TreeSource):
+    """A superproject state plus the files of its checked-out submodules, under their superproject paths.
+
+    Each submodule is read at the commit the state records (with the uncommitted files a session captured),
+    or, for the working tree, from its own working tree.  Content hashes stay Git blob hashes, so caches and
+    diffs work as for any other file.  ``skipped`` says why a submodule is not included (not checked out,
+    excluded, too large, commit not available locally)."""
+
+    def __init__(self, base: TreeSource, inner: dict[str, TreeSource], skipped: dict[str, str]) -> None:
+        super().__init__(base.label)
+        self.base, self.inner, self.skipped = base, inner, skipped
+        self.kind = base.kind
+        self.submodules = list(base.submodules)
+        self._prefixes = sorted(inner, key=len, reverse=True)
+        files = list(base.files())
+        for path, src in sorted(inner.items()):
+            files += [f"{path}/{f}" for f in src.files()]
+        self._files = sorted(files)
+
+    def __getattr__(self, name: str) -> Any:  # git, root, sha, include_untracked… of the superproject state
+        if name.startswith("__") or name in ("base", "inner", "skipped", "_prefixes"):
+            raise AttributeError(name)
+        return getattr(self.base, name)
+
+    def _split(self, path: str) -> tuple[TreeSource, str]:
+        for p in self._prefixes:
+            if path.startswith(p + "/"):
+                return self.inner[p], path[len(p) + 1:]
+        return self.base, path
+
+    def files(self) -> list[str]:
+        return list(self._files)
+
+    def read_bytes(self, path: str) -> bytes | None:
+        src, rel = self._split(path)
+        return src.read_bytes(rel)
+
+    def content_hash(self, path: str) -> str | None:
+        src, rel = self._split(path)
+        return src.content_hash(rel)
+
+    def size(self, path: str) -> int | None:
+        src, rel = self._split(path)
+        return src.size(rel)
+
+    def mtime(self, path: str) -> float | None:
+        src, rel = self._split(path)
+        return src.mtime(rel)
+
+    def submodule_commits(self) -> dict[str, str]:
+        return self.base.submodule_commits()
+
+    def submodule_dirty(self, path: str) -> list[str]:
+        return self.base.submodule_dirty(path)
+
+    def submodule_file(self, path: str, rel: str) -> bytes | None:
+        return self.base.submodule_file(path, rel)
+
+    def submodule_recorded(self, path: str) -> str | None:
+        return self.base.submodule_recorded(path)
+
+    @property
+    def revision_id(self) -> str:
+        return "nested:" + stable_hash(self.base.revision_id, *(f"{p}\0{s.revision_id}" for p, s in
+                                                                sorted(self.inner.items())),
+                                       *(f"{p}\0{r}" for p, r in sorted(self.skipped.items())))
+
+
+def _total_bytes(src: TreeSource) -> int:
+    return sum(src.size(f) or 0 for f in src.files())
+
+
+def nested_source(root: Path, source: TreeSource, *, exclude: list[str] | None = None, max_files: int = 5000,
+                  max_mb: float = 50.0) -> TreeSource:
+    """``source`` with the content of its checked-out submodules (``source`` itself when it has none)."""
+    from . import globs
+
+    if not source.submodules or isinstance(source, NestedSource):
+        return source
+    commits = source.submodule_commits()
+    inner: dict[str, TreeSource] = {}
+    skipped: dict[str, str] = {}
+    for path in sorted(source.submodules):
+        if exclude and (path in exclude or globs.match_any(path, exclude)):
+            skipped[path] = "excluded by [submodules] exclude"
+            continue
+        git = open_submodule(root, path)
+        if git is None:
+            skipped[path] = "not checked out (git submodule update --init)"
+            continue
+        src: TreeSource
+        if source.kind == "worktree":
+            src = WorkingTreeSource(git, include_untracked=bool(getattr(source, "include_untracked", True)))
+        else:
+            commit = commits.get(path)
+            if not commit or not _has_commit(git, commit):
+                skipped[path] = f"commit {(commit or '?')[:10]} is not available in the local clone"
+                continue
+            src = GitRevisionSource(git, commit, label=f"{path}@{commit[:10]}")
+            dirty = source.submodule_dirty(path)
+            if dirty:  # a session baseline remembers the submodule's uncommitted files
+                src = OverlaySource(src, {d: source.submodule_file(path, d) for d in dirty}, label=src.label)
+        n = len(src.files())
+        if n > max_files:
+            skipped[path] = f"too large: {n} files (more than [submodules] max_files = {max_files})"
+            continue
+        size = _total_bytes(src)
+        if size > max_mb * 1_000_000:
+            skipped[path] = f"too large: {size / 1_000_000:.0f} MB (more than [submodules] max_mb = {max_mb:g})"
+            continue
+        inner[path] = src
+    return NestedSource(source, inner, skipped)
+
+
+def commits_behind(git: Git) -> tuple[int, str] | None:
+    """How many commits the checked-out commit is behind its remote's default branch, from the local
+    remote-tracking refs only (never fetched): ``(count, "origin/main")``, or ``None`` when unknown."""
+    head = (git.try_run("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") or "").strip()
+    candidates = [head.removeprefix("refs/remotes/")] if head else []
+    candidates += ["origin/main", "origin/master"]
+    for ref in candidates:
+        if ref and git.try_run("rev-parse", "--verify", "--quiet", f"refs/remotes/{ref}") is not None:
+            out = (git.try_run("rev-list", "--count", f"HEAD..refs/remotes/{ref}") or "").strip()
+            if out.isdigit():
+                return int(out), ref
+    return None

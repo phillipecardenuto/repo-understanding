@@ -55,6 +55,26 @@ language. Keys with `null` or empty values are omitted. `schema_version` is `1`.
 | `confidence` | 0–1: 1.0 for resolved static imports, lower for dynamic imports, heuristic JS resolution, `self` calls… |
 | `metadata` | `type_checking_only`, `conditional_only`, `lazy_only`, `dynamic_only`, `test_only`, `external`, `imported_names`, `scope`, `spec`, `confirmed_by` … |
 
+## Submodules
+
+A submodule node (`component_type: submodule`, tags `submodule` and
+`component`, plus `project` when it has a manifest at its root) keeps the
+superproject path as its name.
+
+**Metadata.**
+
+- `commit`, and `recorded_commit` when it is checked out at another commit;
+- `url`, `uncommitted_files`;
+- `analyzed`, with `not_analyzed` giving the reason when it is not;
+- `languages`, `files`;
+- `behind` and `behind_ref`, from the local remote-tracking ref.
+
+When it is analyzed, its directories and modules are its descendants, and it is
+their `component_id`.
+
+A `depends-on` edge into or out of an analyzed submodule has
+`metadata.cross_repository: true`.
+
 ## Services (Compose)
 
 `services.py` merges a directory's Compose files, and the manifest analyzer adds

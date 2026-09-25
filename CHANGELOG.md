@@ -6,6 +6,30 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Checked-out Git submodules analyzed as nested sub-projects** ([#21](https://github.com/phillipecardenuto/repo-understanding/issues/21)).
+  - Snapshots read each checked-out submodule with the superproject: at the
+    recorded commit, or its working tree for the working tree. Its modules,
+    symbols, imports and calls are in the graphs under the submodule's node,
+    which is their component. Nested projects stay components.
+  - Each submodule root is an import root, so a module name defined both in
+    the superproject and in a submodule resolves to the right copy. That
+    includes the code a Compose service runs.
+  - A superproject manifest depending on a submodule's package gets a
+    `depends-on` edge marked `cross_repository`.
+  - Changes inside submodules appear in Changes diagrams. Reviews still list
+    each file once.
+  - New `[submodules]` settings: `analyze`, `exclude`, `max_files` and
+    `max_mb`. A submodule that is not analyzed says why (too large, excluded,
+    not checked out). On ELIES, TruFor (210 MB) is skipped by size, and the
+    snapshot of the eight others takes about 1.5 s.
+  - The Structure tab draws submodules as groups. Each one shows its pinned
+    commit, files, languages, "⬇ N behind origin/main" (from local refs;
+    repoviz never fetches), "↦ moved" and "✎ N uncommitted". A header chip,
+    "9 submodules (2 modified)", opens a table of their states.
+  - Python and JavaScript files are now parsed in worker processes from 64
+    files (Python used to start at 300 files, JavaScript never).
+  - Compose files inside a submodule are ignored when the superproject has its
+    own.
 - **System view from docker-compose** ([#22](https://github.com/phillipecardenuto/repo-understanding/issues/22)).
   - Compose files in one directory are variants of one system, so a service
     declared in `docker-compose.yml` and `docker-compose.prod.yml` is one

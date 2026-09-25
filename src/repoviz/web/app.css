@@ -59,6 +59,8 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 .repo-info { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 13px; min-width: 0; }
 .repo-info .chip { background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px;
   white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.repo-info .chip-button { color: inherit; font: inherit; cursor: pointer; }
+.repo-info .chip-button:hover, .repo-info .chip-button:focus-visible { border-color: var(--accent); color: var(--text); }
 .header-spacer { flex: 1; }
 .badge { font-size: 12px; border-radius: 999px; padding: 2px 9px; border: 1px solid var(--border); background: var(--panel-2); }
 .badge.live { border-color: var(--added); color: var(--added); }

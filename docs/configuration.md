@@ -53,6 +53,12 @@ disabled = ["go"]                 # filesystem and git are mandatory
 [python]
 use_grimp = "auto"                # auto | always (also add grimp-only edges) | never
 
+[submodules]                      # Git submodules (see "Submodules" below)
+analyze = true                    # analyze checked-out submodules as nested sub-projects
+exclude = ["vendor/huge-models"]  # submodule paths (globs) never analyzed
+max_files = 5000                  # larger submodules stay one box, "not analyzed (too large)"
+max_mb = 50                       # the same for their total size (model weights, datasets…)
+
 [cycles]
 include_type_checking = false     # TYPE_CHECKING-only imports form cycles?
 include_lazy = true               # imports inside functions form cycles?
@@ -100,6 +106,45 @@ to = ["src/db/**"]
 message = "UI must go through the service layer"
 severity = "high"                 # high | medium | low
 ```
+
+## Submodules
+
+A Git submodule is a separate repository pinned to a commit. A checked-out
+submodule is analyzed with the superproject, as a nested sub-project, unless:
+
+- it is listed in `[submodules] exclude`;
+- it is larger than `max_files` or `max_mb`;
+- the commit a state records is not in the local clone (the analysis never
+  fetches).
+
+**What is read.** Its files keep their superproject paths
+(`system_modules/cbir/src/main.py`) and are read at the commit the state
+records. For the working tree, the submodule's own working tree is read, so
+uncommitted edits count. Nothing inside the submodule is written, and its
+code is never run.
+
+**How it appears.**
+
+- **Structure.** The submodule node holds its code. Its line shows the pinned
+  commit, file count, languages and local edits. It also shows how many commits
+  it is behind its remote's default branch, from the local remote-tracking ref
+  only. A submodule that is not analyzed says why.
+- **Components.** The submodule is the component of its code: its top-level
+  packages are drill-down detail. A manifest nested deeper inside it adds a
+  project of its own.
+- **Imports.** Its root is an import root (`from src.engine import run`
+  resolves inside it). A module name defined both in the superproject and in a
+  submodule resolves to the importer's own copy.
+- **Manifests.** A superproject manifest that depends on a package the
+  submodule provides (a matching name, or a path dependency) gets a
+  `depends-on` edge to it, marked `cross_repository`.
+- **Compose.** Compose files inside a submodule describe how it runs on its
+  own, so they are ignored when the superproject has Compose files.
+- **Comparisons and reviews.** Changes inside a submodule appear in Changes
+  diagrams like any other change. Reviews already listed them file by file (see
+  [review.md](review.md#submodules)).
+
+`analyze = false` restores the previous behaviour: one box per submodule.
 
 ## Architecture contracts
 

@@ -59,6 +59,7 @@ class EntryTarget:
     target_kind: str  # python-callable | python-module | file | command
     evidence: SourceEvidence | None = None
     relationship: str = REL_INVOKES  # an entry point invokes its target; a service runs it (REL_RUNS)
+    near: str | None = None  # a directory the target lives in (a service's build context): picks among duplicates
 
 
 class CallIndex:
@@ -188,13 +189,21 @@ class CallIndex:
         owner = self._method_owner(scope, class_qual, name, depth)
         return owner[0].symbols[owner[1]] if owner else None
 
-    def resolve_python_target(self, target: str) -> str | None:
-        """Resolve ``pkg.mod:attr.path`` or ``pkg.mod`` to a node ID."""
+    def resolve_python_target(self, target: str, near: str | None = None) -> str | None:
+        """Resolve ``pkg.mod:attr.path`` or ``pkg.mod`` to a node ID.  A module name defined in several places
+        (the superproject and a submodule both have ``app.main``) resolves to the one under ``near``."""
         module, _, attr = target.partition(":")
         module = module.strip()
         attr = attr.strip().split()[0] if attr.strip() else ""
         attr = attr.split("[", 1)[0]
         scope = self.modules.get(f"py:{module}")
+        if scope is None and near is not None:
+            prefix = f"py:{module}@"
+            under = sorted((k[len(prefix):].count("/"), k) for k in self.modules if k.startswith(prefix)
+                           and (not near or k[len(prefix):].startswith(near.rstrip("/") + "/")))
+            # the shallowest one: a copy deeper down belongs to a nested repository (a submodule)
+            if under and (len(under) == 1 or under[0][0] < under[1][0]):
+                scope = self.modules[under[0][1]]
         if scope is None:
             return None
         if not attr:
@@ -242,7 +251,7 @@ class CallFlowAnalyzer(Analyzer):
         for et in index.entry_targets:
             target_id = None
             if et.target_kind in ("python-callable", "python-module"):
-                target_id = index.resolve_python_target(et.target)
+                target_id = index.resolve_python_target(et.target, et.near)
             elif et.target_kind == "file":
                 path = et.target.removeprefix("./")
                 target_id = index.file_nodes.get(path) or b.path_node_id(path)

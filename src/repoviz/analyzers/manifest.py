@@ -71,12 +71,16 @@ class ManifestAnalyzer(Analyzer):
             if proj.get("role"):
                 tags.append(proj["role"])
             ctype = "workspace-member" if proj.get("workspace") else "project"
+            qualified = proj["name"] or node.qualified_name
+            if "submodule" in node.tags:  # a submodule with a manifest at its root: still a submodule (tagged
+                ctype, qualified = "submodule", node.qualified_name  # project), named by its path like the others
             b.add_node(ComponentNode(
-                id=ident, name=node.name, qualified_name=proj["name"] or node.qualified_name, component_type=ctype,
+                id=ident, name=node.name, qualified_name=qualified, component_type=ctype,
                 path=proj["path"], analyzer=self.name, key=node.key, tags=tags,
                 metadata={"ecosystem": proj["ecosystem"], "project_name": proj["name"], "version": proj.get("version"),
                           "manifest": proj["manifest"], "manifests": proj["manifests"], "role": proj.get("role"),
-                          "workspace": proj.get("workspace"), "qualified_name_authoritative": bool(proj["path"])}))
+                          "workspace": proj.get("workspace"),
+                          "qualified_name_authoritative": bool(proj["path"]) and ctype != "submodule"}))
         for ws in prof.workspaces:
             d = posixpath.dirname(ws["path"])
             ident = self._project_node(b, d)
@@ -143,7 +147,8 @@ class ManifestAnalyzer(Analyzer):
 
     def _services(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
         """One node per Compose service (all its variants), its code, and how services relate."""
-        services, edges = compose_services(ctx.profile.manifest_data)
+        analyzed = [i["path"] for i in ctx.profile.submodule_info if i.get("analyzed")]
+        services, edges = compose_services(ctx.profile.manifest_data, analyzed)
         self._service_ids: dict[str, str] = {}
         for svc in services:
             sid = b.id_for("svc", svc.key)
@@ -234,10 +239,16 @@ class ManifestAnalyzer(Analyzer):
                 line = svc.line if path == svc.path else None
                 ev = self.evidence(ctx, path, line, line, "runs") if line else \
                     SourceEvidence(path, None, None, "runs", self.name, svc.runs[0])
-                index.entry_targets.append(EntryTarget(ids[svc.key], svc.runs[0], svc.runs[1], ev, REL_RUNS))
+                index.entry_targets.append(EntryTarget(ids[svc.key], svc.runs[0], svc.runs[1], ev, REL_RUNS,
+                                                       near=svc.build_context))
 
     def discover_dependencies(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
         prof = ctx.profile
+        subs = sorted((i["path"] for i in prof.submodule_info if i.get("analyzed")), key=len, reverse=True)
+
+        def repo_of(d: str) -> str:
+            return next((s for s in subs if d == s or d.startswith(s + "/")), "")
+
         projects_by_dir = {p["path"]: p for p in prof.projects}
         self._jvm_groups: dict[str, str] = {}
         names: dict[tuple[str, str], str] = {}  # (ecosystem family, normalized name) -> project dir
@@ -272,6 +283,8 @@ class ManifestAnalyzer(Analyzer):
                     if target == source:
                         continue
                     meta["internal"] = True
+                    if repo_of(md.dir) != repo_of(target_dir):  # into (or out of) an analyzed submodule
+                        meta["cross_repository"] = True
                     b.add_edge(source, target, REL_DEPENDS_ON, analyzer=self.name, evidence=ev, metadata=meta)
                     b.stat(self.name, "internal_dependencies")
                 elif dep.local_path is not None:

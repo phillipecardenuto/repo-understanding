@@ -33,6 +33,7 @@ from .base import (
     Analyzer,
     Detection,
     SnapshotBuilder,
+    parse_parallel,
 )
 from .callflow import ModuleScope, RawCall, get_index
 
@@ -56,6 +57,11 @@ _REGEX_KEYWORDS = {"return", "typeof", "case", "do", "else", "in", "of", "new", 
 # --------------------------------------------------------------------------
 # Lexing
 # --------------------------------------------------------------------------
+
+
+def _parse_js_item(item: tuple[str, str]) -> tuple[str, "JsFileInfo"]:
+    path, text = item
+    return path, parse_js(text)
 
 
 def mask(text: str) -> tuple[str, str]:
@@ -475,6 +481,7 @@ class JavaScriptAnalyzer(Analyzer):
 
     def discover_modules(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
         infos: dict[str, JsFileInfo] = {}
+        texts: dict[str, tuple[tuple[Any, ...], str]] = {}
         for f in self._files(ctx):
             text = ctx.text(f)
             if text is None:
@@ -482,8 +489,12 @@ class JavaScriptAnalyzer(Analyzer):
             if f.endswith((".vue", ".svelte")):
                 text = extract_script(text)
             digest = ctx.source.content_hash(f) or stable_hash(text)
-            info = ctx.cached(("javascript", self.version, digest, f.endswith((".vue", ".svelte"))),
-                              lambda t=text: parse_js(t))
+            texts[f] = (("javascript", self.version, digest, f.endswith((".vue", ".svelte"))), text)
+        misses = [(f, text) for f, (key, text) in texts.items() if key not in ctx.file_cache]
+        for f, parsed in parse_parallel(_parse_js_item, misses).items():  # large batches in worker processes
+            ctx.file_cache[texts[f][0]] = parsed
+        for f, (key, text) in texts.items():
+            info = ctx.cached(key, lambda t=text: parse_js(t))
             infos[f] = info
             node = b.ensure_file(f, self.name)
             lang = ctx.profile.file_languages.get(f, (None, None))[0]

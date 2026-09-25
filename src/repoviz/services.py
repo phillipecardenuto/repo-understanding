@@ -107,14 +107,23 @@ def _image_name(image: str | None) -> str | None:
     return "/".join(parts).lower()
 
 
-def compose_services(manifest_data: dict[str, Any]) -> tuple[list[Service], list[ServiceEdge]]:
-    """Services and the edges between them, for every directory holding Compose files (deterministic)."""
+def compose_services(manifest_data: dict[str, Any], submodules: list[str] | tuple[str, ...] = ()
+                     ) -> tuple[list[Service], list[ServiceEdge]]:
+    """Services and the edges between them, for every directory holding Compose files (deterministic).
+
+    Compose files inside ``submodules`` (analyzed submodules) describe how that submodule runs on its own; they
+    are ignored when the superproject has Compose files of its own, which describe the system being looked at."""
     from .manifests import command_entry_target
 
+    def inside(path: str) -> bool:
+        return any(path.startswith(s + "/") for s in submodules)
+
+    composes = [md for md in manifest_data.values() if md.kind == "compose"]
+    if any(not inside(md.path) for md in composes):
+        composes = [md for md in composes if not inside(md.path)]
     groups: dict[str, list[Any]] = {}
-    for md in manifest_data.values():
-        if md.kind == "compose":
-            groups.setdefault(md.dir, []).append(md)
+    for md in composes:
+        groups.setdefault(md.dir, []).append(md)
     services: list[Service] = []
     edges: list[ServiceEdge] = []
     for d in sorted(groups):

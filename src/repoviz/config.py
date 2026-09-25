@@ -136,6 +136,11 @@ class Config:
     # Architecture contracts ([[contracts]]; [[review.rules]] are "forbidden" contracts) and their baseline.
     contracts: list[Contract] = field(default_factory=list)
     contracts_baseline: str = ".repoviz-known-violations.json"
+    # Git submodules: analyze checked-out submodules as nested sub-projects ([submodules]).
+    submodules_analyze: bool = True
+    submodules_exclude: list[str] = field(default_factory=list)  # submodule paths (globs) never analyzed
+    submodules_max_files: int = 5000  # larger submodules are shown as one box, "not analyzed (too large)"
+    submodules_max_mb: float = 50.0  # the same for their total size (model weights, datasets…)
     # Change coupling from Git history ("these files usually change together").
     history_commits: int = 300  # how many recent commits to learn from (0 disables)
     history_min_revs: int = 5  # a file needs this many commits before its habits count
@@ -274,6 +279,23 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
                 if value < 0 or (key == "min_degree" and value > 1):
                     raise ConfigError(f"history.{key} is out of range")
                 setattr(cfg, f"history_{key}", value)
+    subs = take("submodules")
+    if subs is not None:
+        if not isinstance(subs, dict):
+            raise ConfigError("'submodules' must be a table")
+        if "analyze" in subs:
+            cfg.submodules_analyze = bool(subs["analyze"])
+        if "exclude" in subs:
+            cfg.submodules_exclude = [x.strip("/") for x in _as_list(subs["exclude"], "submodules.exclude")]
+        for key, conv in (("max_files", int), ("max_mb", float)):
+            if key in subs:
+                try:
+                    value = conv(subs[key])
+                except (TypeError, ValueError):
+                    raise ConfigError(f"submodules.{key} must be a number") from None
+                if value <= 0:
+                    raise ConfigError(f"submodules.{key} must be positive")
+                setattr(cfg, f"submodules_{key}", value)
     review = take("review")
     if review is not None:
         if not isinstance(review, dict):

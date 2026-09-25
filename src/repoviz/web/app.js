@@ -544,6 +544,24 @@
      (a file committed once is not churn). Mirrors risk.hotspot_threshold (used by the risk score and the drawer). */
   const MIN_HOT_COMMITS = 2;
   /* Structure view: containment tree or nested boxes. */
+  /* Structure groups: containers, and analyzed submodules (a separate repository holding its own code). */
+  const isGroup = (n) => CONTAINERS.has(n.component_type) || n.component_type === "submodule";
+  /* One line for a submodule: pinned commit, size and languages, how far behind, local edits, or why it is not analyzed. */
+  function submoduleState(n) {
+    const m = meta(n), parts = ["submodule"];
+    if (m.commit) parts.push("@" + m.commit.slice(0, 7));
+    if (m.analyzed) { if (m.files) parts.push(plural(m.files, "file")); if ((m.languages || []).length) parts.push(m.languages.join(", ")); }
+    else parts.push("not analyzed (" + shortReason(m.not_analyzed) + ")");
+    if (m.behind) parts.push(`⬇ ${m.behind} behind ${m.behind_ref || "origin"}`);
+    if (m.recorded_commit) parts.push("↦ moved");
+    if (m.uncommitted_files) parts.push(`✎ ${m.uncommitted_files} uncommitted`);
+    return parts.join(" · ");
+  }
+  function shortReason(r) {
+    r = r || "";
+    return r.startsWith("too large") ? "too large" : r.startsWith("not checked out") ? "not checked out" : r.startsWith("excluded") ? "excluded" : r.startsWith("commit") ? "commit not fetched" : r.startsWith("turned off") ? "turned off" : "unknown";
+  }
+
   function structureView(si, o) {
     const view = { title: "Structure", direction: o.layout === "nested" ? "TB" : "LR", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, nested: [] };
     const root = o.root && si.nodes.has(o.root) ? o.root : rootOf(si);
@@ -554,7 +572,7 @@
       if (!o.files && (c.category === "module" || c.component_type === "file") && !hasTag(c, "entry-point")) return false;
       if (!o.files && c.component_type === "entry-point") return false;
       return true;
-    }).sort((a, b) => (CONTAINERS.has(b.component_type) - CONTAINERS.has(a.component_type)) || a.name.localeCompare(b.name));
+    }).sort((a, b) => (isGroup(b) - isGroup(a)) || a.name.localeCompare(b.name));
     let hot = 0;
     if (o.hotspots) {
       const counts = [...si.nodes.values()].filter((n) => n.category === "module" && meta(n).churn).map((n) => meta(n).churn.commits).sort((a, b) => a - b);
@@ -562,7 +580,7 @@
     }
     let count = 0;
     const label = (n, isRoot) => {
-      let sub = n.component_type;
+      let sub = n.component_type === "submodule" ? submoduleState(n) : n.component_type;
       const mods = (si.children.get(n.id) || []).filter((c) => si.nodes.get(c).category === "module").length;
       if (!o.files && mods) sub += ` · ${plural(mods, "module")}`;
       if (o.hotspots && meta(n).churn) sub += ` · ${meta(n).churn.commits} commits`;
@@ -574,7 +592,7 @@
       const walk = (n, depth, parent) => {
         if (count >= o.maxNodes) { view.truncated++; return; }
         const kids = childrenOf(n.id);
-        if (depth < o.depth && kids.length && CONTAINERS.has(n.component_type)) {
+        if (depth < o.depth && kids.length && isGroup(n)) {
           const sg = "sg_" + n.id;
           view.subgraphs.set(sg, { icon: icon(n), label: depth === 0 ? displayName(n) : n.name });
           view.nested.push({ id: sg, parent });
@@ -1637,6 +1655,24 @@
     },
   });
 
+  /* Git submodules and their states (the header chip opens it). */
+  function submodulesCard(subs) {
+    const state = (m) => [
+      m.analyzed ? pill("analyzed", "added") : pill("not analyzed: " + shortReason(m.not_analyzed), "medium"),
+      m.recorded_commit ? pill("↦ checked out at another commit", "modified") : null,
+      m.uncommitted_files ? pill(`✎ ${m.uncommitted_files} uncommitted`, "modified") : null,
+      m.behind ? pill(`⬇ ${m.behind} behind ${m.behind_ref || "origin"}`) : null,
+      !m.analyzed && m.not_analyzed ? h("div", { class: "faint small", text: m.not_analyzed }) : null];
+    return h("div", { class: "card wide", id: "submodules-card", tabindex: "-1" }, h("h3", null, iconEl("link"), ` Git submodules (${subs.length})`),
+      h("div", { class: "muted small" }, "Separate repositories pinned to a commit. Checked-out submodules are analyzed as nested sub-projects: their code is in the graphs. ",
+        "Configure with ", h("code", { text: "[submodules]" }), " (", h("code", { text: "exclude" }), ", ", h("code", { text: "max_files" }), ", ", h("code", { text: "max_mb" }), "). \"Behind\" uses the local remote-tracking branch; repoviz never fetches."),
+      table([{ key: "path", label: "Submodule", render: (m) => h("span", { class: "mono", text: m.path }) },
+        { key: "commit", label: "Commit", render: (m) => h("span", { class: "mono", text: (m.commit || "?").slice(0, 10) }) },
+        { key: "files", label: "Files", num: true, render: (m) => m.files === undefined ? "—" : String(m.files) },
+        { key: "languages", label: "Languages", render: (m) => (m.languages || []).join(", ") || "—" },
+        { key: "state", label: "State", render: (m) => h("span", null, state(m)) }], subs, { scroll: false }));
+  }
+
   /* Entry points grouped by the file that declares them; a Compose service lists its variants. */
   function entryPointGroups(eps) {
     if (!eps.length) return h("div", { class: "empty", text: "None found." });
@@ -1682,11 +1718,7 @@
           list((p.generated || []).concat((p.vendored || []).map((v) => Object.assign({ vendored: true }, v))), (g) => [h("span", { class: "mono", text: g.path }), " ", pill(g.vendored ? "vendored" : "generated"), h("span", { class: "faint", text: " " + (g.reason || "") })], "None detected.")),
         h("div", { class: "card" }, h("h3", { text: `Entry points (${(p.entry_points || []).length})` }),
           entryPointGroups(p.entry_points || [])),
-        (p.submodule_info || []).length ? h("div", { class: "card" }, h("h3", null, iconEl("link"), ` Git submodules (${p.submodule_info.length})`),
-          h("div", { class: "muted small", text: "Separate repositories pinned to a commit. Reviews look inside them; the graphs do not analyze their code." }),
-          list(p.submodule_info, (m) => [h("span", { class: "mono", text: m.path }), " ", h("span", { class: "mono faint", text: "@ " + (m.commit || "?").slice(0, 10) }),
-            m.checked_out === false ? pill("not checked out", "medium") : null, m.uncommitted_files ? pill(`${m.uncommitted_files} uncommitted`, "modified") : null,
-            m.url ? h("div", { class: "faint", text: m.url }) : null])) : null,
+        (p.submodule_info || []).length ? submodulesCard(p.submodule_info) : null,
         h("div", { class: "card" }, h("h3", { text: "Containers, deployment & CI" }),
           h("h4", { text: "Containers" }), list(p.containers, (c) => [h("span", { class: "mono", text: c.path }), " ", pill(c.kind), c.services && c.services.length ? " services: " + c.services.join(", ") : "", c.base_images && c.base_images.length ? " from " + c.base_images.join(", ") : ""]),
           h("h4", { text: "Deployment" }), list(p.deployment, (d) => [h("span", { class: "mono", text: d.path }), " ", pill(d.kind)]),
@@ -2998,6 +3030,7 @@
           "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
           "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
+          "**Git submodules** are separate repositories. When checked out, they are analyzed with the rest: a submodule is a group holding its own code (double-click to drill in). Its line shows the pinned commit, files and languages, `⬇ N behind` its remote (from the local remote-tracking branch: repoviz never fetches), `↦ moved` when it is checked out at another commit, and `✎ N uncommitted` for local edits. One that is not analyzed says why: not checked out, excluded in `[submodules]`, or too large. The **submodules** chip in the header opens the table of their states.",
           "Below the diagram, **Repository discovery** lists what was detected: languages, projects and workspaces, source and test roots, entry points, containers, CI, Git submodules, the architecture contracts (pass or fail) and the analyzers that ran."] },
         { tip: "If something looks wrong (a missing source root, tests counted as code, generated code analyzed), fix it once in `.repoviz.toml`. See `docs/configuration.md`." },
         { p: "Analysis diagnostics at the bottom explain what could not be resolved (unsupported languages, unresolved imports, dynamic calls), so you know the limits of the picture." },
@@ -3171,6 +3204,13 @@
         `${b.snapshot.modules.length} modules`, `${b.snapshot.components.length} components`, `${b.snapshot.symbols.length} symbols`,
         (p.languages || []).slice(0, 3).map((l) => l.display).join(", ")];
       for (const c of chips) if (c) info.appendChild(h("span", { class: "chip" }, c));
+      const subs = p.submodule_info || [];
+      if (subs.length) {  // "9 submodules (1 modified)": opens their states in the Structure tab
+        const modified = subs.filter((s) => s.uncommitted_files || s.recorded_commit).length;
+        info.appendChild(h("button", { class: "chip chip-button", type: "button", title: "Git submodules: states",
+          onclick: async () => { await this.show("structure"); const card = document.getElementById("submodules-card"); if (card) { card.scrollIntoView({ block: "center" }); card.focus({ preventScroll: true }); } } },
+          iconEl("link", true), ` ${plural(subs.length, "submodule")}` + (modified ? ` (${modified} modified)` : "")));
+      }
       const badge = $("#mode-badge");
       badge.textContent = this.api.live ? "● live" : `static report · ${fmtTime(b.generated_at)}`;
       badge.classList.toggle("live", this.api.live);

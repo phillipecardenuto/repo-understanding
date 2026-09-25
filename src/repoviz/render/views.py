@@ -358,6 +358,32 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
     return view
 
 
+def submodule_state(node: ComponentNode) -> str:
+    """One line for a submodule (as ``submoduleState`` in web/app.js): pinned commit, size and languages,
+    how far behind its remote, local edits, or why it is not analyzed."""
+    m = node.metadata
+    parts = ["submodule"]
+    if m.get("commit"):
+        parts.append("@" + str(m["commit"])[:7])
+    if m.get("analyzed"):
+        if m.get("files"):
+            parts.append(f"{m['files']} file{'s' if m['files'] != 1 else ''}")
+        if m.get("languages"):
+            parts.append(", ".join(m["languages"]))
+    else:
+        reason = str(m.get("not_analyzed") or "")
+        short = next((k for k in ("too large", "not checked out", "excluded", "turned off") if reason.startswith(k)),
+                     "commit not fetched" if reason.startswith("commit") else "unknown")
+        parts.append(f"not analyzed ({short})")
+    if m.get("behind"):
+        parts.append(f"⬇ {m['behind']} behind {m.get('behind_ref') or 'origin'}")
+    if m.get("recorded_commit"):
+        parts.append("↦ moved")
+    if m.get("uncommitted_files"):
+        parts.append(f"✎ {m['uncommitted_files']} uncommitted")
+    return " · ".join(parts)
+
+
 def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, depth: int = 3,
                    include_files: bool = False, max_nodes: int = 250, icons: dict[str, str] | None = None) -> ViewGraph:
     icons = default_icons() if icons is None else icons
@@ -379,7 +405,7 @@ def structure_view(snapshot: RepositorySnapshot, *, root: str | None = None, dep
         kids = [c for c in children.get(nid, []) if nodes[c].category != CATEGORY_SYMBOL
                 and (include_files or nodes[c].category != CATEGORY_MODULE and nodes[c].component_type != "file"
                      or "entry-point" in nodes[c].tags)]
-        sub = node.component_type
+        sub = submodule_state(node) if node.component_type == "submodule" else node.component_type
         if not include_files:
             n_mod = sum(1 for c in children.get(nid, []) if nodes[c].category == CATEGORY_MODULE)
             if n_mod:
