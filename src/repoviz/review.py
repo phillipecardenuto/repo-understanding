@@ -1346,6 +1346,7 @@ def _rename_findings(add: Any, diff: RepositoryDiff, target: RepositorySnapshot,
     by_name: dict[str, list[tuple[dict[str, Any], Any]]] = {}  # old short name -> (rename, node)
     files: dict[str, set[str]] = {}  # file to search -> old names to look for
     searched: dict[str, set[str]] = {}  # rename (new id) -> files where its old name counts
+    within: dict[str, tuple[int, int]] = {}  # nested function (new id) -> lines of its enclosing function
     for rn in checked:
         node = diff.nodes[rn["new_id"]].node
         old = diff.nodes[rn["new_id"]].before.get("name") or rn["old_name"].rsplit(".", 1)[-1]
@@ -1365,7 +1366,13 @@ def _rename_findings(add: Any, diff: RepositoryDiff, target: RepositorySnapshot,
         if node.component_type == "method":  # methods are called through objects: too ambiguous by name
             continue
         by_name.setdefault(old, []).append((rn, node))
-        module = module_of_path.get(node.path or "")
+        parent = t_idx.get(node.parent_id or "")
+        if parent is not None and parent.component_type in ("function", "method"):
+            # A nested function is local: only its enclosing function can use it.
+            within[rn["new_id"]] = (parent.start_line or 0, parent.end_line or 0)
+            module = None
+        else:
+            module = module_of_path.get(node.path or "")
         for path in [node.path] + sorted({t_idx[u].path for u in importers.get(module.id, ()) if t_idx[u].path}
                                          if module is not None else []):
             if path and (path in files or len(files) < MAX_STALE_FILES):
@@ -1382,6 +1389,9 @@ def _rename_findings(add: Any, diff: RepositoryDiff, target: RepositorySnapshot,
                         continue  # another symbol with the same old name, in a module this file does not use
                     if node.path == path and (node.start_line or 0) <= i <= (node.end_line or 0):
                         continue  # its own definition
+                    lo, hi = within.get(rn["new_id"], (0, 0))
+                    if hi and not lo <= i <= hi:
+                        continue  # outside the function that encloses a local definition
                     raw = raw if raw is not None else (target_src.read_text(path) or "").splitlines()
                     stale[rn["new_id"]].setdefault((path, i), raw[i - 1].strip()[:80] if i <= len(raw) else "")
     for rn in renames:

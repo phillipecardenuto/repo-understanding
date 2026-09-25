@@ -628,3 +628,31 @@ def test_contracts_overlay_in_dependencies_and_structure(page, make_repo, tmp_pa
     page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
     assert "Architecture contracts (1)" in page.inner_text("#tab-structure") and "1 new" in page.inner_text("#tab-structure")
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_pr_comment_diagram_renders_with_mermaid(page, make_repo, tmp_path: Path) -> None:
+    """The Mermaid block of the CI pull-request comment is valid for the vendored Mermaid (GitHub renders it)."""
+    import re
+
+    from test_review import diverged_repo
+
+    from repoviz.ci import pr_comment
+    from repoviz.review import build_review, resolve_target
+
+    repo = diverged_repo(make_repo)
+    repo.git("checkout", "-q", "feature")
+    repo.write({"app/x<b>\"q\"|y.py": "import json\n", "lib/tool.py": "from app import b\n"})
+    repo.commit("markup in names")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "main...feature"))
+    diagrams = [re.search(r"```mermaid\n(.*?)\n```", pr_comment(report, max_nodes=n), re.S).group(1) for n in (40, 1)]
+    out = tmp_path / "r.html"
+    out.write_text(render_static_html(build_bundle(r)), encoding="utf-8")
+    page.goto(out.as_uri())
+    page.wait_for_function("() => window.mermaid && repoviz.app", timeout=30_000)
+    svgs = page.evaluate("""async (texts) => { const out = [];
+        for (const [i, t] of texts.entries()) out.push((await window.mermaid.render('ci' + i, t)).svg);
+        return out; }""", diagrams)
+    assert all("<svg" in s and "Syntax error" not in s for s in svgs)
+    assert "more" in diagrams[1] and "more" in svgs[1]
+    assert page.errors == []  # type: ignore[attr-defined]

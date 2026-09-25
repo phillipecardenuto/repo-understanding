@@ -1,0 +1,22 @@
+# Dogfooding: repoviz reviews its own pull requests with the action in .github/actions/review.
+# (Here the action installs repoviz from the pull request itself, which is the point: it tests the change.
+# For other repositories the action installs repoviz from the action's own pinned ref.)
+name: repoviz review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # repoviz needs the history of both ends of the pull request
+      - uses: ./.github/actions/review
+        with:
+          min-severity: medium  # report only: repoviz's own test fixtures contain the patterns its signals look for

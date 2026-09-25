@@ -59,7 +59,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 
 | Command | Purpose |
 |---|---|
-| `repoviz review [TARGET] [--format text\|markdown\|prompt\|json] [--fail-on …] [--commit SHA] [--by-commit]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. |
+| `repoviz review [TARGET] [--format text\|markdown\|prompt\|json\|sarif\|github\|pr-comment] [--fail-on …] [--commit SHA] [--by-commit] [--from-report FILE]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. `sarif`, `github` (inline annotations) and `pr-comment` are for CI; `--from-report` re-renders a saved JSON report without analysing again. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). |
@@ -68,7 +68,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz snapshot [--rev REV] -o snap.json` | The normalized graph of one state as JSON. |
 | `repoviz activity [--json]` | Files being modified now, with impact, tests and config flags. |
 | `repoviz coupling [--path FILE] [--json]` | Files that usually change together, learned from Git history. |
-| `repoviz contracts [--format text\|json\|sarif] [--baseline] [--suggest]` | Check the architecture contracts (`[[contracts]]`: layers, independence, forbidden, public interface, acyclic, required). Exit 3 on a violation not in the known-violations baseline. `--baseline` prints the baseline to commit; `--suggest` proposes a layers contract. |
+| `repoviz contracts [--format text\|json\|sarif\|github] [--baseline] [--suggest]` | Check the architecture contracts (`[[contracts]]`: layers, independence, forbidden, public interface, acyclic, required). Exit 3 on a violation not in the known-violations baseline. `--baseline` prints the baseline to commit; `--suggest` proposes a layers contract. |
 | `repoviz session start\|status\|scope\|end\|list [--allow G] [--protect G]` | Manage work sessions (waves) and their scope. |
 
 Every command takes `-C PATH` (repository), `--config FILE`, `--exclude GLOB`,
@@ -255,6 +255,46 @@ in `.claude/settings.json`:
     ]
   }
 }
+```
+
+### In CI: review every pull request
+
+The composite action in `.github/actions/review` runs `repoviz review` on each
+pull request. It posts one comment that is updated on every push, with a
+Mermaid map of where the change went, the riskiest signals and every file, and
+it adds inline annotations on the changed lines. It can also upload SARIF to code
+scanning and fail the check on the conditions you choose. It reads the
+repository through Git only and never runs its code.
+
+```yaml
+# .github/workflows/repoviz.yml
+name: repoviz review
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write        # the sticky comment
+  # security-events: write    # only with sarif: "true"
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # repoviz needs the history of both ends
+      - uses: phillipecardenuto/repo-understanding/.github/actions/review@main   # pin a tag or commit
+        with:
+          fail-on: "protected risk:high contract-broken"   # optional gate (exit 3)
+          min-severity: medium                             # lowest severity annotated inline
+          # sarif: "true"
+```
+
+The same outputs work in any CI:
+
+```bash
+repoviz review "$BASE...$HEAD" --format json -o review.json          # analyse once
+repoviz review --from-report review.json --format pr-comment --link-base "$URL/blob/$SHA"
+repoviz review --from-report review.json --format sarif -o repoviz.sarif
+repoviz review --from-report review.json --fail-on high             # gate without analysing again
 ```
 
 ## Supported ecosystems

@@ -388,6 +388,12 @@ def cmd_contracts(args: argparse.Namespace) -> int:
         _write(json.dumps(rep, indent=1), args.output)
     elif args.format == "sarif":
         _write(json.dumps(sarif(rep, __version__), indent=1), args.output)
+    elif args.format == "github":
+        from .ci import github_commands
+
+        _write(github_commands([{"kind": "contract-broken", "title": f"Contract broken: {v['contract']}",
+                                 "severity": v["severity"], "detail": v["detail"], "path": v["path"],
+                                 "line": v["line"]} for v in rep["violations"] if not v["known"]]), args.output)
     else:
         _write(format_contracts_text(rep), args.output)
     return EXIT_GATE if rep["new"] else EXIT_OK
@@ -497,23 +503,34 @@ def cmd_review(args: argparse.Namespace) -> int:
     if bad:
         print(f"repoviz: unknown --fail-on condition {bad[0]!r} (use risk:high or risk:medium)", file=sys.stderr)
         return EXIT_ERROR
-    repo = _open(args)
-    if args.list:
-        for t in review_targets(repo):
-            print(f"{t.id:<40} {t.label}")
-        return EXIT_OK
-    try:
-        target = resolve_target(repo, args.target, args.base, args.head_rev)
-    except ValueError as exc:
-        print(f"repoviz: {exc}", file=sys.stderr)
-        return EXIT_ERROR
-    try:
-        report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect),
-                              commit=args.commit)
-    except ValueError as exc:
-        print(f"repoviz: {exc}", file=sys.stderr)
-        return EXIT_ERROR
-    notes = repo.state.load_notes(target.key)
+    if args.from_report:  # reformat a saved `--format json` report without analysing again (CI: one run, many outputs)
+        try:
+            report = json.loads(Path(args.from_report).read_text(encoding="utf-8"))
+            missing = [k for k in ("summary", "findings", "target", "files", "base", "head") if k not in report]
+            if missing:
+                raise ValueError(f"not a repoviz review report (missing {', '.join(missing)})")
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"repoviz: cannot read the report {args.from_report}: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        notes = report.pop("notes", None) or []
+    else:
+        repo = _open(args)
+        if args.list:
+            for t in review_targets(repo):
+                print(f"{t.id:<40} {t.label}")
+            return EXIT_OK
+        try:
+            target = resolve_target(repo, args.target, args.base, args.head_rev)
+        except ValueError as exc:
+            print(f"repoviz: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        try:
+            report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect),
+                                  commit=args.commit)
+        except ValueError as exc:
+            print(f"repoviz: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        notes = repo.state.load_notes(target.key)
     if args.format == "json":
         report["notes"] = notes
         _write(dumps(report), args.output)
@@ -521,6 +538,19 @@ def cmd_review(args: argparse.Namespace) -> int:
         _write(feedback_markdown(report, notes, min_severity=args.min_severity), args.output)
     elif args.format == "markdown":
         _write(format_review_markdown(report), args.output)
+    elif args.format == "sarif":
+        from . import __version__
+        from .ci import review_sarif
+
+        _write(json.dumps(review_sarif(report, __version__), indent=1), args.output)
+    elif args.format == "github":
+        from .ci import github_commands
+
+        _write(github_commands(report["findings"], args.min_severity), args.output)
+    elif args.format == "pr-comment":
+        from .ci import pr_comment
+
+        _write(pr_comment(report, link_base=args.link_base), args.output)
     else:
         _write(format_review_text(report, by_commit=args.by_commit), args.output)
     failed = []
@@ -671,7 +701,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("contracts", parents=[common],
                        help="check architecture contracts ([[contracts]]); exit 3 on violations not in the baseline")
     p.add_argument("--rev", help="revision to check (default: the working tree)")
-    p.add_argument("--format", choices=("text", "json", "sarif"), default="text")
+    p.add_argument("--format", choices=("text", "json", "sarif", "github"), default="text",
+                   help="github = workflow commands (inline annotations in GitHub Actions)")
     p.add_argument("--baseline", action="store_true",
                    help="print the current violations as a baseline to commit, e.g. "
                    "`repoviz contracts --baseline > .repoviz-known-violations.json`")
@@ -707,10 +738,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow", action="append", default=[], metavar="GLOB", help="additional allowed path (repeatable)")
     p.add_argument("--protect", action="append", default=[], metavar="GLOB",
                    help="additional protected path (repeatable)")
-    p.add_argument("--format", choices=("text", "json", "markdown", "prompt"), default="text",
-                   help="prompt = feedback for the agent (reviewer notes + automated signals)")
+    p.add_argument("--format", choices=("text", "json", "markdown", "prompt", "sarif", "github", "pr-comment"),
+                   default="text", help="prompt = feedback for the agent (reviewer notes + automated signals); "
+                   "sarif = code scanning; github = workflow commands (inline annotations in GitHub Actions); "
+                   "pr-comment = Markdown with a Mermaid map for a pull request")
     p.add_argument("--min-severity", choices=("high", "medium", "low", "info"), default="medium",
-                   help="lowest severity of automated signals included in --format prompt")
+                   help="lowest severity of automated signals included in --format prompt and github")
+    p.add_argument("--from-report", metavar="FILE",
+                   help="format (and gate on) a report saved with --format json instead of analysing again")
+    p.add_argument("--link-base", metavar="URL",
+                   help="pr-comment: link files to URL/<path>#L<line>, e.g. https://github.com/OWNER/REPO/blob/HEAD_SHA")
     p.add_argument("--list", action="store_true", help="list reviewable targets (sessions, waves, presets)")
     p.add_argument("--commit", metavar="SHA",
                    help="review one commit of the target's range on its own (WORKTREE = its uncommitted work)")

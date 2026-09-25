@@ -772,6 +772,18 @@ def test_renamed_symbol_still_used_by_an_untouched_module(make_repo) -> None:
     assert key["name"] == "calculate" and key["renamed_from"] == "compute" and key["status"] == "modified"
 
 
+def test_renamed_nested_function_is_only_searched_in_its_enclosing_function(make_repo) -> None:
+    repo = make_repo({
+        "lib.py": "def outer(xs):\n    def lines(x):\n        return x\n\n    return [lines(x) for x in xs]\n",
+        "other.py": "import lib\n\n\ndef count(lines):\n    return len(lines) + len(lib.outer(lines))\n",
+    })
+    Path(repo.path, "lib.py").write_text("def outer(xs):\n    def code(x):\n        return x\n\n"
+                                         "    return [code(x) for x in xs]\n\n\nlines = 3\n")
+    kinds = by_kind(_review_all(repo))
+    assert "renamed-symbol-stale-references" not in kinds  # other.py's and the module's `lines` are not it
+    assert [f["symbol"] for f in kinds["renamed-symbol"]] == ["lib.outer.code"]
+
+
 def test_moved_file_is_one_entry_with_its_small_edit(make_repo) -> None:
     repo = make_repo({"pkg/__init__.py": "", "pkg/util.py": "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\n"
                       "def c():\n    return 3\n", "main.py": "from pkg.util import a\n\nprint(a())\n"})

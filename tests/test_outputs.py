@@ -384,3 +384,107 @@ def test_contracts_command_without_contracts(make_repo, capsys) -> None:
     repo = make_repo({"a.py": "A = 1\n"})
     assert main(["contracts", "-C", repo.path]) == 0
     assert "no contracts configured" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- CI outputs (#17)
+
+
+def _ci_report(make_repo):
+    from test_review import diverged_repo
+
+    repo = diverged_repo(make_repo)
+    r = Repository(repo.path)
+    from repoviz.review import build_review, resolve_target
+
+    return repo, build_review(r, resolve_target(r, "main...feature"))
+
+
+def test_review_sarif_has_the_required_keys_and_stable_fingerprints(make_repo, capsys) -> None:
+    from repoviz.ci import review_sarif
+
+    repo, report = _ci_report(make_repo)
+    sarif = review_sarif(report, "9.9")
+    assert sarif["version"] == "2.1.0" and sarif["$schema"].endswith("sarif-2.1.0.json")
+    [run] = sarif["runs"]
+    rules = {r["id"]: r for r in run["tool"]["driver"]["rules"]}
+    assert run["tool"]["driver"]["name"] == "repoviz" and len(rules) == len(run["tool"]["driver"]["rules"])
+    assert run["results"] and all(set(r) >= {"ruleId", "level", "message", "partialFingerprints"} for r in run["results"])
+    for res in run["results"]:
+        assert res["ruleId"] in rules and res["level"] in ("error", "warning", "note")
+        assert res["message"]["text"] and res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "app/b.py"
+    for rule in rules.values():
+        assert rule["shortDescription"]["text"] and rule["defaultConfiguration"]["level"] in ("error", "warning", "note")
+    assert main(["review", "-C", repo.path, "main...feature", "--format", "sarif"]) == 0
+    again = json.loads(capsys.readouterr().out)
+    assert [r["partialFingerprints"] for r in again["runs"][0]["results"]] == \
+        [r["partialFingerprints"] for r in run["results"]]  # stable across runs: tracked across pushes
+
+
+def test_github_workflow_commands_are_escaped() -> None:
+    from repoviz.ci import github_commands
+
+    findings = [{"kind": "k", "severity": "high", "title": "Bad: 100%, really", "path": "a,b:c%.py", "line": 7,
+                 "detail": "50% done\r\nnext: line, more", "suggestion": "fix"},
+                {"kind": "k", "severity": "low", "title": "Minor", "detail": "no path"},
+                {"kind": "k", "severity": "info", "title": "Hidden"}]
+    out = github_commands(findings, "low").splitlines()
+    assert out[0] == ("::error file=a%2Cb%3Ac%25.py,line=7,title=repoviz%3A Bad%3A 100%25%2C really::"
+                      "50%25 done%0D%0Anext: line, more%0ASuggestion: fix")
+    assert out[1] == "::notice title=repoviz%3A Minor::no path" and len(out) == 2  # info is below "low"
+
+
+def test_pr_comment_map_links_and_size(make_repo) -> None:
+    from repoviz.ci import COMMENT_MARKER, MAX_MAP_NODES, pr_comment
+
+    _repo, report = _ci_report(make_repo)
+    text = pr_comment(report, link_base="https://github.com/o/r/blob/abc")
+    assert text.startswith(COMMENT_MARKER) and "```mermaid\nflowchart LR" in text
+    assert "[`app/b.py`](https://github.com/o/r/blob/abc/app/b.py)" in text and "<details>" in text
+    # A wave of 120 files in one component: the map caps at 40 nodes, the comment at the size limit.
+    big = dict(report, files=[dict(report["files"][0], path=f"app/m{i:03}.py", findings=[]) for i in range(120)],
+               components=[dict(report["components"][0], files=120)])
+    text = pr_comment(big, link_base="https://github.com/o/r/blob/abc")
+    diagram = text.split("```mermaid\n", 1)[1].split("```", 1)[0]
+    nodes = [ln for ln in diagram.splitlines() if ln.strip().startswith(("n", "more")) and "[" in ln]
+    assert len(nodes) == MAX_MAP_NODES and '"… 81 more"' in diagram and "81 more not drawn" in text
+    small = pr_comment(big, max_chars=4000)
+    assert len(small) <= 4000 and "The file list was shortened" in small and small.startswith(COMMENT_MARKER)
+
+
+def test_review_from_report_formats_and_gates_without_analysing(make_repo, tmp_path, capsys) -> None:
+    repo, _report = _ci_report(make_repo)
+    saved = tmp_path / "review.json"
+    assert main(["review", "-C", repo.path, "main...feature", "--format", "json", "-o", str(saved)]) == 0
+    assert main(["review", "--from-report", str(saved), "--format", "pr-comment"]) == 0
+    assert capsys.readouterr().out.startswith("<!-- repoviz-review -->")
+    assert main(["review", "--from-report", str(saved), "--fail-on", "medium"]) == 3
+    (tmp_path / "bad.json").write_text('{"x": 1}')
+    assert main(["review", "--from-report", str(tmp_path / "bad.json")]) == 1
+    assert "not a repoviz review report" in capsys.readouterr().err
+
+
+def test_contracts_github_annotations(make_repo, capsys) -> None:
+    from test_review import LAYERED, LAYERS_TOML
+
+    repo = make_repo(dict(LAYERED, **{".repoviz.toml": LAYERS_TOML}))
+    repo.write({"app/models/user.py": "from app.routes import api\n"})
+    assert main(["contracts", "-C", repo.path, "--format", "github"]) == 3
+    assert capsys.readouterr().out.startswith("::error file=app/models/user.py,line=1,title=repoviz%3A Contract broken")
+
+
+def test_review_action_is_sticky_and_never_runs_the_repository() -> None:
+    import pytest
+
+    from repoviz.ci import COMMENT_MARKER
+
+    yaml = pytest.importorskip("yaml")
+    root = Path(__file__).resolve().parents[1]
+    action = yaml.safe_load((root / ".github/actions/review/action.yml").read_text())
+    steps = action["runs"]["steps"]
+    runs = "\n".join(s.get("run", "") for s in steps)
+    assert COMMENT_MARKER in runs and "PATCH" in runs  # updates its own comment in place
+    assert 'pip install --quiet --disable-pip-version-check "$GITHUB_ACTION_PATH/../../.."' in runs
+    assert "$GITHUB_WORKSPACE" not in runs and "pip install ." not in runs  # installs repoviz, never the analyzed repo
+    assert set(action["inputs"]) >= {"base", "head", "fail-on", "min-severity", "comment", "sarif"}
+    workflow = yaml.safe_load((root / ".github/workflows/repoviz-review.yml").read_text())
+    assert workflow["jobs"]["review"]["steps"][0]["with"]["fetch-depth"] == 0

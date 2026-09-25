@@ -1,0 +1,127 @@
+# Reviews a pull request's changes with repoviz and reports on the pull request.
+#
+# It installs repoviz from this action's own ref (pin it: ...@v0.2.0), reads the analyzed repository through Git
+# only and never runs its code. Needs the history of both ends: use actions/checkout with fetch-depth: 0.
+# Permissions: pull-requests: write for `comment`, security-events: write for `sarif`, nothing else.
+name: repoviz review
+description: "Architecture-aware review of a pull request (where the change went, risk, signals, contracts) as a sticky comment, annotations and SARIF."
+author: repoviz
+
+inputs:
+  base:
+    description: "Base revision (default: the pull request's base commit). The review covers what `head` added since it left `base`."
+    default: ${{ github.event.pull_request.base.sha }}
+  head:
+    description: "Head revision (default: the pull request's head commit)."
+    default: ${{ github.event.pull_request.head.sha }}
+  fail-on:
+    description: "Space-separated `repoviz review --fail-on` conditions that fail the step, e.g. \"high protected risk:high contract-broken\"."
+    default: ""
+  min-severity:
+    description: "Lowest severity shown as an inline annotation (high, medium, low, info)."
+    default: medium
+  comment:
+    description: "Post the review as a pull-request comment, updated in place on each push (\"true\" or \"false\")."
+    default: "true"
+  annotations:
+    description: "Show signals as inline annotations on the changed lines (\"true\" or \"false\")."
+    default: "true"
+  sarif:
+    description: "Upload the signals to code scanning as SARIF (\"true\" or \"false\"; needs security-events write)."
+    default: "false"
+  token:
+    description: "Token used to post the comment."
+    default: ${{ github.token }}
+  python-version:
+    description: "Python used to run repoviz."
+    default: "3.12"
+
+outputs:
+  risk:
+    description: "The change's risk level (high, medium or low)."
+    value: ${{ steps.review.outputs.risk }}
+  report:
+    description: "Path of the JSON review report."
+    value: ${{ steps.review.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install repoviz (from this action's ref, not from the analyzed repository)
+      shell: bash
+      run: python -m pip install --quiet --disable-pip-version-check "$GITHUB_ACTION_PATH/../../.."
+
+    - name: Review (one analysis, several outputs)
+      id: review
+      shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+        HEAD: ${{ inputs.head }}
+        MIN_SEVERITY: ${{ inputs.min-severity }}
+        ANNOTATIONS: ${{ inputs.annotations }}
+        SARIF: ${{ inputs.sarif }}
+        LINK_BASE: ${{ github.server_url }}/${{ github.repository }}/blob/${{ inputs.head }}
+      run: |
+        set -euo pipefail
+        if [ -z "$BASE" ] || [ -z "$HEAD" ]; then
+          echo "::error title=repoviz::No base or head revision: run on pull_request events or set the base and head inputs."
+          exit 1
+        fi
+        out="$RUNNER_TEMP/repoviz"
+        mkdir -p "$out"
+        repoviz review "$BASE...$HEAD" --format json -o "$out/review.json"
+        repoviz review --from-report "$out/review.json" --format pr-comment --link-base "$LINK_BASE" -o "$out/comment.md"
+        if [ "$ANNOTATIONS" = "true" ]; then
+          repoviz review --from-report "$out/review.json" --format github --min-severity "$MIN_SEVERITY"
+        fi
+        if [ "$SARIF" = "true" ]; then
+          repoviz review --from-report "$out/review.json" --format sarif -o "$out/repoviz.sarif"
+        fi
+        cat "$out/comment.md" >> "$GITHUB_STEP_SUMMARY"
+        echo "report=$out/review.json" >> "$GITHUB_OUTPUT"
+        echo "dir=$out" >> "$GITHUB_OUTPUT"
+        python -c "import json, sys; print('risk=' + ((json.load(open(sys.argv[1])).get('risk') or {}).get('level') or 'low'))" \
+          "$out/review.json" >> "$GITHUB_OUTPUT"
+
+    - name: Post or update the pull-request comment
+      if: inputs.comment == 'true' && github.event.pull_request.number
+      shell: bash
+      continue-on-error: true  # pull requests from forks get a read-only token: the review still runs
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        BODY: ${{ steps.review.outputs.dir }}/comment.md
+      run: |
+        set -euo pipefail
+        # Sticky: update the bot comment that carries the marker instead of posting a new one on every push.
+        id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq '.[] | select(.user.type == "Bot" and (.body | contains("<!-- repoviz-review -->"))) | .id' | head -n 1)
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F "body=@$BODY" > /dev/null
+        else
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -F "body=@$BODY" > /dev/null
+        fi
+
+    - name: Upload SARIF to code scanning
+      if: inputs.sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.review.outputs.dir }}/repoviz.sarif
+        category: repoviz
+
+    - name: Gate
+      if: inputs.fail-on != ''
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+        REPORT: ${{ steps.review.outputs.report }}
+      run: |
+        set -euo pipefail
+        args=()
+        for condition in $FAIL_ON; do args+=(--fail-on "$condition"); done
+        repoviz review --from-report "$REPORT" "${args[@]}" > /dev/null

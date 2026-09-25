@@ -6,6 +6,17 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Pull-request review in CI** ([#17](https://github.com/phillipecardenuto/repo-understanding/issues/17)).
+  - `repoviz review --format sarif|github|pr-comment`: SARIF 2.1.0 with stable
+    fingerprints, inline GitHub annotations, and a sticky pull-request comment
+    with a Mermaid map of where the change went, the top signals and every file
+    by risk (capped at 40 nodes and 65,000 characters).
+  - `--from-report FILE` renders or gates a saved JSON report without
+    analysing again; `--link-base URL` links files and lines in the comment.
+  - `repoviz contracts --format github` annotates new contract violations.
+  - A composite GitHub Action (`.github/actions/review`) posts and updates the
+    comment, annotates, optionally uploads SARIF and gates with `fail-on`.
+    repoviz reviews its own pull requests with it.
 - **Architecture contracts with a known-violations baseline** ([#16](https://github.com/phillipecardenuto/repo-understanding/issues/16)).
   - `[[contracts]]` declares layers (optionally per container), independent
     modules, public interfaces, forbidden and required dependencies, and
@@ -124,6 +135,9 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Fixed
 
+- A renamed nested function no longer reports `renamed-symbol-stale-references`
+  for unrelated uses of its old name in other functions or modules: only its
+  enclosing function is searched.
 - A deep review of the rename, risk and branch work fixed:
   - **Class renames.** A method that only moved with its renamed class was
     reported as "renamed from" its own name, which hid the class rename.
