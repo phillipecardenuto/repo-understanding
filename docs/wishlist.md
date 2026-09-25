@@ -112,9 +112,9 @@ Labels:
    These change the most for someone reviewing agent waves every day, and they
    have no prerequisites.
 2. **Guardrails:** #16 (contracts), #17 (CI) and #18 (MCP), done.
-3. **Multi-service systems:** #22 (compose system view) and #21 (submodules as
+3. **Multi-service systems:** #22 (compose system view), #21 (submodules as
    sub-projects), #23 (runtime edges) and #24 (Dependencies defaults, header
-   counts), done.
+   counts), all done.
 4. **UI at scale:** #27, #29, #28 and #31.
 5. **Anytime:** #34 (the cache makes #6, #32 and #10 cheaper), #14, #25 and #11.
 
