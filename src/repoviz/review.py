@@ -617,7 +617,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         entry["symbols"] = key_changes
         # --- values: constants and settings, before → after (values.py) --------------------------
         entry["values"] = []
-        if before is not None and after is not None:
+        if before is not None and after is not None and exists_before and exists_after:  # a new file: not one by one
             if value_files < MAX_VALUE_FILES:
                 value_files += 1
                 entry["values"] = value_changes(path, before, after, lang)

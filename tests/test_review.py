@@ -1343,6 +1343,15 @@ def test_constant_and_setting_values_are_key_changes(make_repo, capsys) -> None:
     assert "| `DEBUG` | `False` → `True` ⚠ debug mode switched on |" in comment
 
 
+def test_values_of_new_and_deleted_files_are_not_listed(make_repo) -> None:
+    repo = make_repo(VALUES_APP)
+    repo.write({"app/new_settings.py": "DEBUG = True\nMAX_ROWS = 10\n"}).delete("app/limits.py")
+    report = _review_all(repo)
+    files = {f["path"]: f for f in report["files"]}
+    assert files["app/new_settings.py"]["values"] == [] and files["app/limits.py"]["values"] == []
+    assert "safety-flag-weakened" not in by_kind(report)
+
+
 def test_safety_flag_signal_can_be_disabled(make_repo) -> None:
     repo = make_repo({**VALUES_APP, ".repoviz.toml": '[review]\ndisabled_checks = ["safety-flag-weakened"]\n'})
     values_wave(repo)
