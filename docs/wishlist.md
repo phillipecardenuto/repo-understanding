@@ -98,7 +98,7 @@ Labels:
 
 | # | Item | Priority | Size |
 |---|---|---|---|
-| [#34](https://github.com/phillipecardenuto/repo-understanding/issues/34) | Persistent on-disk parse cache (SQLite, JSON payloads) | P2 | M |
+| [#34](https://github.com/phillipecardenuto/repo-understanding/issues/34) | Persistent on-disk parse cache (SQLite, JSON payloads) · **partly done**: the cache is in, but a second Django review is 1.4× faster, not 5× (parsing is about 30% of the work) | P2 | M |
 
 ## Suggested order
 
@@ -117,7 +117,8 @@ Labels:
    counts), all done.
 4. **UI at scale:** #27 (diagram readability), #29 (lists), #28 (why and blast
    radius) and #31 (history comparisons), all done.
-5. **Anytime:** #34 (the cache makes #6, #32 and #10 cheaper), #14, #25 and #11.
+5. **Anytime:** #34 (parse cache in; the 5× target needs incremental graph
+   building), then #14, #25 and #11.
 
 ## Dependencies between items
 
