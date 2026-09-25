@@ -65,7 +65,7 @@ Labels:
 | # | Item | Priority | Size |
 |---|---|---|---|
 | [#16](https://github.com/phillipecardenuto/repo-understanding/issues/16) | Architecture contracts (layers, independence, public interfaces, acyclic) with a known-violations baseline · **✓ done** | P1 | L |
-| [#17](https://github.com/phillipecardenuto/repo-understanding/issues/17) | CI: SARIF, GitHub annotations, a PR comment with a Mermaid diagram, a reusable Action | P2 | M |
+| [#17](https://github.com/phillipecardenuto/repo-understanding/issues/17) | CI: SARIF, GitHub annotations, a PR comment with a Mermaid diagram, a reusable Action · **✓ done** | P2 | M |
 | [#18](https://github.com/phillipecardenuto/repo-understanding/issues/18) | Read-only MCP server: agents ask about architecture, impact and scope before editing | P2 | M |
 | [#19](https://github.com/phillipecardenuto/repo-understanding/issues/19) | Export architecture docs and other diagram formats (C4/PlantUML, Structurizr, draw.io) · *not planned* | P3 | M |
 
@@ -111,8 +111,8 @@ Labels:
 
    These change the most for someone reviewing agent waves every day, and they
    have no prerequisites.
-2. **Guardrails:** #16 (contracts), done; then #17 (CI) and #18 (MCP). #17 and #18
-   reuse the contracts and the risk score.
+2. **Guardrails:** #16 (contracts) and #17 (CI), done; then #18 (MCP), which
+   reuses the contracts and the risk score.
 3. **Multi-service systems:** #22 (compose system view), then #21 (submodules as
    sub-projects), #23 (runtime edges) and #24. #23 needs the service model from
    #22.
