@@ -716,7 +716,7 @@ def test_submodules_as_groups_in_structure(page, make_repo, tmp_path: Path) -> N
     report.write_text(render_static_html(build_bundle(Repository(main.path))), encoding="utf-8")
     page.goto(report.as_uri() + "#tab=structure")
     page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
-    chip = page.locator("#repo-info .chip-button")
+    chip = page.locator("#repo-info [data-chip=submodules]")
     assert chip.inner_text().strip() == "1 submodule (1 modified)"
     sub = page.evaluate("[...repoviz.app.snapshotIndex.nodes.values()].find(n => n.component_type === 'submodule').id")
     label = page.evaluate(f"document.querySelector(\"#tab-structure g.node[data-node-id='{sub}']\").textContent")
@@ -731,4 +731,52 @@ def test_submodules_as_groups_in_structure(page, make_repo, tmp_path: Path) -> N
     page.wait_for_function("() => document.querySelector('#tab-structure').offsetParent !== null", timeout=10_000)
     assert card.is_visible() and "modules/engine" in card.inner_text() and "analyzed" in card.inner_text()
     assert "✎ 1 uncommitted" in card.inner_text()
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_dependencies_default_and_header_counts(page, make_repo, tmp_path: Path) -> None:
+    from test_outputs import TWO_PACKAGES
+
+    repo = make_repo(TWO_PACKAGES)
+    bundle = build_bundle(Repository(repo.path))
+    report = tmp_path / "counts.html"
+    report.write_text(render_static_html(bundle), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=dependencies")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    tab = page.locator("#tab-dependencies")
+    assert "package level (auto)" in tab.locator(".diagram-head .title").inner_text()
+    note = tab.locator(".notice[role=status]")
+    assert note.is_visible() and "Showing packages because the code has only 2 components" in note.inner_text()
+    names = page.evaluate("Array.from(document.querySelectorAll('#tab-dependencies g.node')).map(g => g.textContent)")
+    assert any("app.core" in n for n in names) and not any("redis" in n or "service" in n for n in names)  # services hidden
+    page.check("#tab-dependencies label.check:has-text('services') input")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=30_000)
+    assert "api" in page.evaluate("document.querySelector('#tab-dependencies .viewport svg').textContent")
+    note.locator("a").click()  # "Switch to components"
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=30_000)
+    assert tab.locator(".toolbar select >> nth=0").input_value() == "component" and note.is_hidden()
+    # the header: separate counts, each with an icon and words, matching `repoviz discover`
+    chips = {c.get_attribute("data-chip"): c for c in page.locator("#repo-info [data-chip]").all()}
+    assert set(chips) == {"code-components", "services", "external-packages", "entry-points"}  # zero counts hidden
+    assert chips["code-components"].inner_text().strip() == "2 code components"
+    assert chips["services"].inner_text().strip() == "5 services (2 first-party)"
+    assert chips["entry-points"].inner_text().strip() == f"{bundle['breakdown']['entry_points']} entry points"
+    assert all(c.locator("i.rvi").count() == 1 for c in chips.values())
+    chips["services"].click()
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=30_000)
+    assert page.locator("#tab-structure .toolbar select >> nth=0").input_value() == "system"
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_a_stored_dependencies_level_wins(page, make_repo, tmp_path: Path) -> None:
+    from test_outputs import TWO_PACKAGES
+
+    repo = make_repo(TWO_PACKAGES)
+    report = tmp_path / "stored.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.add_init_script("localStorage.setItem('rv.deps', JSON.stringify({level: 'component'}))")
+    page.goto(report.as_uri() + "#tab=dependencies")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    assert "component level" in page.locator("#tab-dependencies .diagram-head .title").inner_text()
+    assert page.locator("#tab-dependencies .notice[role=status]").is_hidden()
     assert page.errors == []  # type: ignore[attr-defined]

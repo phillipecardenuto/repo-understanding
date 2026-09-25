@@ -126,6 +126,17 @@ are tables of new and removed dependencies (with evidence), cycles introduced,
 resolved or changed, and every changed node with the reason it changed. The live
 app accepts any comparison; a static report offers the precomputed ones.
 
+**The header** counts what the repository holds, each count apart:
+
+- code components (those holding modules);
+- services (first-party or infrastructure);
+- submodules;
+- third-party packages;
+- entry points.
+
+Each chip has an icon and opens the matching view. `repoviz discover` prints
+the same numbers ("contents: …", and `breakdown` in `--json`).
+
 **Structure.** When the repository has Compose files, the tab opens on the
 **System** view: the running system, from `docker-compose*.yml` / `compose*.yaml`.
 
@@ -169,9 +180,16 @@ lists:
 - existing architecture configuration and dependency tooling
 - analyzer runs and diagnostics
 
-**Dependencies.** The dependency graph at any level, filtered by relationship
-(`imports`, `depends-on` from manifests, `calls`, `invokes`, `builds`). Options
-cover external packages, stdlib, tests and type-only imports. You can focus on a
+**Dependencies.** The dependency graph at any level, filtered by relationship.
+The relationships are `imports`, `depends-on` from manifests, `calls`,
+`invokes`, `builds`, and **runtime (containers, HTTP)**. Options cover external
+packages, stdlib, tests and type-only imports.
+
+The *Auto* level shows components when the code has at least three of them.
+Otherwise it shows packages, with a note saying why and a link to switch. A
+level you pick is remembered and always wins. Compose services appear only
+where the code calls them; the **services** option adds their own links,
+which the System view shows anyway. You can focus on a
 node, choose depth and direction (depends on / used by), and highlight or isolate
 cycles. The **Contracts** overlay marks imports that break an architecture
 contract (thick, dashed, "⚠ contract name") and draws a layers contract's

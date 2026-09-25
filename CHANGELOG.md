@@ -6,6 +6,18 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Honest header counts and a smarter Dependencies default** ([#24](https://github.com/phillipecardenuto/repo-understanding/issues/24)).
+  - The header counts code components, services (first-party), submodules,
+    external packages and entry points apart. It used to show one
+    "components" number that mixed them. Each chip has an icon and opens its
+    view.
+  - `repoviz discover` prints the same breakdown ("contents: …", and
+    `breakdown` in `--json`).
+  - *Auto* in the Dependencies tab shows packages when the code has fewer than
+    three components, with a note and a "Switch to components" link. A stored
+    level always wins.
+  - Compose services' own links are left to the System view unless the new
+    **services** option is on. `repoviz mermaid --services` does the same.
 - **Runtime coupling from code: container images and service URLs** ([#23](https://github.com/phillipecardenuto/repo-understanding/issues/23)).
   - A new `runtime` analyzer reads Python and JavaScript without running them.
   - Code that starts an image this repository builds gets an

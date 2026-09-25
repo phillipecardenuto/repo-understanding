@@ -503,3 +503,30 @@ def test_mermaid_system_view(make_repo, capsys) -> None:
     empty = make_repo({"a.py": "x = 1\n"})
     assert main(["mermaid", "-C", empty.path, "--view", "system"]) == 0
     assert "no services found" in capsys.readouterr().err
+
+
+TWO_PACKAGES = {  # 2 code packages and 5 Compose services (#24)
+    "app/__init__.py": "", "app/api/__init__.py": "", "app/core/__init__.py": "",
+    "app/api/routes.py": "from app.core import models\n\napp = models\n",
+    "app/core/models.py": "import requests\n\nUser = object\n",
+    "worker/__init__.py": "", "worker/tasks.py": "from app.core import models\n\ncelery = models\n",
+    "Dockerfile": "FROM python:3.12\n",
+    "docker-compose.yml": "services:\n  api:\n    build: .\n    command: uvicorn app.api.routes:app\n"
+                          "  worker:\n    build: .\n    command: celery -A worker.tasks worker\n"
+                          "  redis:\n    image: redis:7\n  mongo:\n    image: mongo:7\n  proxy:\n    image: nginx:1.25\n",
+    "requirements.txt": "requests==2.32.0\n",
+}
+
+
+def test_discover_breaks_the_counts_down(make_repo, capsys) -> None:
+    repo = make_repo(TWO_PACKAGES)
+    assert main(["discover", "-C", repo.path, "--json"]) == 0
+    bd = json.loads(capsys.readouterr().out)["breakdown"]
+    assert bd["code_components"] == 2 and bd["services"] == 5 and bd["first_party_services"] == 2
+    assert bd["external_packages"] == 1 and bd["submodules"] == 0 and bd["modules"] == 7
+    assert main(["discover", "-C", repo.path]) == 0
+    text = capsys.readouterr().out
+    assert "contents: 2 code components · 5 services (2 first-party) · 1 external package" in text
+    from repoviz.render.html import build_bundle
+
+    assert build_bundle(Repository(repo.path), include_activity=False)["breakdown"] == bd  # the header's numbers

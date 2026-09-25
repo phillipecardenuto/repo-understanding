@@ -157,17 +157,21 @@ def gate(diff: RepositoryDiff, conditions: list[str]) -> list[str]:
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
+    from .render.views import breakdown
+
     repo = _open(args)
     source = repo.open_source(args.rev)
     prof = repo.discover(source)
     data = prof.to_dict()
+    counts = breakdown(repo.snapshot_of(source, source.label))  # the same counts as the web app's header
+    data["breakdown"] = counts
     if args.json:
         _write(json.dumps(data, indent=2, default=str), args.output)
         return EXIT_OK
     out = [f"Repository: {prof.root}  ({'Git' if prof.is_git else 'plain directory'})",
            f"  branch {prof.branch or '-'}  HEAD {(prof.head or '-')[:12]}  default branch {prof.default_branch or 'unknown'}",
            f"  files: {prof.file_count} total, {prof.analyzed_file_count} analyzed, {prof.excluded_count} excluded",
-           "", "Languages:"]
+           "  contents: " + format_breakdown(counts), "", "Languages:"]
     for l in prof.languages[:15]:
         support = "analyzed" if l["supported"] else ("structure only" if l["kind"] == "programming" else l["kind"])
         out.append(f"  {l['display']:<16} {l['files']:>6} files   {support}")
@@ -206,6 +210,22 @@ def cmd_discover(args: argparse.Namespace) -> int:
             out.append(f"  {d.severity}: {d.message}")
     _write("\n".join(out), args.output)
     return EXIT_OK
+
+
+def format_breakdown(c: dict[str, int]) -> str:
+    """``2 code components · 5 services (3 first-party) · …`` (zero counts left out)."""
+    def n(count: int, word: str) -> str:
+        return f"{count} {word}{'' if count == 1 else 's'}"
+
+    parts = [n(c["code_components"], "code component")
+             + (f" ({c['code_components_in_submodules']} in submodules)" if c.get("code_components_in_submodules") else ""),
+             n(c["services"], "service") + (f" ({c['first_party_services']} first-party)" if c["services"] else "")
+             if c["services"] else "",
+             n(c["submodules"], "submodule") if c["submodules"] else "",
+             n(c["external_packages"], "external package") if c["external_packages"] else "",
+             n(c["entry_points"], "entry point") if c["entry_points"] else "",
+             n(c["modules"], "module")]
+    return " · ".join(p for p in parts if p)
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
@@ -287,7 +307,8 @@ def cmd_mermaid(args: argparse.Namespace) -> int:
             view = views.dependency_view(snap, level=args.level, include_external=args.external, focus=focus,
                                          depth=args.depth, max_nodes=args.max_nodes, icons=icons,
                                          relationships=args.relationships or views.DEFAULT_RELATIONSHIPS,
-                                         contract_edges=contract_edges, layers=layers)
+                                         contract_edges=contract_edges, layers=layers,
+                                         include_services=args.services)
         elif args.view == "system":
             view = views.system_view(snap, max_nodes=args.max_nodes)
             if not view.nodes:
@@ -682,6 +703,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--external", action="store_true")
     p.add_argument("--contracts", action="store_true",
                    help="dependencies view: mark imports that break a contract, and draw a layers contract's layers")
+    p.add_argument("--services", action="store_true",
+                   help="dependencies view: also draw Compose services' own links (images, builds, other services)")
     p.add_argument("--max-nodes", type=int, default=200)
     p.set_defaults(func=cmd_mermaid)
 

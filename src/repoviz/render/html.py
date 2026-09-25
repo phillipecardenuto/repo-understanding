@@ -27,6 +27,7 @@ from ..model import RepositoryDiff
 from ..pipeline import utcnow
 from ..repo import Comparison, Repository
 from .mermaid import theme
+from .views import breakdown
 
 COMPRESS_THRESHOLD = 1_500_000
 
@@ -254,6 +255,7 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "tool_version": __version__,
         "generated_at": utcnow(),
         "profile": snapshot.profile,
+        "breakdown": breakdown(snapshot),
         "revisions": _revisions(repo),
         "comparisons": payloads,
         "activity": to_jsonable(activity) if activity is not None else None,

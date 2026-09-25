@@ -489,8 +489,8 @@
       const s = group(e.source_id), t = group(e.target_id);
       if (!s || !t || s === t) continue;
       if (!o.tests && (hasTag(si.nodes.get(s), "test") || hasTag(si.nodes.get(t), "test"))) continue;
+      if (!o.services && (si.nodes.get(e.source_id) || {}).component_type === "service") continue;  // the System view draws a service's own links
       if (RUNTIME_RELS.includes(e.relationship)) {  // a line of its own, labelled (not an import, not in cycles)
-        if ((si.nodes.get(e.source_id) || {}).component_type === "service") continue;  // between services: the System view
         const rk = s + "\u0000" + t + "\u0000" + e.relationship;
         const r = rpairs.get(rk) || { count: 0, labels: [], underlying: [] };
         r.count += e.occurrences; r.underlying.push(e.id);
@@ -1542,6 +1542,7 @@
       this.draw();
     }
     setRoot(id) { this.opts.root = id; if (this.viewName() === "system") this.opts.view = "files"; this.save(); this.syncViewSelect(); this.draw(); }
+    showView(v) { this.opts.view = v; this.save(); this.syncViewSelect(); this.draw(); }
     /* System when the repository declares services (unless the files view was chosen), else Files. */
     viewName() { return this.services && this.opts.view !== "files" ? "system" : "files"; }
     syncViewSelect() { const s = this.root.querySelector(".toolbar select"); if (s && this.services && s.value !== this.viewName()) s.value = this.viewName(); }
@@ -1747,7 +1748,7 @@
           h("h4", { text: "Documentation" }), list(p.docs, (r) => [h("span", { class: "mono", text: r.path }), ` · ${r.files} files `, h("span", { class: "faint", text: r.reason })])),
         h("div", { class: "card" }, h("h3", { text: "Generated & vendored code (excluded from analysis)" }),
           list((p.generated || []).concat((p.vendored || []).map((v) => Object.assign({ vendored: true }, v))), (g) => [h("span", { class: "mono", text: g.path }), " ", pill(g.vendored ? "vendored" : "generated"), h("span", { class: "faint", text: " " + (g.reason || "") })], "None detected.")),
-        h("div", { class: "card" }, h("h3", { text: `Entry points (${(p.entry_points || []).length})` }),
+        h("div", { class: "card", id: "entry-points-card", tabindex: "-1" }, h("h3", { text: `Entry points (${(p.entry_points || []).length})` }),
           entryPointGroups(p.entry_points || [])),
         (p.submodule_info || []).length ? submodulesCard(p.submodule_info) : null,
         h("div", { class: "card" }, h("h3", { text: "Containers, deployment & CI" }),
@@ -1772,7 +1773,7 @@
       this.app = app; this.root = root;
       const cfg = app.bundle.config || {};
       this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on", ...RUNTIME_RELS], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
-        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false, contracts: false }, storage.get("rv.deps", {}));
+        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false, contracts: false, services: false }, storage.get("rv.deps", {}));
       this.opts.cycleMembers = null;
       if (!this.opts.runtimeDefault) {  // saved filters from before runtime edges existed: show them once
         this.opts.relationships = [...new Set([...this.opts.relationships, ...RUNTIME_RELS])];
@@ -1817,11 +1818,14 @@
         h("div", { class: "field" }, h("span", { text: "Include" }), h("div", { class: "group" },
           checkbox("external", o.external, (c) => { o.external = c; redraw(); }), checkbox("stdlib", o.stdlib, (c) => { o.stdlib = c; redraw(); }),
           checkbox("tests", o.tests, (c) => { o.tests = c; redraw(); }), checkbox("type-only imports", o.typeOnly, (c) => { o.typeOnly = c; redraw(); }),
+          this.servicesCheck = checkbox("services", o.services, (c) => { o.services = c; redraw(); }),
           checkbox("highlight cycles", o.cycles, (c) => { o.cycles = c; redraw(); }), checkbox("cycles only", o.cyclesOnly, (c) => { o.cyclesOnly = c; redraw(); }),
           checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
         h("div", { class: "field" }, h("span", { text: "Overlay" }), h("div", { class: "group" }, overlay))),
+        this.levelNote = h("div", { class: "notice", role: "status", hidden: true }),
         h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el),
         h("div", { class: "two-col" }, this.cyclesEl, this.fanEl), this.contractsEl);
+      this.servicesCheck.title = "Also draw the Compose services' own links (images, builds, other services). Services the code calls are always shown; the System view (Structure tab) is their home.";
       this.drawContracts();
       this.draw();
     }
@@ -1856,6 +1860,26 @@
       if ((c.fixed || []).length) el.appendChild(h("div", { class: "muted", text: `Fixed since the baseline (${c.fixed.length}): remove them from ${c.baseline.path}.` }));
     }
     setFocus(id) { this.opts.focus = id; this.opts.cycleMembers = null; const n = this.si.nodes.get(id); this.focusInput.value = n ? displayName(n) : ""; this.save(); this.draw(); }
+    setLevel(level) { this.opts.level = level; const s = this.root.querySelector(".toolbar select"); if (s) s.value = level; this.save(); this.draw(); }
+    showExternal() { this.opts.external = true; const c = $$("label.check", this.root).find((l) => l.textContent.trim() === "external"); if (c) $("input", c).checked = true; this.setLevel("component"); }
+    /* Auto level: components when the code has at least three of them, else packages (with a note saying why);
+       modules when even that leaves nothing to see.  A level the user picked always wins. */
+    autoView() {
+      const o = this.opts, si = this.si, bd = this.app.bundle.breakdown;
+      this.levelNote.hidden = true;
+      if (!bd) return autoLevel((x) => dependencyView(si, x), o, ["component", "package", "module"]);
+      const few = bd.code_components < 3;
+      let view = dependencyView(si, Object.assign({}, o, { level: few ? "package" : "component" }));
+      view.level = few ? "package" : "component";
+      if (view.nodes.length < 2) { view = dependencyView(si, Object.assign({}, o, { level: "module" })); view.level = "module"; return view; }
+      if (few) {
+        this.levelNote.innerHTML = "";
+        put(this.levelNote, `Showing packages because the code has only ${plural(bd.code_components, "component")}. `,
+          h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); this.setLevel("component"); } }, "Switch to components"));
+        this.levelNote.hidden = false;
+      }
+      return view;
+    }
     async draw() {
       const o = this.opts, si = this.si;
       if (o.level === "symbol" && !o.focus && !o.cycleMembers) {
@@ -1864,7 +1888,8 @@
         this.diagram.overlay.textContent = "Choose a focus node (a function, class or module) to explore the symbol-level call graph.";
         return;
       }
-      const view = o.level === "auto" ? autoLevel((x) => dependencyView(si, x), o, ["component", "package", "module"]) : dependencyView(si, o);
+      if (o.level !== "auto") this.levelNote.hidden = true;
+      const view = o.level === "auto" ? this.autoView() : dependencyView(si, o);
       view.level = view.level || o.level;
       const f = o.focus ? si.nodes.get(o.focus) : null;
       this.diagram.setTitle(`Dependencies · ${view.level} level${o.level === "auto" ? " (auto)" : ""}${f ? " · focus " + displayName(f) : ""}`);
@@ -3065,6 +3090,7 @@
           "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
           "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
+          "**The header chips** count what the repository holds, each apart: code components, services, submodules, external packages and entry points. Click one to open its view. `repoviz discover` prints the same numbers.",
           "**Git submodules** are separate repositories. When checked out, they are analyzed with the rest: a submodule is a group holding its own code (double-click to drill in). Its line shows the pinned commit, files and languages, `⬇ N behind` its remote (from the local remote-tracking branch: repoviz never fetches), `↦ moved` when it is checked out at another commit, and `✎ N uncommitted` for local edits. One that is not analyzed says why: not checked out, excluded in `[submodules]`, or too large. The **submodules** chip in the header opens the table of their states.",
           "Below the diagram, **Repository discovery** lists what was detected: languages, projects and workspaces, source and test roots, entry points, containers, CI, Git submodules, the architecture contracts (pass or fail) and the analyzers that ran."] },
         { tip: "If something looks wrong (a missing source root, tests counted as code, generated code analyzed), fix it once in `.repoviz.toml`. See `docs/configuration.md`." },
@@ -3072,7 +3098,8 @@
       ] },
     { id: "dependencies", title: "Dependencies", icon: "graph", tab: "dependencies", intro: "Explore who depends on whom, find dependency cycles, and focus on one part of the system.",
       blocks: [
-        { ul: ["**Level**: project, component, package or module. Start high and go down.",
+        { ul: ["**Level**: project, component, package or module. Start high and go down. *Auto* shows components when the code has at least three of them, and packages otherwise (a note says so, with a link to switch). A level you pick is remembered.",
+          "**Include services** adds the Compose services' own links (their images, builds and other services). Without it, a service appears only where the code calls it; the System view in the Structure tab is where services live.",
           "**Click a node** to spotlight it: the nodes that use it are joined by **solid, thick** links, the nodes it uses by **dashed, thick** links, and everything else fades. The line above the diagram gives both counts. The layout does not move. **Esc**, **Clear** or a click on the empty background shows everything again; clicking another node moves the spotlight. The fan-in / fan-out table does the same.",
           "**Focus** on a name to see its neighbourhood; **Depth** and **Direction** control it. *Dependents* answers \"what breaks if I change this?\"; *dependencies* answers \"what does this use?\".",
           "**Runtime (containers, HTTP)** (on by default) adds coupling that imports miss. A **runs image** line (dashed, labelled with the image) goes from code that starts a container to the code that builds that image: `client.containers.run(settings.ENGINE_IMAGE)` or `[\"docker\", \"run\", IMAGE]` leads to the submodule or directory the image is built from. A **talks to** line (solid, labelled with protocol and port) goes from code that calls a service's URL (`http://cbir-service:8000/…`, or a host variable that the Compose files point at a service) to that service. Constants are followed across imports; nothing is run. An image or host this repository does not provide makes no line: the module lists it under *external runtime references* in its details.",
@@ -3236,16 +3263,34 @@
       $("#mode-label").textContent = " · " + (b.snapshot.repository_name || "");
       const info = $("#repo-info");
       info.innerHTML = "";
+      const bd = b.breakdown || null;
       const chips = [p.branch ? [iconEl("branch", true), " " + p.branch] : p.is_git ? "detached HEAD" : "no Git", p.head ? "HEAD " + p.head.slice(0, 10) : null,
-        `${b.snapshot.modules.length} modules`, `${b.snapshot.components.length} components`, `${b.snapshot.symbols.length} symbols`,
-        (p.languages || []).slice(0, 3).map((l) => l.display).join(", ")];
+        `${plural(bd ? bd.modules : b.snapshot.modules.length, "module")}`, bd ? null : `${b.snapshot.components.length} components`,
+        `${plural(bd ? bd.symbols : b.snapshot.symbols.length, "symbol")}`, (p.languages || []).slice(0, 3).map((l) => l.display).join(", ")];
       for (const c of chips) if (c) info.appendChild(h("span", { class: "chip" }, c));
-      const subs = p.submodule_info || [];
-      if (subs.length) {  // "9 submodules (1 modified)": opens their states in the Structure tab
-        const modified = subs.filter((s) => s.uncommitted_files || s.recorded_commit).length;
-        info.appendChild(h("button", { class: "chip chip-button", type: "button", title: "Git submodules: states",
-          onclick: async () => { await this.show("structure"); const card = document.getElementById("submodules-card"); if (card) { card.scrollIntoView({ block: "center" }); card.focus({ preventScroll: true }); } } },
-          iconEl("link", true), ` ${plural(subs.length, "submodule")}` + (modified ? ` (${modified} modified)` : "")));
+      // What the repository holds, counted apart (the same numbers as `repoviz discover`); each chip opens its view.
+      const chip = (name, count, icon, text, title, onclick) => (count ? info.appendChild(h("button", { class: "chip chip-button", type: "button", "data-chip": name, title, onclick },
+        iconEl(icon, true), " " + text)) : null);
+      if (bd) {
+        chip("code-components", bd.code_components, "layers", plural(bd.code_components, "code component"),
+          `Components that hold code${bd.code_components_in_submodules ? ` (${bd.code_components_in_submodules} of them submodules)` : ""}. Opens the Dependencies tab at component level.`,
+          async () => { await this.show("dependencies"); this.tabs.dependencies.setLevel("component"); });
+        chip("services", bd.services, "server", `${plural(bd.services, "service")}${bd.first_party_services ? ` (${bd.first_party_services} first-party)` : ""}`,
+          "Services from the Compose files: first-party ones are built from this repository, the others are infrastructure. Opens the System view.",
+          async () => { await this.show("structure"); this.tabs.structure.showView("system"); });
+        const subs = p.submodule_info || [];
+        if (subs.length) {  // "9 submodules (1 modified)": opens their states in the Structure tab
+          const modified = subs.filter((s) => s.uncommitted_files || s.recorded_commit).length;
+          info.appendChild(h("button", { class: "chip chip-button", type: "button", "data-chip": "submodules", title: "Git submodules: their states. Opens the table in the Structure tab.",
+            onclick: async () => { await this.show("structure"); const card = document.getElementById("submodules-card"); if (card) { card.scrollIntoView({ block: "center" }); card.focus({ preventScroll: true }); } } },
+            iconEl("link", true), ` ${plural(subs.length, "submodule")}` + (modified ? ` (${modified} modified)` : "")));
+        }
+        chip("external-packages", bd.external_packages, "cloud", plural(bd.external_packages, "external package"),
+          "Third-party packages declared or imported (standard library excluded). Opens the Dependencies tab with external packages shown.",
+          async () => { await this.show("dependencies"); this.tabs.dependencies.showExternal(); });
+        chip("entry-points", bd.entry_points, "play", plural(bd.entry_points, "entry point"),
+          "Declared entry points: console scripts, package mains, container commands, Compose services. Opens their list in the Structure tab.",
+          async () => { await this.show("structure"); const card = document.getElementById("entry-points-card"); if (card) { card.scrollIntoView({ block: "center" }); card.focus({ preventScroll: true }); } });
       }
       const badge = $("#mode-badge");
       badge.textContent = this.api.live ? "● live" : `static report · ${fmtTime(b.generated_at)}`;

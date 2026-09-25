@@ -293,13 +293,38 @@ def changes_view(diff: RepositoryDiff, *, level: str = "component", scope: str =
     return view
 
 
+def breakdown(snapshot: RepositorySnapshot) -> dict[str, int]:
+    """What a snapshot holds, counted apart (the header chips and ``repoviz discover``): components that hold
+    code, compose services, submodules, third-party packages and entry points are different things, and one
+    "components" number mixing them misleads."""
+    idx = snapshot.node_index()
+    code = {m.metadata.get("component_id") for m in snapshot.modules} - {None}
+    code_components = [idx[c] for c in code if c in idx and "external" not in idx[c].tags
+                       and idx[c].component_type not in ("service", "entry-point", "repository")]
+    services = [n for n in snapshot.components if n.component_type == "service"]
+    return {
+        "code_components": len(code_components),
+        "code_components_in_submodules": sum(1 for c in code_components if c.component_type == "submodule"),
+        "services": len(services),
+        "first_party_services": sum(1 for n in services if "first-party" in n.tags),
+        "submodules": sum(1 for n in snapshot.components if n.component_type == "submodule"),
+        "external_packages": sum(1 for n in snapshot.components
+                                 if n.component_type == "external-package" and "stdlib" not in n.tags),
+        "entry_points": sum(1 for n in snapshot.components if n.component_type == "entry-point"),
+        "modules": len(snapshot.modules),
+        "symbols": len(snapshot.symbols),
+    }
+
+
 def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
                     relationships: Iterable[str] = DEFAULT_RELATIONSHIPS, include_external: bool = False,
                     include_tests: bool = True, focus: str | None = None, depth: int = 1, max_nodes: int = 250,
                     icons: dict[str, str] | None = None, contract_edges: dict[str, list[str]] | None = None,
-                    layers: dict[str, Any] | None = None) -> ViewGraph:
+                    layers: dict[str, Any] | None = None, include_services: bool = False) -> ViewGraph:
     """``contract_edges`` (import edge ID → contracts it breaks) marks those dependencies; ``layers`` (from
-    ``contracts.layer_groups``) draws a layers contract's layers as numbered groups."""
+    ``contracts.layer_groups``) draws a layers contract's layers as numbered groups.  Compose services are
+    drawn only where the code reaches them unless ``include_services`` (their own links belong to the System
+    view)."""
     icons = default_icons() if icons is None else icons
     rels = set(relationships)
     nodes = snapshot.node_index()
@@ -319,9 +344,9 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
             continue
         if not include_tests and ("test" in nodes[s].tags or "test" in nodes[t].tags):
             continue
+        if not include_services and nodes[e.source_id].component_type == "service":
+            continue  # a service's own links (images, builds, other services): the System view draws those
         if e.relationship in RUNTIME_RELATIONSHIPS:  # as dependencyView in web/app.js
-            if nodes[e.source_id].component_type == "service":
-                continue  # between services: the System view draws those
             count, labels = run_pairs.get((s, t, e.relationship), (0, []))
             label = e.metadata.get("label")
             run_pairs[(s, t, e.relationship)] = (count + e.occurrences,
