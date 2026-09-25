@@ -84,7 +84,7 @@ Labels:
 | # | Item | Priority | Size |
 |---|---|---|---|
 | [#27](https://github.com/phillipecardenuto/repo-understanding/issues/27) | Diagram readability at scale: orientation, minimum zoom, folded leaf lists, faint old cycles | P1 | M |
-| [#24](https://github.com/phillipecardenuto/repo-understanding/issues/24) | Smarter Dependencies-tab defaults and honest header counts | P2 | S |
+| [#24](https://github.com/phillipecardenuto/repo-understanding/issues/24) | Smarter Dependencies-tab defaults and honest header counts · **✓ done** | P2 | S |
 | [#28](https://github.com/phillipecardenuto/repo-understanding/issues/28) | "Why does A depend on B?" path finder and blast radius on click | P2 | M |
 | [#29](https://github.com/phillipecardenuto/repo-understanding/issues/29) | Lists that scale: grouping, relevance sort, filter and search | P2 | M |
 | [#30](https://github.com/phillipecardenuto/repo-understanding/issues/30) | Health metrics and hotspot overlays (complexity × churn, fan-in/out, ownership) | P2 | M |
@@ -113,8 +113,8 @@ Labels:
    have no prerequisites.
 2. **Guardrails:** #16 (contracts), #17 (CI) and #18 (MCP), done.
 3. **Multi-service systems:** #22 (compose system view) and #21 (submodules as
-   sub-projects) and #23 (runtime edges), done; then #24, which uses the System
-   view.
+   sub-projects), #23 (runtime edges) and #24 (Dependencies defaults, header
+   counts), done.
 4. **UI at scale:** #27, #29, #28 and #31.
 5. **Anytime:** #34 (the cache makes #6, #32 and #10 cheaper), #14, #25 and #11.
 
