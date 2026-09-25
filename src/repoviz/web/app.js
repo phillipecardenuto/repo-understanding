@@ -1355,45 +1355,143 @@
   }
 
   /* Sortable table.  opts: sort/dir (initial order), state (object that keeps the user's sort across redraws),
-     onRow, isSelected(row), onOrder(sortedRows), limit (rows rendered before a "show more" row), empty, scroll. */
+     onRow, isSelected(row), onOrder(visibleRows), limit (rows rendered before a "show more" row), empty, scroll.
+     Lists that scale (all optional):
+     - search(row) → text: a search box (case-insensitive substring); `/` focuses it.
+     - facet: { of(row) → id, label(id) }: one chip per value with its count; several can be on (a component filter).
+     - group: { of(row) → id, label(id, rows), summary(rows), head(row) (the row that heads its group, e.g. a
+       submodule), toggleIn (column key of a head row that gets the ▸/▾ toggle), auto (rows from which grouping is
+       on by default) }.  Groups come in the order of their first row under the current sort.
+     - filter(row) → false hides a row (a tab's own switch); toolbar: extra controls; noun: "files", "nodes"….
+     - persist: localStorage key for the query, chips, grouping, collapsed groups and sort.
+     Returns the element; el.list = { toggleGroupOf(row), focusSearch(), redraw() }. */
   function table(columns, rows, opts) {
     opts = opts || {};
     const st = opts.state || {};
-    let sortKey = st.sort !== undefined ? st.sort : opts.sort || null, dir = st.dir || opts.dir || 1;
+    if (opts.persist && !st.restored) Object.assign(st, storage.get(opts.persist, {}), { restored: true });
+    const save = () => { if (opts.persist) storage.set(opts.persist, { q: st.q || "", facets: st.facets || [], grouped: st.grouped, collapsed: st.collapsed || [], sort: st.sort, dir: st.dir }); };
+    let sortKey = st.sort !== undefined && columns.some((c) => c.key === st.sort) ? st.sort : opts.sort || null, dir = st.dir || opts.dir || 1;
     let limit = opts.limit || 300;
     const tbody = h("tbody");
     const heads = columns.map((c) => {
-      const th = h("th", { scope: "col", tabindex: "0", text: c.label, onclick: () => { dir = sortKey === c.key ? -dir : 1; sortKey = c.key; st.sort = sortKey; st.dir = dir; draw(); } });
+      const th = h("th", { scope: "col", tabindex: "0", text: c.label, title: c.title || null, onclick: () => { dir = sortKey === c.key ? -dir : 1; sortKey = c.key; st.sort = sortKey; st.dir = dir; save(); draw(); } });
       th.addEventListener("keydown", (ev) => { if (ev.key === "Enter") th.click(); });
       return th;
     });
+    const g = opts.group, fc = opts.facet;
+    const collapsed = () => new Set(st.collapsed || []);
+    const base = () => (opts.filter ? rows.filter(opts.filter) : rows);
+    const isGrouped = (rs) => !!g && (st.grouped !== undefined && st.grouped !== null ? st.grouped
+      : rs.length >= (g.auto || 20) && new Set(rs.map(g.of)).size >= 2);
+    const toggleGroup = (id) => {
+      const c = collapsed();
+      if (c.has(id)) c.delete(id); else c.add(id);
+      st.collapsed = [...c]; save(); draw();
+    };
+    // The toolbar: search box, chips (redrawn with their counts), grouping switch, the tab's own controls and a count.
+    let searchInput = null, chipsEl = null, groupBox = null, countEl = null;
+    if (opts.search) {
+      searchInput = h("input", { type: "search", class: "list-search", value: st.q || "", placeholder: `Search ${opts.noun || "rows"}… ( / )`, "aria-label": `Search ${opts.noun || "rows"}` });
+      searchInput.addEventListener("input", debounce(() => { st.q = searchInput.value; limit = opts.limit || 300; save(); draw(); }, 120));
+      searchInput.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && searchInput.value) { ev.stopPropagation(); searchInput.value = ""; st.q = ""; save(); draw(); } });
+    }
+    if (fc) chipsEl = h("div", { class: "facets", role: "group", "aria-label": opts.facetLabel || "Filter" });
+    if (g) {
+      groupBox = h("input", { type: "checkbox", onchange: () => { st.grouped = groupBox.checked; save(); draw(); } });
+    }
+    countEl = h("span", { class: "muted list-count", role: "status" });
+    const tools = opts.search || fc || g || opts.toolbar ? h("div", { class: "list-tools" }, searchInput,
+      g ? h("label", { class: "check" }, groupBox, opts.groupLabel || "group by component") : null, opts.toolbar || null, countEl, chipsEl) : null;
+    const drawChips = (counts) => {
+      chipsEl.innerHTML = "";
+      const on = new Set(st.facets || []);
+      const ids = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a) || String(fc.label(a)).localeCompare(String(fc.label(b))));
+      for (const id of [...on].filter((x) => !counts.has(x))) ids.push(id);  // a chosen chip stays, with 0
+      if (ids.length < 2 && !on.size) return;
+      for (const id of ids) {
+        const full = String(fc.label(id)), short = full.includes("/") ? full.split("/").pop() : full;  // system_modules/cbir → cbir
+        const b = h("button", { type: "button", class: "facet" + (on.has(id) ? " on" : ""), "aria-pressed": on.has(id) ? "true" : "false", title: full },
+          on.has(id) ? "✓ " : "", h("span", { class: "facet-name", text: midTrunc(short, 28) }), h("span", { class: "facet-count", text: ` ${counts.get(id) || 0}` }));
+        b.addEventListener("click", () => { const s2 = new Set(st.facets || []); if (s2.has(id)) s2.delete(id); else s2.add(id); st.facets = [...s2]; save(); draw(); });
+        chipsEl.appendChild(b);
+      }
+      if (on.size) chipsEl.appendChild(h("button", { type: "button", class: "btn small", onclick: () => { st.facets = []; save(); draw(); } }, "Clear filter"));
+    };
     const draw = () => {
       tbody.innerHTML = "";
-      let data = rows.slice();
+      let data = base().slice();
+      const total = data.length, grouped = isGrouped(data);
+      const q = (st.q || "").trim().toLowerCase();
+      if (q && opts.search) data = data.filter((r) => String(opts.search(r) || "").toLowerCase().includes(q));
+      if (fc) {
+        const counts = new Map();
+        for (const r of data) { const id = fc.of(r); counts.set(id, (counts.get(id) || 0) + 1); }
+        drawChips(counts);
+        const on = new Set(st.facets || []);
+        if (on.size) data = data.filter((r) => on.has(fc.of(r)));
+      }
       if (sortKey) {
         const col = columns.find((c) => c.key === sortKey);
         const val = col.sort || ((r) => r[sortKey]);
         data.sort((a, b) => { const x = val(a), y = val(b); return (x > y ? 1 : x < y ? -1 : 0) * dir; });
       }
       heads.forEach((th, i) => th.setAttribute("aria-sort", columns[i].key === sortKey ? (dir > 0 ? "ascending" : "descending") : "none"));
-      if (opts.onOrder) opts.onOrder(data);
-      if (!data.length) tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "empty", text: opts.empty || "Nothing here." })));
-      let selected = null;
-      for (const r of data.slice(0, limit)) {
+      // The visible sequence: group headers, and rows unless their group is collapsed.
+      st.groupedNow = grouped;  // for cell renderers (e.g. paths relative to their group)
+      if (groupBox) groupBox.checked = grouped;
+      const items = [], full = [];  // items: {row} | {group, rows, head, open}; full: every row in display order
+      if (!grouped) full.push(...data);
+      if (grouped) {
+        const groups = new Map();
+        for (const r of data) push(groups, g.of(r), r);
+        const c = collapsed();
+        for (const [id, members] of groups) {
+          const head = g.head ? members.find(g.head) : null;
+          items.push({ group: id, rows: members, head, open: !c.has(id) });
+          full.push(...(head ? [head] : []), ...members.filter((r) => r !== head));
+          if (!c.has(id)) for (const r of members) if (r !== head) items.push({ row: r });
+        }
+      } else for (const r of data) items.push({ row: r });
+      const visible = items.flatMap((it) => (it.row ? [it.row] : it.head ? [it.head] : []));
+      if (opts.onOrder) opts.onOrder(visible, full);
+      if (countEl) countEl.textContent = data.length === rows.length ? `${rows.length} ${opts.noun || "rows"}` : `${data.length} of ${rows.length} ${opts.noun || "rows"}`;
+      if (!data.length) tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "empty", text: q || (st.facets || []).length ? "Nothing matches the search or filter." : opts.empty || "Nothing here." })));
+      let selected = null, shown = 0;
+      const rowEl = (r, extraCls, toggle) => {
         const isSel = opts.isSelected && opts.isSelected(r);
-        const tr = h("tr", { tabindex: opts.onRow ? "0" : null, class: isSel ? "selected" : null }, columns.map((c) => {
+        const tr = h("tr", { tabindex: opts.onRow ? "0" : null, class: [isSel ? "selected" : "", extraCls || ""].join(" ").trim() || null }, columns.map((c) => {
           const v = c.render ? c.render(r) : r[c.key];
-          return h("td", { class: c.num ? "num" : null }, v === undefined || v === null ? "" : v);
+          return h("td", { class: c.num ? "num" : null }, toggle && c.key === g.toggleIn ? toggle : null, v === undefined || v === null ? "" : v);
         }));
         if (opts.onRow) {
           tr.addEventListener("click", () => { $$("tr.selected", tbody).forEach((x) => x.classList.remove("selected")); tr.classList.add("selected"); opts.onRow(r); });
           tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter") tr.click(); });
         }
-        tbody.appendChild(tr);
         if (isSel) selected = tr;
+        return tr;
+      };
+      const toggleBtn = (it, label) => {
+        const b = h("button", { type: "button", class: "group-toggle", "aria-expanded": it.open ? "true" : "false", title: `${it.open ? "Collapse" : "Expand"} ${label} (o)`,
+          "aria-label": `${it.open ? "Collapse" : "Expand"} ${label}` }, it.open ? "▾" : "▸");
+        b.addEventListener("click", (ev) => { ev.stopPropagation(); toggleGroup(it.group); });
+        return b;
+      };
+      for (const it of items) {
+        if (it.group !== undefined) {
+          const label = g.label(it.group, it.rows);
+          const plain = typeof label === "string" ? label : (label && label.textContent) || String(it.group);
+          if (it.head) { tbody.appendChild(rowEl(it.head, "group-head", toggleBtn(it, plain))); shown++; continue; }
+          tbody.appendChild(h("tr", { class: "group-row" }, h("td", { colspan: columns.length },
+            toggleBtn(it, plain), " ", h("span", { class: "group-label" }, label), " ", h("span", { class: "muted group-summary" }, g.summary ? g.summary(it.rows) : `${it.rows.length}`))));
+          continue;
+        }
+        if (shown >= limit) break;
+        tbody.appendChild(rowEl(it.row, grouped ? "in-group" : ""));
+        shown++;
       }
-      if (data.length > limit) {
-        tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "muted" }, `${data.length - limit} more rows `,
+      const hidden = visible.length - shown;
+      if (hidden > 0) {
+        tbody.appendChild(h("tr", null, h("td", { colspan: columns.length, class: "muted" }, `${hidden} more rows `,
           h("button", { class: "btn small", onclick: () => { limit += 500; draw(); } }, "Show more"))));
       }
       // Keep the selected row visible inside the scrolling table without moving the page.
@@ -1404,7 +1502,13 @@
     };
     const wrap = h("div", { class: "table-wrap " + (opts.scroll === false ? "" : "scroll") }, h("table", null, h("thead", null, h("tr", null, heads)), tbody));
     draw();
-    return wrap;
+    const el = tools ? h("div", { class: "list-block" }, tools, wrap) : wrap;
+    el.list = {
+      toggleGroupOf(r) { if (!g || !isGrouped(base())) return false; toggleGroup(g.of(r)); return true; },
+      focusSearch() { if (!searchInput) return false; searchInput.focus(); searchInput.select(); return true; },
+      redraw: draw,
+    };
+    return el;
   }
 
   // --------------------------------------------------------- details panel
@@ -1536,6 +1640,7 @@
     save() { storage.set("rv.changes", this.opts); }
     async init() {
       const app = this.app, o = this.opts;
+      this.nodesTable = {};  // the changed-nodes list: sort, search, chips, groups (kept across redraws)
       this.diagram = new Diagram({ title: "Changes", legend: diffLegend, orient: "changes", emptyText: "No architectural changes with the current filters." });
       this.details = new DetailsPanel(app);
       this.statsEl = h("div", { class: "stats" });
@@ -1634,6 +1739,10 @@
       const cycleList = (cycles, status) => h("ul", { class: "plain" }, cycles.map((c) => h("li", null, pill(c.level), " ", pill(status, status === "introduced" ? "cycle" : ""), " ",
         (c.example_path && c.example_path.length ? c.example_path : c.members).map(name).join(" → "))));
       const changedNodes = d.nodes.filter((n) => n.status !== "unchanged" && !(this.opts.hideCosmetic && (n.change_reasons || []).join() === "formatting or comments only"));
+      const rollups = changedNodes.filter(isRollup).length;
+      const rank = relevanceOf(d, di);
+      const compOf = componentFinder(di);
+      const compName = (id) => (id && di.nodes.get(id) ? displayName(di.nodes.get(id)) : "(repository root)");
       this.listsEl.innerHTML = "";
       put(this.listsEl, 
         h("div", { class: "two-col" },
@@ -1652,12 +1761,55 @@
             { key: "status", label: "Status", render: (r) => statusPill(r.status) },
             { key: "category", label: "Category" },
             { key: "component_type", label: "Type" },
-            { key: "qualified_name", label: "Name" },
-            { key: "path", label: "Path", render: (r) => h("span", { class: "mono", text: r.path || "" }) },
-            { key: "change_reasons", label: "Why", render: (r) => (r.change_reasons || []).join("; ") },
-          ], changedNodes, { onRow: (r) => { this.details.showNode(di, r.id); this.diagram.select(r.id); }, sort: "status" })),
+            { key: "qualified_name", label: "Name", render: (r) => h("span", { title: r.qualified_name, text: midTrunc(r.qualified_name || "", 48) }) },
+            { key: "path", label: "Path", render: (r) => h("span", { class: "mono", title: r.path || "", text: midTrunc(r.path || "", 48) }) },
+            { key: "change_reasons", label: "Why", title: RELEVANCE_TITLE, sort: (r) => `${rank(r)}${r.status === "added" ? 0 : r.status === "removed" ? 1 : 2}${r.qualified_name || ""}`,
+              render: (r) => (r.change_reasons || []).join("; ") },
+          ], changedNodes, { onRow: (r) => { this.details.showNode(di, r.id); this.diagram.select(r.id); }, sort: "change_reasons",
+            state: this.nodesTable, persist: "rv.list.changes", noun: "nodes", search: (r) => `${r.qualified_name} ${r.path || ""} ${(r.change_reasons || []).join(" ")}`,
+            facet: { of: (r) => compOf(r.id) || "", label: (id) => compName(id) }, facetLabel: "Components",
+            group: { of: (r) => compOf(r.id) || "", label: (id) => compName(id), auto: 25,
+              summary: (rs) => [["added", "✚"], ["removed", "✖"], ["modified", "✎"]].map(([k, icon]) => [k, icon, rs.filter((x) => x.status === k).length]).filter((x) => x[2]).map(([k, icon, n]) => `${icon} ${n} ${k}`).join(" · ") },
+            filter: (r) => this.opts.showRollups || !isRollup(r),
+            toolbar: rollups ? checkbox(`show folder rollups (${rollups})`, !!this.opts.showRollups, (c) => { this.opts.showRollups = c; this.save(); this.drawLists(); }) : null })),
         diagnosticsCard(d.diagnostics, "Comparison diagnostics"));
     }
+  }
+
+  /* A folder or package listed only because something inside it changed ("contents changed"). */
+  const isRollup = (n) => (n.change_reasons || []).length === 1 && n.change_reasons[0] === "contents changed";
+  const RELEVANCE_TITLE = "Sorted by relevance: new dependencies, cycles and role changes first; then API (added, removed, renamed, signature); dependency changes; body changes; folder rollups; formatting-only last.";
+  /* Relevance of a changed node (lower first): 0 signals (a new dependency, an introduced cycle, a role or type
+     change), 1 API (added, removed, renamed, moved, signature, exports), 2 its dependencies changed, 3 body,
+     4 folder rollup, 5 formatting or comments only. */
+  function relevanceOf(d, di) {
+    const signal = new Set(), deps = new Set();
+    for (const c of d.introduced_cycles || []) for (const m of c.members || []) signal.add(m);
+    for (const r of d.new_dependencies || []) { const e = di.edgeById.get(r.edge_id); if (e) { signal.add(e.source_id); signal.add(e.target_id); } }
+    for (const e of d.edges || []) if (e.status !== "unchanged") { deps.add(e.source_id); deps.add(e.target_id); }
+    const API = /^(renamed|moved|signature changed|exported changed|decorators changed|entry_kind changed|target changed|async changed)$/;
+    return (n) => {
+      const rs = n.change_reasons || [];
+      if (signal.has(n.id) || rs.some((x) => x.startsWith("roles changed") || x.startsWith("type "))) return 0;
+      if (n.status === "added" || n.status === "removed" || rs.some((x) => API.test(x))) return 1;
+      if (rs.length === 1 && rs[0] === "formatting or comments only") return 5;
+      if (isRollup(n)) return 4;
+      if (deps.has(n.id)) return 2;
+      return 3;
+    };
+  }
+  /* The component a node belongs to (its module's component, else the nearest component or submodule above it). */
+  function componentFinder(idx) {
+    const memo = new Map();
+    return (id) => {
+      if (memo.has(id)) return memo.get(id);
+      let n = idx.nodes.get(id);
+      while (n && n.category === "symbol" && n.parent_id) n = idx.nodes.get(n.parent_id);
+      let r = n && meta(n).component_id && idx.nodes.has(meta(n).component_id) ? meta(n).component_id : null;
+      for (let x = n; !r && x; x = x.parent_id ? idx.nodes.get(x.parent_id) : null) if (hasTag(x, "component") || x.component_type === "submodule") r = x.id;
+      memo.set(id, r);
+      return r;
+    };
   }
 
   function diagnosticsCard(diags, title) {
@@ -2372,6 +2524,24 @@
       component_edges: (wave.component_edges || []).filter((e) => ids.has(e.source) && ids.has(e.target)) });
   }
 
+  /* A file's review signals: the highest severity (icon + count + word), then the total. */
+  const SEV_ICON = { high: "alert-circle", medium: "alert", low: "dots", info: "dots" };
+  function signalsCell(fl) {
+    if (!fl.length) return "";
+    const top = fl.reduce((a, x) => (SEV[x.severity] < SEV[a] ? x.severity : a), "info");
+    const n = fl.filter((x) => x.severity === top).length;
+    const by = ["high", "medium", "low", "info"].map((sv) => [sv, fl.filter((x) => x.severity === sv).length]).filter((x) => x[1]).map(([sv, k]) => `${k} ${sv}`).join(", ");
+    return h("span", { class: "signals-cell", title: by }, pill([iconEl(SEV_ICON[top], true), ` ${n} ${top}`], top === "high" ? "high" : top === "medium" ? "medium" : "low"),
+      fl.length > n ? h("span", { class: "muted", text: ` +${fl.length - n}` }) : null);
+  }
+  /* A group's line: files, lines added and removed, and its highest signal severity (icon + word). */
+  function groupSummary(files, findingsByPath) {
+    const add = files.reduce((a, f) => a + (f.lines_added || 0), 0), rem = files.reduce((a, f) => a + (f.lines_removed || 0), 0);
+    const fl = files.flatMap((f) => findingsByPath.get(f.path) || []);
+    const top = fl.length ? fl.reduce((a, x) => (SEV[x.severity] < SEV[a] ? x.severity : a), "info") : null;
+    return [plural(files.length, "file"), ` · +${add} −${rem}`, top && top !== "info" ? [" · ", pill([iconEl(SEV_ICON[top], true), ` ${top}`], top === "high" ? "high" : top === "medium" ? "medium" : "low")] : null];
+  }
+
   const CUSTOM_TARGET = "__compare__";  // the target list entry for a comparison made with the compare boxes
 
   class ReviewTab {
@@ -2708,6 +2878,7 @@
       findings.sort((a, b) => (SEV[a.severity] - SEV[b.severity]) || (a.category > b.category ? 1 : a.category < b.category ? -1 : 0));
       r.findings = findings;
       this.findingsByPath = new Map();
+      this.compPaths = null;
       for (const f of findings) if (f.path) push(this.findingsByPath, f.path, f);
       const fileByPath = new Map(r.files.map((f) => [f.path, f]));
       for (const c of r.components) {
@@ -2745,6 +2916,12 @@
       const order = this.navOrder();
       if (!order.length) return;
       let i = order.indexOf(this.selectedFile);
+      if (i < 0 && this.selectedFile && this.fullOrder) {  // its group was collapsed: go on from where it sits
+        const at = this.fullOrder.indexOf(this.selectedFile), seen = new Set(order);
+        const rest = delta > 0 ? this.fullOrder.slice(at + 1) : this.fullOrder.slice(0, Math.max(0, at)).reverse();
+        const next = at >= 0 ? rest.find((p) => seen.has(p)) : null;
+        if (next) { this.selectFile(next); return; }
+      }
       i = i < 0 ? (delta > 0 ? 0 : order.length - 1) : Math.min(order.length - 1, Math.max(0, i + delta));
       this.selectFile(order[i]);
     }
@@ -2753,6 +2930,10 @@
       if (ev.ctrlKey || ev.metaKey || ev.altKey || (ev.target && ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable], .viewport"))) return;
       if (ev.key === "j") { ev.preventDefault(); this.stepFile(1); }
       else if (ev.key === "k") { ev.preventDefault(); this.stepFile(-1); }
+      else if (ev.key === "o" && this.selectedFile && this.filesList) {  // collapse or expand the current file's group
+        const f = this.report.files.find((x) => x.path === this.selectedFile);
+        if (f && this.filesList.list.toggleGroupOf(f)) ev.preventDefault();
+      }
       else if (ev.key === "]") { ev.preventDefault(); this.stepCommit(1); }
       else if (ev.key === "[") { ev.preventDefault(); this.stepCommit(-1); }
       else if (ev.key === "m" && this.selectedFile) { ev.preventDefault(); const f = this.report.files.find((x) => x.path === this.selectedFile); this.setReviewed(this.selectedFile, !this.isReviewed(f), !this.isReviewed(f)); }
@@ -3001,24 +3182,66 @@
       this.progressEl = h("div", { class: "progress muted" });
       put(this.filesEl, h("h3", null, scopeName ? `Files in ${scopeName} (${rows.length})` : `All changed files (${rows.length})`, " ",
         scopeName ? h("button", { class: "btn small", onclick: () => { this.selectedComponent = null; this.selectedDir = null; this.drawFiles(); } }, "Show all") : null),
-        this.progressEl,
-        table([
-          { key: "reviewed", label: "✓", sort: (f) => (this.isReviewed(f) ? 1 : 0), render: (f) => this.isReviewed(f) ? h("span", { class: "reviewed-mark", title: "reviewed" }, iconEl("check"))
-            : this.reviewed[f.path] ? h("span", { class: "faint", title: "changed since you reviewed it", text: "↻" }) : "" },
-          { key: "risk", label: "Risk", sort: (f) => -((f.risk || {}).score || 0), render: (f) => f.risk ? h("span", { class: "risk-cell", title: riskFactorsText(f.risk) }, riskPill(f.risk)) : "" },
-          { key: "path", label: "File", render: (f) => f.kind === "submodule" ? h("span", { class: "mono", title: "Git submodule" }, iconEl("link"), " " + f.path) : h("span", { class: "mono", text: f.path }) },
-          { key: "status", label: "Change", render: (f) => statusPill(f.status) || pill("modified", "modified") },
-          { key: "scope", label: "Scope", render: (f) => scopePill(f.scope) || h("span", { class: "faint", text: "–" }), sort: (f) => ({ protected: 0, "out-of-scope": 1, unscoped: 2, allowed: 3 })[f.scope] },
-          { key: "lines_added", label: "+/−", num: true, render: (f) => f.kind === "submodule" ? h("span", { class: "faint", title: "lines changed in the files inside" }, `+${(f.inner_lines || [0, 0])[0]} −${(f.inner_lines || [0, 0])[1]}`)
-            : f.lines_added === null || f.lines_added === undefined ? "bin" : `+${f.lines_added} −${f.lines_removed}`, sort: (f) => (f.lines_added || 0) + (f.lines_removed || 0) },
-          { key: "symbols", label: "Symbols", num: true, render: (f) => String(f.symbols.length), sort: (f) => f.symbols.length },
-          { key: "findings", label: "Signals", sort: (f) => -(this.findingsByPath.get(f.path) || []).reduce((a, x) => a + (3 - SEV[x.severity]) * 10, 0),
-            render: (f) => { const fl = this.findingsByPath.get(f.path) || []; const hi = fl.filter((x) => x.severity === "high").length; return fl.length ? [hi ? pill(`${hi} high`, "high") : null, ` ${fl.length}`] : ""; } },
-          { key: "tests", label: "Tests", num: true, render: (f) => f.is_test ? h("span", { title: "test file" }, iconEl("flask")) : String((f.tests_affected || []).length), sort: (f) => (f.tests_affected || []).length },
-          { key: "notes", label: "Notes", num: true, render: (f) => { const n = this.notes.filter((x) => x.path === f.path).length; return n ? [iconEl("comment"), " " + n] : ""; } },
+        this.progressEl);
+      const names = new Map(r.components.map((c) => [c.id, c.name]));
+      const compKey = (f) => f.component_id || "root";
+      const compLabel = (id) => names.get(id) || (id === "root" ? "(repository root)" : id);
+      const grouped = () => !!this.filesTable.groupedNow;
+      this.filesList = table([
+        { key: "reviewed", label: "✓", sort: (f) => (this.isReviewed(f) ? 1 : 0), render: (f) => this.isReviewed(f) ? h("span", { class: "reviewed-mark", title: "reviewed" }, iconEl("check"))
+          : this.reviewed[f.path] ? h("span", { class: "faint", title: "changed since you reviewed it", text: "↻" }) : "" },
+        { key: "findings", label: "Signals", title: "Review signals on the file: the highest severity first, then how many in all", sort: (f) => -(this.findingsByPath.get(f.path) || []).reduce((a, x) => a + 10 ** (3 - SEV[x.severity]), 0),
+          render: (f) => signalsCell(this.findingsByPath.get(f.path) || []) },
+        { key: "risk", label: "Risk", sort: (f) => -((f.risk || {}).score || 0), render: (f) => f.risk ? h("span", { class: "risk-cell", title: riskFactorsText(f.risk) }, riskPill(f.risk)) : "" },
+        { key: "path", label: "File", render: (f) => this.fileCell(f, grouped()) },
+        { key: "status", label: "Change", render: (f) => statusPill(f.status) || pill("modified", "modified") },
+        { key: "scope", label: "Scope", render: (f) => scopePill(f.scope) || h("span", { class: "faint", text: "–" }), sort: (f) => ({ protected: 0, "out-of-scope": 1, unscoped: 2, allowed: 3 })[f.scope] },
+        { key: "lines_added", label: "+/−", num: true, render: (f) => f.kind === "submodule" ? h("span", { class: "faint", title: "lines changed in the files inside" }, `+${(f.inner_lines || [0, 0])[0]} −${(f.inner_lines || [0, 0])[1]}`)
+          : f.lines_added === null || f.lines_added === undefined ? "bin" : `+${f.lines_added} −${f.lines_removed}`, sort: (f) => (f.lines_added || 0) + (f.lines_removed || 0) },
+        { key: "symbols", label: "Symbols", num: true, render: (f) => String(f.symbols.length), sort: (f) => f.symbols.length },
+        { key: "tests", label: "Tests", num: true, render: (f) => f.is_test ? h("span", { title: "test file" }, iconEl("flask")) : String((f.tests_affected || []).length), sort: (f) => (f.tests_affected || []).length },
+        { key: "notes", label: "Notes", num: true, render: (f) => { const n = this.notes.filter((x) => x.path === f.path).length; return n ? [iconEl("comment"), " " + n] : ""; } },
         ], rows, { onRow: (f) => this.selectFile(f.path, null, true), state: this.filesTable, isSelected: (f) => f.path === this.selectedFile,
-          onOrder: (data) => { this.fileOrder = data.map((f) => f.path); }, empty: "No changed files." }));
+        onOrder: (data, full) => { this.fileOrder = data.map((f) => f.path); this.fullOrder = full.map((f) => f.path); }, empty: "No changed files.",
+        persist: "rv.list.review", noun: "files", search: (f) => `${f.path} ${f.previous_path || ""} ${f.component || ""} ${(this.findingsByPath.get(f.path) || []).map((x) => x.title).join(" ")}`,
+        facet: { of: compKey, label: compLabel }, facetLabel: "Components",
+        group: { of: compKey, label: (id) => h("span", null, iconEl(this.compIcon(id)), " ", compLabel(id)), head: (f) => f.kind === "submodule" && this.compPath(f.component_id) === f.path,
+          toggleIn: "path", auto: 20, summary: (fs) => groupSummary(fs, this.findingsByPath) } });
+      put(this.filesEl, this.filesList);
       this.drawProgress();
+    }
+    /* The path of a component (its node in the working tree; else the directory its files share). */
+    compPath(id) {
+      if (!this.compPaths) this.compPaths = new Map();
+      if (this.compPaths.has(id)) return this.compPaths.get(id);
+      const n = id && id !== "root" ? this.app.snapshotIndex.nodes.get(id) : null;
+      let p = n && n.path !== undefined && n.path !== null ? n.path : null;
+      if (p === null && id && id !== "root") {
+        const dirs = this.report.files.filter((f) => (f.component_id || "root") === id).map((f) => f.path.split("/").slice(0, -1));
+        const first = dirs[0] || [];
+        let k = 0;
+        while (k < first.length && dirs.every((d) => d[k] === first[k])) k++;
+        p = first.slice(0, k).join("/");
+      }
+      this.compPaths.set(id, p || "");
+      return p || "";
+    }
+    compIcon(id) {
+      const n = id && id !== "root" ? this.app.snapshotIndex.nodes.get(id) : null;
+      return n && n.component_type === "submodule" ? "link" : id === "root" ? "house" : "box";
+    }
+    /* The File cell: inside a group, the path from its component's folder ("…/cbir/src/search.py"); the full
+       path is in the tooltip and the details (Copy path).  Long paths are shortened in the middle. */
+    fileCell(f, grouped) {
+      const full = f.path, cp = grouped ? this.compPath(f.component_id || "root") : "";
+      let shown = full;
+      if (cp && full.startsWith(cp + "/")) shown = "…/" + cp.split("/").pop() + full.slice(cp.length);
+      const text = midTrunc(shown, 56);
+      if (f.kind === "submodule") {
+        const inner = this.report.files.filter((x) => x !== f && x.path.startsWith(f.path + "/")).length;
+        return h("span", { class: "mono", title: `Git submodule ${full}` }, iconEl("link"), " " + midTrunc(full, 56), inner ? h("span", { class: "muted", text: ` · ${plural(inner, "file")} inside` }) : null);
+      }
+      return h("span", { class: "mono", title: full, text });
     }
     selectFile(path, line, fromTable) {
       this.selectedFile = path;
@@ -3049,7 +3272,11 @@
         done ? h("button", { class: "btn small", title: "Mark as not reviewed (m)", onclick: () => this.setReviewed(f.path, false) }, "✓ Reviewed — undo")
           : [h("button", { class: "btn small", onclick: () => this.setReviewed(f.path, true) }, "✓ Mark reviewed"),
             h("button", { class: "btn small primary", title: "Mark reviewed and open the next unreviewed file (m)", onclick: () => this.setReviewed(f.path, true, true) }, "✓ Reviewed & next ›")]));
-      put(this.fileEl, h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope)),
+      const copyBtn = h("button", { class: "btn small", type: "button", title: "Copy the full path", onclick: () => {
+        const done = () => { copyBtn.textContent = "✓ Copied"; setTimeout(() => { copyBtn.textContent = "Copy path"; }, 1200); };
+        if (navigator.clipboard) navigator.clipboard.writeText(f.path).then(done, () => {});
+      } }, "Copy path");
+      put(this.fileEl, h("h3", null, h("span", { class: "mono", text: f.path }), " ", statusPill(f.status) || pill("modified", "modified"), " ", scopePill(f.scope), " ", copyBtn),
         f.risk ? h("details", { class: "risk-factors", open: f.risk.level !== "low" },
           h("summary", null, "Risk ", riskPill(f.risk), " ", h("span", { class: "faint", text: f.risk.factors.length ? f.risk.factors[0].text : "no risk factor" })),
           f.risk.factors.length ? h("ul", { class: "plain" }, f.risk.factors.map((x) => h("li", null, h("span", { class: "mono", text: `+${x.points}` }), " " + x.text))) : null) : null,
@@ -3239,6 +3466,9 @@
           "The most valuable signals: removed functions still called, signatures changed while callers were not updated, broken imports, new code that is not wired in (a router never registered, a module nothing imports), a usual companion change that is missing (a file that almost always changes with this one), disabled tests, secrets, and scope violations."] },
         { h: "5. Walk the files" },
         { ul: ["The file table is sorted by **risk**, riskiest first; click a column header to sort another way (your choice is kept). Click a row or press `j` / `k` to move through files in the table's order.",
+          "**Signals** come first on each row: the highest severity (icon, count and word), then how many more. **Risk** follows.",
+          "**Big waves are grouped by component** (from 20 files; switch it with *group by component*). Each group shows its files, lines added and removed, and its highest signal. Click **▾** (or press `o` on a file) to collapse or expand a group; `j` / `k` skip collapsed groups. A **submodule** heads the group of the files changed inside it. Inside a group, paths start at the component's folder (`…/cbir/src/search.py`); hover for the full path, or use **Copy path** on the file card.",
+          "**Search** (press `/`) narrows the table by path, component or signal title. The **component chips** filter it (several can be on; they combine with the search). The search, chips, grouping and collapsed groups are remembered.",
           "**Risk** is a score from 0 to 100 with a level (*high*, *medium*, *low*), shown as an icon, a number and a word. Hover it, or open the file, to see each factor and its points: the most severe signal, how many places call the changed code, the entry points reaching it, missing or stale tests, a protected or sensitive path, a churn hotspot and the size of the change. The **wave risk** badge at the top is the riskiest file; click it to open that file. Weights are set in `[review.risk]`.",
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
@@ -3267,6 +3497,7 @@
           "An **existing cycle** that this change does not touch is drawn thin, dotted and faint, so a **⟲ new cycle** stands out. Touch one of its members and it is drawn strong again."] },
         { h: "Dig into a change" },
         { ul: ["Click a node or an edge label: the side panel explains *why* it changed and shows source evidence (file and line).",
+          "**Changed nodes** lists the most relevant first: new dependencies, cycles and role changes; then API changes (added, removed, renamed, signatures); dependency changes; body changes; formatting-only last. Folders listed only because something inside them changed are hidden behind **show folder rollups (N)**. Search it (press `/`), filter it with the component chips, or group it by component, as in AI Review.",
           "Below the diagram: new and removed dependencies, cycles introduced or resolved, and every changed node with the reason."] },
         { tip: "A new **⟲ cycle** or a new dependency between components is usually the most important thing on this tab." },
       ] },
@@ -3323,7 +3554,7 @@
       ] },
     { id: "keys", title: "Keyboard shortcuts", icon: "keyboard", intro: "Shortcuts are ignored while you type in a field.",
       blocks: [
-        { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file, in the table's order (AI Review: riskiest first)"],
+        { kv: [["?", "open this guide"], ["Esc", "close the guide or a note form"], ["← / →", "switch tabs (when a tab button has focus)"], ["j / k", "next / previous file, in the table's order (AI Review: riskiest first; collapsed groups are skipped)"], ["o", "collapse or expand the current file's group (AI Review)"], ["/", "search the tab's list (AI Review files, Changes nodes)"],
           ["m", "mark the open file reviewed and go to the next unreviewed one (AI Review)"], ["[ / ]", "previous / next commit of the wave; past either end shows the whole wave (AI Review)"], ["Ctrl+Enter", "apply the scope boxes (AI Review)"],
           ["arrows, + / -, 0", "pan, zoom and fit a focused diagram"], ["Enter", "open the focused table row or diagram node"]] },
       ] },
@@ -3500,8 +3731,13 @@
       this.help = new HelpPanel();
       $("#help-toggle").addEventListener("click", () => this.help.open(TAB_HELP[this.currentTab] ? TAB_HELP[this.currentTab].id : "start"));
       document.addEventListener("keydown", (ev) => {
-        if (ev.key !== "?" || ev.ctrlKey || ev.metaKey || ev.altKey || this.help.isOpen) return;
+        if ((ev.key !== "?" && ev.key !== "/") || ev.ctrlKey || ev.metaKey || ev.altKey || this.help.isOpen) return;
         if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable]")) return;
+        if (ev.key === "/") {  // the current tab's list search
+          const box = $$(`#tab-${this.currentTab} input.list-search`).find((x) => x.offsetParent !== null);
+          if (box) { ev.preventDefault(); box.focus(); box.select(); }
+          return;
+        }
         ev.preventDefault();
         this.help.open(TAB_HELP[this.currentTab] ? TAB_HELP[this.currentTab].id : "start");
       });

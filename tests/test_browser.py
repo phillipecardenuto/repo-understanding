@@ -264,6 +264,15 @@ def test_review_shows_work_inside_submodules(page, make_repo, tmp_path: Path) ->
     page.click("#tab-review .file-card tbody tr >> text=src/engine.py")
     assert page.evaluate("repoviz.app.tabs.review.selectedFile") == "modules/engine/src/engine.py"
     assert page.locator("#tab-review table.diff tr.add").count() >= 1
+    # Grouped by component, the submodule's entry heads the group of the files inside it.
+    page.check("#tab-review .list-tools label.check:has-text('group by component') input")
+    head = page.locator("#tab-review tr.group-head")
+    assert head.count() == 1 and "modules/engine" in head.inner_text() and "1 file inside" in head.inner_text()
+    assert head.locator("button.group-toggle").get_attribute("aria-expanded") == "true"
+    inner = page.locator("#tab-review tr.in-group:has-text('…/engine/src/engine.py')")
+    assert inner.count() == 1 and inner.locator("span[title='modules/engine/src/engine.py']").count() == 1
+    head.locator("button.group-toggle").click()
+    assert page.locator("#tab-review tr.in-group:has-text('engine.py')").count() == 0 and head.count() == 1
     assert page.errors == []  # type: ignore[attr-defined]
 
 
@@ -419,7 +428,7 @@ def test_review_orders_files_by_risk(page, make_repo, tmp_path: Path) -> None:
     badge = page.locator("#tab-review .stat.risk")
     assert "high · 42" in badge.inner_text() and "wave risk · tokens.py" in badge.inner_text()
     assert badge.locator("i.rvi-alert-circle").count() == 1  # an icon and a word, not colour alone
-    rows = "Array.from(document.querySelectorAll('#tab-review .files-split > .card:not(.file-card) tbody tr')).map(r => r.cells[2].innerText.trim())"
+    rows = "Array.from(document.querySelectorAll('#tab-review .files-split > .card:not(.file-card) tbody tr')).map(r => r.cells[3].innerText.trim())"
     assert page.evaluate(rows) == ["app/auth/tokens.py", "app/core.py", "README.md", "tests/test_auth.py"]
     cell = page.locator("#tab-review .files-split > .card:not(.file-card) tbody tr >> nth=1").locator(".risk-cell")
     assert cell.inner_text().strip() == "42 high" and "+9 called from 4 places" in cell.get_attribute("title")
@@ -922,3 +931,122 @@ def test_system_view_orientation_is_its_own(page, make_repo, tmp_path: Path) -> 
     page.wait_for_function(f"() => {diagram}.view.title === 'Structure'", timeout=30_000)
     assert toggle.inner_text().endswith("auto") and page.evaluate("localStorage.getItem('rv.orient.structure')") is None
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- Lists that scale (#29)
+
+FILES_LIST = ("#tab-review .files-split > .card:not(.file-card)")
+VISIBLE_FILES = "() => repoviz.app.tabs.review.fileOrder"
+
+
+def fifty_files(make_repo, tmp_path: Path, name: str = "fifty") -> str:
+    """50 changed files in 5 components (c0…c4), uncommitted; returns the report's URI."""
+    files = {f"c{c}/__init__.py": "" for c in range(5)}
+    files.update({f"c{c}/mod{m}.py": f"X = {m}\n" for c in range(5) for m in range(10)})
+    repo = make_repo(files)
+    repo.write({f"c{c}/mod{m}.py": f"X = {m}\n\ndef f{m}():\n    return {m}\n" for c in range(5) for m in range(10)})
+    report = tmp_path / f"{name}.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    return report.as_uri()
+
+
+def test_review_files_group_collapse_and_keys(page, make_repo, tmp_path: Path) -> None:
+    page.goto(fifty_files(make_repo, tmp_path) + "#tab=review")
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    card = page.locator(FILES_LIST)
+    groups = card.locator("tr.group-row")
+    assert groups.count() == 5 and card.locator("tr.in-group").count() == 50  # grouped by default at this size
+    first = groups.nth(0).inner_text()
+    assert "10 files · +30 −0" in first and "medium" in first
+    headers = [h.strip() for h in card.locator("thead th").all_inner_texts()]
+    assert headers[:5] == ["✓", "SIGNALS", "RISK", "FILE", "CHANGE"]  # signals and risk first
+    assert card.locator("tr.in-group td:nth-child(4) span[title='c0/mod0.py']").inner_text() == "…/c0/mod0.py"
+    order = page.evaluate(VISIBLE_FILES)
+    assert len(order) == 50 and [p.split("/")[0] for p in order[::10]] == ["c0", "c1", "c2", "c3", "c4"]
+    # Collapse the second group: its rows go, and j jumps from the first group to the third.
+    groups.nth(1).locator("button.group-toggle").click()
+    assert card.locator("tr.in-group").count() == 40 and len(page.evaluate(VISIBLE_FILES)) == 40
+    assert groups.nth(1).locator("button.group-toggle").get_attribute("aria-expanded") == "false"
+    page.evaluate("repoviz.app.tabs.review.selectFile(repoviz.app.tabs.review.fileOrder[9])")  # the last of c0
+    page.locator("body").press("j")
+    assert page.evaluate("repoviz.app.tabs.review.selectedFile").startswith("c2/")
+    # o collapses the current file's group (and expands it again); j carries on after the group.
+    page.locator("body").press("o")
+    assert card.locator("tr.in-group").count() == 30
+    page.locator("body").press("j")
+    assert page.evaluate("repoviz.app.tabs.review.selectedFile").startswith("c3/")
+    page.locator("body").press("k")
+    assert page.evaluate("repoviz.app.tabs.review.selectedFile").startswith("c0/")  # c1 and c2 are collapsed
+    # Remembered after a reload; the switch turns grouping off.
+    page.reload()
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert card.locator("tr.in-group").count() == 30
+    card.locator("label.check:has-text('group by component') input").uncheck()
+    assert card.locator("tr.group-row").count() == 0 and len(page.evaluate(VISIBLE_FILES)) == 50
+    assert card.locator("td:nth-child(4) span[title='c0/mod0.py']").inner_text() == "c0/mod0.py"  # the full path
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_review_files_search_and_component_filter(page, make_repo, tmp_path: Path) -> None:
+    page.goto(fifty_files(make_repo, tmp_path) + "#tab=review")
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    card = page.locator(FILES_LIST)
+    page.locator("body").press("/")  # focuses the search box
+    assert page.evaluate("document.activeElement.classList.contains('list-search')")
+    page.keyboard.type("mod3")
+    page.wait_for_function("() => repoviz.app.tabs.review.fileOrder.length === 5", timeout=5_000)
+    assert card.locator(".list-count").inner_text() == "5 of 50 files"
+    chips = card.locator(".facets button.facet")
+    assert chips.count() == 5 and chips.nth(0).inner_text().replace("\n", "") in {f"c{i} 1" for i in range(5)}
+    chips.filter(has_text="c2").click()  # the filter combines with the search
+    assert page.evaluate(VISIBLE_FILES) == ["c2/mod3.py"] and chips.filter(has_text="c2").get_attribute("aria-pressed") == "true"
+    assert "✓" in chips.filter(has_text="c2").inner_text()  # not colour alone
+    page.reload()  # both are remembered
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert card.locator("input.list-search").input_value() == "mod3" and page.evaluate(VISIBLE_FILES) == ["c2/mod3.py"]
+    card.locator("button:has-text('Clear filter')").click()
+    card.locator("input.list-search").fill("")
+    page.wait_for_function("() => repoviz.app.tabs.review.fileOrder.length === 50", timeout=5_000)
+    card.locator("input.list-search").fill("no such file")
+    page.wait_for_function("() => repoviz.app.tabs.review.fileOrder.length === 0", timeout=5_000)
+    assert "Nothing matches the search or filter." in card.inner_text()
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_changed_nodes_rollups_relevance_and_search(page, make_repo, tmp_path: Path) -> None:
+    page.goto(fifty_files(make_repo, tmp_path) + "#tab=changes")
+    page.wait_for_function(ALL_RENDERED, arg="changes", timeout=60_000)
+    card = page.locator("#tab-changes .card", has=page.locator("h3", has_text="Changed nodes"))
+    rollups = card.locator("label.check:has-text('show folder rollups')")
+    assert rollups.inner_text().strip() == "show folder rollups (6)"  # the 5 packages and the repository
+    assert card.locator(".list-count").inner_text() == "100 of 106 nodes"
+    why = "() => Array.from(document.querySelectorAll('#tab-changes tbody tr')).filter(r => r.cells.length > 5 && r.cells[5].textContent === 'contents changed').length"
+    assert page.evaluate(why) == 0
+    # Relevance: in each group, the new functions (API) come before the modules whose body changed.
+    rows = card.locator("tbody tr.in-group").all_inner_texts()
+    assert "added" in rows[0] and "modified" in rows[-1]
+    rollups.locator("input").check()
+    assert card.locator(".list-count").inner_text() == "106 nodes" and page.evaluate(why) == 6
+    card.locator("input.list-search").fill("mod7.f7")  # name, path or reason
+    page.wait_for_function("() => document.querySelector('#tab-changes .list-count').textContent === '5 of 106 nodes'", timeout=5_000)
+    card.locator("input.list-search").fill("c3.mod7.f7")
+    page.wait_for_function("() => document.querySelector('#tab-changes .list-count').textContent === '1 of 106 nodes'", timeout=5_000)
+    assert "c3.mod7.f7" in card.locator("tbody").inner_text()
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_lists_fit_a_phone_screen(browser, make_repo, tmp_path: Path) -> None:
+    uri = fifty_files(make_repo, tmp_path)
+    for tab in ("review", "changes"):
+        pg = browser.new_page(viewport={"width": 390, "height": 800})
+        try:
+            pg.goto(uri + f"#tab={tab}")
+            pg.wait_for_function(ALL_RENDERED, arg=tab, timeout=60_000)
+            assert pg.evaluate("document.documentElement.scrollWidth") <= 390, tab
+            if tab == "review":  # long paths are shortened in the middle, the full path in the tooltip
+                long = "a" * 30 + "/" + "b" * 30 + "/component_file_name.py"
+                cell = "(p) => { const c = repoviz.app.tabs.review.fileCell({path: p}, false); return [c.textContent, c.title]; }"
+                text, title = pg.evaluate(cell, long)
+                assert text.count("…") == 1 and text.endswith("file_name.py") and title == long
+        finally:
+            pg.close()

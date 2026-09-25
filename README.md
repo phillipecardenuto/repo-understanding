@@ -110,11 +110,21 @@ or as the *exact difference* between the two trees.
   *low*) that orders the files, riskiest first, and lists why: signal severity,
   callers, entry points reached, missing tests, sensitive paths, churn hotspots
   and size. `j` / `k` follow that order.
-- **Changed-modules table.** Each file opens a change card:
-  - key changes: functions and classes with before/after signatures;
-  - dependency changes;
-  - tests that exercise it;
-  - the diff, where any line can be annotated.
+- **Changed-files table.** Signals (highest severity first) and risk lead each
+  row.
+  - **Grouping.** From 20 files, rows are grouped by component. Each group
+    shows its files, lines and highest signal. **▾** or `o` collapses a group,
+    and `j` / `k` skip collapsed groups. A submodule heads the group of the
+    files changed inside it.
+  - **Paths** start at the component's folder (`…/cbir/src/search.py`) and are
+    shortened in the middle; hover for the full path, or use **Copy path**.
+  - **Search** (`/`) and **component chips** narrow the table, together. The
+    search, chips and groups are remembered.
+  - **Change card.** Each file opens one with:
+    - key changes: functions and classes with before/after signatures;
+    - dependency changes;
+    - tests that exercise it;
+    - the diff, where any line can be annotated.
 - **Notes → prompt:** notes become a feedback prompt for the agent. See
   [docs/review.md](docs/review.md).
 
@@ -123,8 +133,20 @@ Projects, Packages/directories, or Modules/files. Shows changed nodes plus their
 strongest neighbours (hubs are summarised), everything, or only changes. Summary
 cards cover nodes, relationships, new dependencies and cycles. Below the diagram
 are tables of new and removed dependencies (with evidence), cycles introduced,
-resolved or changed, and every changed node with the reason it changed. The live
-app accepts any comparison; a static report offers the precomputed ones.
+resolved or changed, and every changed node with the reason it changed.
+
+The changed-nodes list puts the most relevant first:
+
+1. new dependencies, cycles and role changes;
+2. API changes (added, removed, renamed, signatures);
+3. dependency changes;
+4. body changes;
+5. formatting-only.
+
+Folders listed only because something inside changed are hidden behind **show
+folder rollups (N)**. As in AI Review, you can search it (`/`), filter it with
+component chips, or group it by component. The live app accepts any comparison;
+a static report offers the precomputed ones.
 
 **The header** counts what the repository holds, each count apart:
 

@@ -240,6 +240,14 @@ CLI):
 - **Labels** longer than 40 characters are middle-truncated. Each node carries
   an SVG `<title>` with the full name.
 
+Long lists use one table helper (`table()` in `app.js`). Besides sorting and
+"Show more", it offers a search box, facet chips with counts, and collapsible
+groups with per-group totals. A group can be headed by one of its rows (a
+submodule heads its inner files). Only the visible rows reach `onOrder`, so
+keyboard navigation skips collapsed groups. The query, chips, grouping and
+collapsed groups are saved per list (`rv.list.review`, `rv.list.changes`)
+through the storage wrapper, which ignores browsers that refuse storage.
+
 Icons are defined once in `app.js` as SVG path data: 24×24, 2px round strokes,
 plus a light-background and a dark-background colour per icon. At startup they
 become a stylesheet in which each `.rvi-<name>` class paints its icon with a CSS

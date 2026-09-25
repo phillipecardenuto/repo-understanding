@@ -6,6 +6,21 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Lists that scale** ([#29](https://github.com/phillipecardenuto/repo-understanding/issues/29)).
+  - The shared table gains a search box (`/`), component chips with counts,
+    and collapsible groups with per-group totals. All of them are remembered
+    per tab.
+  - **AI Review files.**
+    - Signals (highest severity first) and risk lead each row.
+    - Waves of 20 files or more are grouped by component, and a submodule
+      heads the group of its inner files.
+    - Paths start at the component's folder and are shortened in the middle;
+      the file card has *Copy path*.
+    - `o` collapses the current group, and `j` / `k` skip collapsed groups.
+  - **Changes.** The changed-nodes list is ordered by relevance. Folder
+    rollups ("contents changed") are hidden behind a counted switch; on
+    ELIES's current work that removes 10 of 22 rows.
+  - No horizontal page scroll at 390 px.
 - **Diagrams stay readable at scale** ([#27](https://github.com/phillipecardenuto/repo-understanding/issues/27)).
   - **Orientation from shape.** Changes, Structure and Dependencies turn a
     diagram when the other direction fits the screen at a clearly larger zoom.

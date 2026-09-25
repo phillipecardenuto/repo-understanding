@@ -383,9 +383,21 @@ in the configuration line of `repoviz discover` and the Structure tab.
   relevant files or directories (scope violations, high-severity signals, then
   the largest changes). The rest are
   folded into a "… N more" node, which lists them when clicked.
-- **Keyboard:** `j` / `k` open the next / previous file in table order, and `m`
-  marks the open file reviewed and moves to the next unreviewed one. The file
-  card also has *‹ Prev*, *Next ›* and *✓ Reviewed & next* buttons.
+- **Large waves are grouped.** From 20 files in at least two components, the
+  table groups files by component. Each group line shows its files, lines added
+  and removed, and its highest signal severity (icon and word).
+  - A submodule's own entry heads the group of the files changed inside it.
+  - Inside a group, paths start at the component's folder (`…/cbir/src/search.py`).
+    The full path is in the tooltip and behind *Copy path* on the file card.
+  - *group by component* turns grouping on or off.
+- **Search and filter.** The search box (`/`) matches paths, components and
+  signal titles. The component chips (with counts) filter the table, several at
+  once, together with the search. The query, chips, grouping and collapsed
+  groups are kept in the browser (`rv.list.review`).
+- **Keyboard:** `j` / `k` open the next / previous file in table order, skipping
+  collapsed groups. `o` collapses or expands the open file's group. `m` marks
+  the open file reviewed and moves to the next unreviewed one. The file card
+  also has *‹ Prev*, *Next ›* and *✓ Reviewed & next* buttons.
 - **Progress:** reviewed files get a ✓ and count towards "N / M reviewed".
   A mark belongs to the file's content: if the agent changes the file again,
   it shows ↻ ("changed since you reviewed it") and must be reviewed again.

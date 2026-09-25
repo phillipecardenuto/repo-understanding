@@ -184,7 +184,25 @@ th[aria-sort="descending"]::after { content: " ▼"; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--panel-2); }
 tbody tr.selected { background: var(--accent-soft); }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Lists that scale: search, component chips, collapsible groups. */
+.list-tools { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 4px 0 8px; }
+.list-tools .list-search { width: 16rem; max-width: 100%; }
+.list-tools .facets { display: flex; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
+.list-tools .facets:empty { display: none; }
+.facet { font: inherit; font-size: 12px; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 10px; cursor: pointer; max-width: 100%; }
+.facet:hover, .facet:focus-visible { border-color: var(--accent); }
+.facet.on { border: 2px solid var(--accent); background: var(--accent-soft); font-weight: 600; }
+.facet-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+tr.group-row td { background: var(--panel-2); font-weight: 600; padding-top: 6px; padding-bottom: 6px; }
+tr.group-row .group-summary { font-weight: 400; }
+tr.group-head td { background: var(--panel-2); font-weight: 600; }
+tr.in-group td:first-child { border-left: 3px solid var(--border); }
+.group-toggle { font: inherit; background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text);
+  width: 1.6em; padding: 0; margin-right: 4px; cursor: pointer; line-height: 1.3; }
+.group-toggle:hover, .group-toggle:focus-visible { border-color: var(--accent); }
+.signals-cell { white-space: nowrap; }
 .scroll { max-height: 420px; overflow: auto; }
 .pill { display: inline-block; font-size: 11.5px; border-radius: 999px; padding: 0 7px; border: 1px solid var(--border);
   white-space: nowrap; margin: 1px 2px 1px 0; }
