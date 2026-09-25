@@ -219,10 +219,11 @@ CLI):
 - **Orientation.** Before drawing, `chooseDirection` (`views.choose_direction`)
   ranks the view graph by longest path. It estimates the drawing both ways (ranks
   × 250 px by the widest rank × 56 px left to right; the widest rank × 190 px by
-  ranks × 116 px top to bottom) and keeps the one that fits the viewport at the
-  larger zoom. When both fit at full size the view keeps its own direction. A view
-  with `orientable: false` (nested boxes, layers, System) is never turned. The
-  ⇄ / ⇅ override is stored per tab under `rv.orient.<tab>`.
+  ranks × 116 px top to bottom). The view keeps its own direction unless the
+  other one fits the viewport at a zoom at least 1.25× larger (`ORIENT_GAIN`), so
+  borderline shapes don't flip. A view with `orientable: false` (nested boxes,
+  layers) is never turned. The ⇄ / ⇅ override is stored per tab under
+  `rv.orient.<tab>`, or under the view's own `orientKey` (`rv.orient.system`).
 - **Fit** measures the label font size and never scales below 11 px. A larger
   diagram fits its width and is panned. When it is more than twice the view at
   that zoom, a mini-map (the node boxes, not a copy of the SVG) shows the visible

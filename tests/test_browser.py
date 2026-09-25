@@ -806,6 +806,19 @@ def test_orientation_from_shape_and_readable_fit(page, make_repo, tmp_path: Path
     page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
     assert page.locator("#tab-structure g.node").count() == 48
     assert page.evaluate("repoviz.app.tabs.structure.diagram.view.direction") == "LR"
+    # The same rule as views.choose_direction: a long thin chain turns TB, a wide system is stacked LR.
+    from repoviz.render import views
+
+    for n, fan, direction in ((12, False, "LR"), (30, True, "TB"), (3, False, "LR")):
+        nodes = [views.VNode(f"n{i}", "x") for i in range(n)]
+        edges = [views.VEdge("n0" if fan else f"n{i - 1}", f"n{i}") for i in range(1, n)]
+        view = views.ViewGraph("t", direction=direction, nodes=nodes, edges=edges)
+        js = page.evaluate("(v) => repoviz.chooseDirection(v, 1600, 1000)",
+                           {"direction": direction, "nodes": [{"id": x.id} for x in nodes],
+                            "edges": [{"source": e.source, "target": e.target} for e in edges]})
+        assert js == views.choose_direction(view)
+    assert views.choose_direction(views.ViewGraph("chain", nodes=[views.VNode(f"n{i}", "x") for i in range(12)],
+                                                  edges=[views.VEdge(f"n{i}", f"n{i + 1}") for i in range(11)])) == "TB"
     button = page.locator("#tab-structure .diagram-head button:has-text('auto')")
     assert button.inner_text() == "⇄ auto" and "automatic (left to right" in button.get_attribute("title")
     # Fit never goes below the zoom at which labels read at 11px.
@@ -889,4 +902,23 @@ def test_minimap_for_large_diagrams_only(page, make_repo, tmp_path: Path) -> Non
     page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] - 3)  # the bottom of the diagram
     after = page.evaluate("document.querySelector('#tab-structure .stage').style.transform")
     assert after != before and mini.locator("rect.mini-view").get_attribute("y") != view_before
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_system_view_orientation_is_its_own(page, make_repo, tmp_path: Path) -> None:
+    from test_discovery_manifests import SYSTEM
+
+    page.goto(_report(make_repo, tmp_path, SYSTEM, "system") + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    diagram = "repoviz.app.tabs.structure.diagram"
+    assert page.evaluate(f"{diagram}.view.title") == "System"
+    assert page.evaluate(f"{diagram}.view.direction") == "TB"  # a few services: side by side
+    toggle = page.locator("#tab-structure .diagram-head button[title^='Layout']")
+    assert toggle.inner_text() == "⇅ auto"
+    toggle.click()
+    page.wait_for_function(f"() => {diagram}.view.direction === 'LR'", timeout=30_000)
+    assert page.evaluate("localStorage.getItem('rv.orient.system')") == '"LR"'
+    page.select_option("#tab-structure .toolbar select >> nth=0", "files")
+    page.wait_for_function(f"() => {diagram}.view.title === 'Structure'", timeout=30_000)
+    assert toggle.inner_text().endswith("auto") and page.evaluate("localStorage.getItem('rv.orient.structure')") is None
     assert page.errors == []  # type: ignore[attr-defined]

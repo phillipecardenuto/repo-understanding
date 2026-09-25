@@ -562,10 +562,19 @@ def test_orientation_follows_the_shape(make_repo, capsys) -> None:
     assert capsys.readouterr().out.startswith("flowchart LR")
     assert main(["mermaid", "-C", repo.path, "--view", "structure", "--depth", "8", "--direction", "TB"]) == 0
     assert capsys.readouterr().out.startswith("flowchart TB")
-    # A layout whose direction is part of it keeps it.
+    # A small system keeps its services side by side; it can still be turned.
     system = make_repo(TWO_PACKAGES)
-    assert main(["mermaid", "-C", system.path, "--view", "system", "--direction", "LR"]) == 0
+    assert main(["mermaid", "-C", system.path, "--view", "system"]) == 0
     assert capsys.readouterr().out.startswith("flowchart TB")
+    assert main(["mermaid", "-C", system.path, "--view", "system", "--direction", "LR"]) == 0
+    assert capsys.readouterr().out.startswith("flowchart LR")
+    # A layout whose direction is part of it (a layers contract) keeps it.
+    from repoviz.cli import _orient
+
+    layers = views.ViewGraph("layers", direction="TB", orientable=False, nodes=chain.nodes, edges=chain.edges)
+    _orient(layers, "LR")
+    _orient(layers, "auto")
+    assert layers.direction == "TB"
 
 
 TESTS_27 = {"pkg/__init__.py": "", "pkg/core.py": "X = 1\n",

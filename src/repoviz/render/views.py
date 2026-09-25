@@ -76,7 +76,7 @@ class ViewGraph:
     subgraphs: dict[str, tuple[str, str | None]] = field(default_factory=dict)
     truncated: int = 0
     mode: str = "diff"  # diff | kind | role
-    orientable: bool = True  # False: the direction is part of the layout (nested boxes, layers, System view)
+    orientable: bool = True  # False: the direction is part of the layout (layers; nested boxes in the web app)
     folds: dict[str, dict[str, Any]] = field(default_factory=dict)  # fold node ID -> {parent, kind, count}
 
 
@@ -176,11 +176,15 @@ def _scc_members(edges: Iterable[tuple[str, str]]) -> dict[str, int]:
     return member
 
 
+#: Turn a view only when the other direction fits at this much larger a zoom (``ORIENT_GAIN`` in web/app.js).
+ORIENT_GAIN = 1.25
+
+
 def choose_direction(view: ViewGraph, width: float = 1600, height: float = 1000) -> str:
     """Orientation from shape (as ``chooseDirection`` in web/app.js): estimate the drawing both ways (ranks along
-    the flow × the widest rank across it) and keep the one that fits a ``width`` × ``height`` screen at the larger
-    zoom; when both fit at full size, the view's own direction stays.  A deep tree is drawn ``LR``, a long thin
-    chain ``TB``."""
+    the flow × the widest rank across it) and turn the view only when the other direction fits a ``width`` ×
+    ``height`` screen at a clearly larger zoom.  A deep tree is drawn ``LR``, a long thin chain ``TB``, many
+    services stacked."""
     ids = [n.id for n in view.nodes]
     if not ids:
         return view.direction
@@ -209,9 +213,10 @@ def choose_direction(view: ViewGraph, width: float = 1600, height: float = 1000)
         return min(1.0, width / w, height / h)
 
     lr, tb = fits(depth * 250, breadth * 56), fits(breadth * 190, depth * 116)
-    if abs(lr - tb) < 1e-9:
-        return view.direction
-    return "LR" if lr > tb else "TB"
+    own = "TB" if view.direction == "TB" else "LR"
+    if own == "LR":
+        return "TB" if tb >= lr * ORIENT_GAIN else "LR"
+    return "LR" if lr >= tb * ORIENT_GAIN else "TB"
 
 
 def _scc_pairs(edges: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
@@ -598,7 +603,8 @@ def system_view(snapshot: RepositorySnapshot, *, max_nodes: int = 250) -> ViewGr
     nodes = snapshot.node_index()
     services = sorted((n for n in snapshot.components if n.component_type == "service"),
                       key=lambda n: (service_kind(n) != "first-party", n.qualified_name))
-    view = ViewGraph(title="System", direction="TB", mode="kind", orientable=False)  # boxes side by side, infrastructure below
+    # Service boxes side by side, infrastructure below; ``choose_direction`` stacks them (LR) when there are many.
+    view = ViewGraph(title="System", direction="TB", mode="kind")
     if not services:
         return view
     shown = services[:max_nodes]

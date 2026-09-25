@@ -229,11 +229,13 @@ tables, and diagrams can be navigated with the keyboard (arrows, +/-, 0 to fit).
 
 **Large diagrams stay readable.**
 
-- **Orientation from shape.** Changes, Structure and Dependencies pick
-  left-to-right or top-to-bottom, whichever fits the screen at the larger zoom:
-  a deep tree runs left to right, a long thin chain top to bottom. The ⇄ / ⇅
-  button cycles *auto*, left to right and top to bottom, and is remembered per
-  tab. Layers and the System view keep their own layout.
+- **Orientation from shape.** Changes, Structure (both views) and Dependencies
+  turn a diagram when the other direction fits the screen at a clearly larger
+  zoom: a deep tree runs left to right, a long thin chain top to bottom, and a
+  System view with many services stacks them instead of lining them up. The
+  ⇄ / ⇅ button cycles *auto*, left to right and top to bottom, and is
+  remembered per tab (the System view has its own). A layers contract's layers
+  and nested boxes keep their layout.
 - **Readable Fit.** **Fit** never shrinks labels below 11 px. A larger diagram
   fits its width and you pan the rest; when it is more than twice the view, a
   mini-map in the corner shows where you are, and a click there moves the view.

@@ -7,10 +7,11 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 ### Added
 
 - **Diagrams stay readable at scale** ([#27](https://github.com/phillipecardenuto/repo-understanding/issues/27)).
-  - **Orientation from shape.** Changes, Structure and Dependencies pick left
-    to right or top to bottom, whichever fits the screen at the larger zoom. A
-    ⇄ / ⇅ button overrides it, remembered per tab. Layers and the System view
-    keep their layout.
+  - **Orientation from shape.** Changes, Structure and Dependencies turn a
+    diagram when the other direction fits the screen at a clearly larger zoom.
+    On ELIES the System view now stacks its 19 services instead of an
+    11,000 px wide row. A ⇄ / ⇅ button overrides it, remembered per tab (and
+    for the System view). Layers and nested boxes keep their layout.
   - **Readable Fit.** Fit never shrinks labels below 11 px. A larger diagram
     fits its width and is panned; a mini-map appears when it is more than twice
     the view, and a click on it moves the view.

@@ -705,7 +705,8 @@
   function serviceKindInfo(kind) { const k = (THEME && THEME.service_kinds) || {}; return k[kind] || k.other || { label: kind, ui_icon: "container" }; }
   function hasServices(si) { for (const n of si.nodes.values()) if (n.component_type === "service") return true; return false; }
   function systemView(si, o) {
-    const view = { title: "System", direction: "TB", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, origin: new Map(), orientable: false };
+    // Services side by side (TB) while they fit; auto orientation stacks many of them (LR). Its own remembered choice.
+    const view = { title: "System", direction: "TB", mode: "kind", nodes: [], edges: [], subgraphs: new Map(), truncated: 0, origin: new Map(), orientKey: "system" };
     const services = [...si.nodes.values()].filter((n) => n.component_type === "service")
       .sort((a, b) => ((serviceKind(a) !== "first-party") - (serviceKind(b) !== "first-party")) || cmpStr(a.qualified_name, b.qualified_name));
     const shown = services.slice(0, (o && o.maxNodes) || 250);
@@ -840,8 +841,9 @@
     return s.slice(0, head) + "…" + s.slice(s.length - (keep - head));
   }
   /* Orientation from shape (as views.choose_direction): estimate the drawing both ways (ranks along the flow ×
-     the widest rank across it) and keep the one that fits the screen (w × h) at the larger zoom; when both fit
-     at full size, the view's own direction stays.  A deep tree is drawn LR, a long thin chain TB. */
+     the widest rank across it) and turn the view only when the other direction fits the screen (w × h) at a
+     clearly larger zoom (ORIENT_GAIN).  A deep tree is drawn LR, a long thin chain TB, many services stacked. */
+  const ORIENT_GAIN = 1.25;
   function chooseDirection(view, w, h) {
     const ids = view.nodes.map((n) => n.id), idset = new Set(ids);
     if (!ids.length) return view.direction || "LR";
@@ -864,8 +866,9 @@
     w = w || 1600; h = h || 1000;
     const fits = (dw, dh) => Math.min(1, w / dw, h / dh);
     const lr = fits(depth * 250, breadth * 56), tb = fits(breadth * 190, depth * 116);
-    if (Math.abs(lr - tb) < 1e-9) return view.direction || "LR";
-    return lr > tb ? "LR" : "TB";
+    const own = view.direction === "TB" ? "TB" : "LR";
+    if (own === "LR" ? tb >= lr * ORIENT_GAIN : lr >= tb * ORIENT_GAIN) return own === "LR" ? "TB" : "LR";
+    return own;
   }
   function nodeLabel(n, mode) {
     const st = THEME.status[n.status] || {};
@@ -1000,10 +1003,12 @@
       }
     }
     setTitle(t) { this.titleEl.textContent = t; this.viewport.setAttribute("aria-label", t); }
-    orientation() { return this.opts.orient ? storage.get("rv.orient." + this.opts.orient, "auto") : "auto"; }
+    /* The remembered orientation: per tab, or per view when the view names its own key (the System view). */
+    orientKey() { return "rv.orient." + ((this.view && this.view.orientKey) || this.opts.orient); }
+    orientation() { return this.opts.orient ? storage.get(this.orientKey(), "auto") : "auto"; }
     cycleOrientation() {
       const next = { auto: "LR", LR: "TB", TB: "auto" }[this.orientation()] || "auto";
-      storage.set("rv.orient." + this.opts.orient, next);
+      storage.set(this.orientKey(), next);
       if (this.view) this.render(this.view, this.handlers);
     }
     updateOrientButton(dir) {
@@ -3311,7 +3316,7 @@
         { h: "Navigating" },
         { ul: ["Drag to pan and scroll to zoom; **Fit** and **1:1** reset the view. With the diagram focused, arrows pan, `+` / `-` zoom and `0` fits.",
           "**Find in diagram** highlights matching nodes.",
-          "The **⇄ auto** button (Changes, Structure, Dependencies) sets the layout direction: *auto* picks left to right or top to bottom from the diagram's shape, whichever fits the screen at the larger zoom. Click to force ⇄ left to right, then ⇅ top to bottom, then back to auto. Each tab remembers its choice.",
+          "The **⇄ auto** button (Changes, Structure, Dependencies) sets the layout direction. *Auto* turns the diagram when the other direction fits the screen at a clearly larger zoom: a deep tree runs left to right, a long chain top to bottom, many services are stacked. Click to force ⇄ left to right, then ⇅ top to bottom, then back to auto. Each tab remembers its choice, and the System view its own.",
           "**Fit** never shrinks labels below 11 px. A larger diagram fits its width; pan to see the rest. When it is more than twice the view, a **mini-map** in the corner shows where you are: click it to move there.",
           "Long names are shortened in the middle (`app.services…images`). Hover a node for its full name, or click it for the details panel.",
           "**Copy** copies the Mermaid source, **SVG** downloads the picture (icons included) and **.mmd** downloads the source for documents or pull requests."] },
@@ -3585,7 +3590,7 @@
     } catch (err) { fail("Could not load repository data: " + err.message); return; }
     const app = new App(api, bundle);
     APP = app;
-    window.repoviz = { app, toMermaid, changesView, dependencyView, structureView, systemView, flowView, activityView, indexDiff, indexSnapshot };
+    window.repoviz = { app, toMermaid, changesView, dependencyView, structureView, systemView, flowView, activityView, indexDiff, indexSnapshot, chooseDirection };
     await app.init();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", main); else main();
