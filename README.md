@@ -20,7 +20,7 @@ implementation waves, and for understanding any codebase. It answers questions l
 | Question | Where |
 |---|---|
 | Which modules did the agent touch? Did it touch anything it should not have? | **AI Review** tab, `repoviz review` |
-| What are the key changes in a module, and do they look right? | **AI Review** → change cards (symbols, signatures, diff) |
+| What are the key changes in a module, and do they look right? | **AI Review** → change cards (symbols, signatures, values, diff) |
 | What should I tell the agent to fix, complete or revert? | **AI Review** → notes → feedback prompt, `repoviz review --format prompt` |
 | What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
 | What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
@@ -126,7 +126,11 @@ or as the *exact difference* between the two trees.
   - **Search** (`/`) and **component chips** narrow the table, together. The
     search, chips and groups are remembered.
   - **Change card.** Each file opens one with:
-    - key changes: functions and classes with before/after signatures;
+    - key changes: functions and classes with before/after signatures, and
+      constants and settings with before/after values (`MAX_IMAGES: 20 → 200`).
+      A safety setting switched the risky way (`DEBUG` → true, `VERIFY_SSL` →
+      false, a timeout → 0, CORS → `*`) is also a signal. Secret-looking names
+      show `•••`;
     - dependency changes;
     - tests that exercise it;
     - the diff, where any line can be annotated.

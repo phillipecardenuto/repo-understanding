@@ -160,6 +160,7 @@ Credential-like values are always redacted in excerpts and diffs.
 | `trivial-assertion` | medium | tests | `assert True`, `expect(true).toBe(true)` |
 | `test-deleted` | medium | tests | a test file was removed |
 | `secret` | high | security | a credential-like value was added |
+| `safety-flag-weakened` | medium | security | a well-known safety setting was switched the risky way, in code or a configuration file (see [Values](#values-constants-and-settings) for the rules). Example: `Safety setting weakened: DEBUG — debug mode switched on (DEBUG: False → True)` at `app/settings.py:4`. Not raised in test files, nor when the value already was risky |
 | `debugger` | medium | hygiene | `breakpoint()`, `pdb.set_trace()`, `debugger;` |
 | `debug-output` | low | hygiene | `print(`, `console.log(` … in non-test code |
 | `suppression` | low | hygiene | `# type: ignore`, `# noqa`, `eslint-disable`, `@ts-ignore` … |
@@ -171,6 +172,74 @@ Credential-like values are always redacted in excerpts and diffs.
 | `submodule-added` / `submodule-removed` | medium | architecture | a Git submodule was added or removed |
 | `submodule-updated` | medium | architecture | a submodule now points to another commit (commits listed when available) |
 | `submodule-uncommitted` | medium | correctness | files changed inside a submodule are not committed there, so the superproject cannot record them |
+
+### Values: constants and settings
+
+Agents tweak limits and flags to make things pass. A file's key changes
+therefore also list its values, before → after:
+
+```text
+app/services/extract.py:12  MAX_IMAGES_PER_EXTRACTION: 20 → 200
+app/settings.py:4  DEBUG: False → True  ⚠ debug mode switched on
+config/app.toml:5  server.port: 8000 → 9000
+```
+
+What counts as a value:
+
+- **Python.** Module-level UPPER_CASE names bound to a literal (`NAME = 20`,
+  `NAME: int = 20`), and the literal defaults of settings classes (subclasses of
+  `BaseSettings` or `…Settings`, dataclasses and models named `…Settings` or
+  `…Config`), such as `Settings.debug`.
+- **JavaScript / TypeScript.** `export const name = literal` and top-level
+  `const UPPER_NAME = literal`.
+- **Configuration files** under config-like paths (`config/`, `settings/`,
+  `*.config.*`, `settings.*`), and `.env.example` / `.env.sample`. Scalar keys
+  at the top level and one section down (`server.port`) are listed.
+
+Values are parsed, never evaluated: `ast.literal_eval` on the syntax tree,
+`json`, `tomllib` and the YAML subset.
+
+- A computed value (`URL = BASE + "/api"`) is not listed.
+- Values are shortened to 120 characters and redacted. A change past the
+  120th character still counts: values are compared by a hash of their full
+  text.
+- A value whose name looks secret (`API_KEY`, `password`, `token`…) shows as
+  `•••`, unless it is a flag or a quantity (`MAX_TOKENS = 4096`).
+
+Only files that exist on both sides are compared: the constants of a new file
+are not listed one by one. At most 300 changed files are compared per review
+(about 3 ms each). Beyond that, the file card and `repoviz review` say that
+the rest were not compared.
+
+**Safety rules.** `safety-flag-weakened` (medium, category security) is raised
+when a value's last name part (`DEBUG`, `Settings.debug`, `server.verify_ssl`)
+matches a rule and the new value is the risky one, while the old value was
+not:
+
+| Name | Risky value | Meaning |
+|---|---|---|
+| `DEBUG`, `*_DEBUG` | true, `"1"`, `"on"`… | debug mode switched on |
+| `*SSL*`, `*TLS*`, `CHECK_CERT(S)`, `CERT_REQS` | false | TLS or certificate verification switched off |
+| `VERIFY`, `VERIFY_*`, `*_VERIFY_*`, `*VERIFICATION*` | false | verification switched off |
+| `*ALLOW_ALL*` | true | allow-all switched on |
+| `TIMEOUT`, `*_TIMEOUT` | 0 or none | timeout removed |
+| `*CORS*`, `ALLOWED_ORIGINS`, `ALLOW_ORIGINS`, `ALLOWED_HOSTS` | `*` | any origin or host allowed |
+| `CSRF*`, `AUTH*`, `*_SECURE`, `RATE_LIMIT*` (as words) | false | a security check switched off |
+
+The rules are `SAFETY_FLAGS` in `values.py`. Test files never raise it. Turn
+it off with `review.disabled_checks = ["safety-flag-weakened"]`; the values are
+still listed.
+
+The review reads both versions of each changed file, so snapshots do not grow.
+Values are not drawn in diagrams. They appear in:
+
+- the file card's key changes, in the AI Review tab (live app and static
+  report);
+- `repoviz review` ("Values changed") and its Markdown;
+- the pull-request comment (`--format pr-comment`, up to 30 rows);
+- the JSON: `files[].values` (`name`, `kind`, `status`, `value_before`,
+  `value`, `line`, and `weakens` when a safety rule trips) and
+  `summary.values_changed`.
 
 ### Renames and moves
 

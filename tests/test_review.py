@@ -1291,3 +1291,75 @@ def test_new_runtime_dependency(make_repo) -> None:
     [f] = by_kind(_review_all(repo))["new-runtime-dependency"]
     assert f["severity"] == "low" and f["path"] == "app/search.py" and f["line"] == 5
     assert "now talks to the cbir-service service (http:8000)" in f["detail"]
+
+
+VALUES_APP = {
+    "app/__init__.py": "",
+    "app/limits.py": "MAX_IMAGES = 20\n\n\ndef crop(images):\n    return images[:MAX_IMAGES]\n",
+    "app/settings.py": "DEBUG = False\nAPI_KEY = \"change-me\"\n",
+    "config/app.yaml": "server:\n  timeout: 30\n",
+    "tests/test_limits.py": "VERIFY_SSL = True\n\n\ndef test_crop():\n    assert True\n",
+}
+
+
+def values_wave(repo) -> None:
+    repo.write({"app/limits.py": "MAX_IMAGES = 200\n\n\ndef crop(images):\n    return images[:MAX_IMAGES]\n",
+                "app/settings.py": f"DEBUG = True\nAPI_KEY = \"{SECRET}\"\n",
+                "config/app.yaml": "server:\n  timeout: 0\n",
+                "tests/test_limits.py": "VERIFY_SSL = False\n\n\ndef test_crop():\n    assert True\n"})
+
+
+def test_constant_and_setting_values_are_key_changes(make_repo, capsys) -> None:
+    repo = make_repo(VALUES_APP)
+    values_wave(repo)
+    report = _review_all(repo)
+    files = {f["path"]: f for f in report["files"]}
+    [limit] = files["app/limits.py"]["values"]
+    assert (limit["name"], limit["value_before"], limit["value"], limit["line"]) == ("MAX_IMAGES", "20", "200", 1)
+    assert files["app/limits.py"]["symbols"] == []  # the function did not change
+    settings = {v["name"]: v for v in files["app/settings.py"]["values"]}
+    assert settings["API_KEY"]["value_before"] == settings["API_KEY"]["value"] == "•••"
+    assert SECRET not in json.dumps(report)
+    assert files["config/app.yaml"]["values"][0]["name"] == "server.timeout"
+    assert report["summary"]["values_changed"] == 5
+    # A safety setting switched the risky way is a signal, except in tests.
+    weakened = {f["title"]: f for f in by_kind(report)["safety-flag-weakened"]}
+    assert set(weakened) == {"Safety setting weakened: DEBUG", "Safety setting weakened: server.timeout"}
+    debug = weakened["Safety setting weakened: DEBUG"]
+    assert (debug["severity"], debug["category"], debug["path"], debug["line"]) == ("medium", "security", "app/settings.py", 1)
+    assert debug["detail"] == "debug mode switched on (DEBUG: False → True)."
+    # CLI text and markdown.
+    assert main(["review", "-C", repo.path, "all"]) == 0
+    out = capsys.readouterr().out
+    assert "Values changed (5):" in out and "app/limits.py:1  MAX_IMAGES: 20 → 200" in out
+    assert "DEBUG: False → True  ⚠ debug mode switched on" in out and SECRET not in out
+    assert main(["review", "-C", repo.path, "all", "--format", "markdown"]) == 0
+    assert "**Values changed (5)**" in (md := capsys.readouterr().out) and "`app/limits.py:1  MAX_IMAGES: 20 → 200`" in md
+    from repoviz.ci import pr_comment
+
+    comment = pr_comment(report, link_base="https://example.test/blob/abc")
+    assert "<summary>Values changed (5)</summary>" in comment and SECRET not in comment
+    assert "| `MAX_IMAGES` | `20` → `200` | [`app/limits.py:1`](https://example.test/blob/abc/app/limits.py#L1) |" in comment
+    assert "| `DEBUG` | `False` → `True` ⚠ debug mode switched on |" in comment
+
+
+def test_safety_flag_signal_can_be_disabled(make_repo) -> None:
+    repo = make_repo({**VALUES_APP, ".repoviz.toml": '[review]\ndisabled_checks = ["safety-flag-weakened"]\n'})
+    values_wave(repo)
+    report = _review_all(repo)
+    assert "safety-flag-weakened" not in by_kind(report) and report["summary"]["values_changed"] == 5
+
+
+def test_values_are_compared_in_a_bounded_number_of_files(make_repo, monkeypatch, capsys) -> None:
+    import repoviz.review as review_module
+
+    monkeypatch.setattr(review_module, "MAX_VALUE_FILES", 1)
+    repo = make_repo(VALUES_APP)
+    values_wave(repo)
+    report = _review_all(repo)
+    compared = [f["path"] for f in report["files"] if f["values"]]
+    omitted = [f for f in report["files"] if f.get("values_omitted")]
+    assert len(compared) == 1 and len(omitted) == 3  # four modified files, one compared
+    assert "first 1 changed files only" in omitted[0]["values_omitted"]
+    assert main(["review", "-C", repo.path, "all"]) == 0
+    assert "(3 more changed file(s) not compared: at most 1 per review)" in capsys.readouterr().out

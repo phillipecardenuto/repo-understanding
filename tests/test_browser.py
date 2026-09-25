@@ -163,6 +163,31 @@ def test_review_tab_triage_and_feedback(page, make_repo, tmp_path: Path) -> None
     assert page.errors == []  # type: ignore[attr-defined]
 
 
+def test_review_file_card_lists_values_before_and_after(page, make_repo, tmp_path: Path) -> None:
+    from test_review import SECRET, VALUES_APP, values_wave
+
+    repo = make_repo(VALUES_APP)
+    values_wave(repo)
+    report = tmp_path / "review.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    page.click("#tab-review .files-split tbody tr >> text=app/settings.py")
+    card = page.locator("#tab-review .value-change")
+    assert card.count() == 2
+    text = page.inner_text("#tab-review")
+    assert "Key changes (2)" in text and "constant DEBUG" in text
+    debug = page.inner_text("#tab-review tr:has(.value-change):has-text('DEBUG')")
+    assert "False → True" in debug and "debug mode switched on" in debug  # the pill carries text and an icon
+    assert page.locator("#tab-review tr:has-text('DEBUG') .value-change i.rvi-alert").count() == 1
+    assert "••• → •••" in page.inner_text("#tab-review tr:has(.value-change):has-text('API_KEY')")
+    assert SECRET not in page.content()
+    page.click("#tab-review .files-split tbody tr >> text=app/limits.py")
+    assert "20 → 200" in page.inner_text("#tab-review tr:has(.value-change):has-text('MAX_IMAGES')")
+    assert "No function or class changed" not in page.inner_text("#tab-review")
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
 def test_review_navigation_progress_and_scope_reset(page, make_repo, tmp_path: Path) -> None:
     from test_review import APP, agent_wave
 

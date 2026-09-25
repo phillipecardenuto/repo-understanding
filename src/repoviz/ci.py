@@ -19,6 +19,7 @@ from urllib.parse import quote
 
 DOCS_URL = "https://github.com/phillipecardenuto/repo-understanding/blob/main/docs/review.md#review-signals"
 COMMENT_MARKER = "<!-- repoviz-review -->"
+MAX_VALUE_ROWS = 30  # constants and settings listed in a pull-request comment
 MAX_COMMENT_CHARS = 65_000  # GitHub refuses comments over 65,536 characters
 MAX_MAP_NODES = 40
 TOP_SIGNALS = 10
@@ -174,6 +175,12 @@ def _link(path: str | None, line: int | None, link_base: str | None) -> str:
     return f"[`{label}`]({link_base.rstrip('/')}/{quote(path)}{f'#L{line}' if line else ''})"
 
 
+def _code(text: str) -> str:
+    """Inline code for a table cell: backticks and pipes cannot break out of it."""
+    text = text.replace("|", "\\|")
+    return f"`` {text} ``" if "`" in text else f"`{text}`"
+
+
 def pr_comment(report: dict[str, Any], *, link_base: str | None = None, max_chars: int = MAX_COMMENT_CHARS,
                max_nodes: int = MAX_MAP_NODES, top: int = TOP_SIGNALS) -> str:
     """Markdown for a pull-request comment, under ``max_chars`` (details are dropped first, with a note)."""
@@ -206,6 +213,19 @@ def pr_comment(report: dict[str, Any], *, link_base: str | None = None, max_char
                            f"{' — ' + detail if detail else ''} | {_link(f.get('path'), f.get('line'), link_base)} |")
     else:
         signals.append("No review signal.")
+    values = [(f, v) for f in report.get("files", []) for v in f.get("values") or []]
+    if values:
+        signals += ["", f"<details><summary>Values changed ({len(values)})</summary>", "",
+                    "| Value | Before → after | Where |", "|---|---|---|"]
+        for f, v in values[:MAX_VALUE_ROWS]:
+            change = f"{_code(v['value_before']) if v['value_before'] is not None else '_(new)_'} → " \
+                     f"{_code(v['value']) if v['value'] is not None else '_(removed)_'}"
+            if v.get("weakens"):
+                change += f" ⚠ {v['weakens']}"
+            signals.append(f"| {_code(v['name'])} | {change} | {_link(f['path'], v.get('line'), link_base)} |")
+        if len(values) > MAX_VALUE_ROWS:
+            signals.append(f"\n_{len(values) - MAX_VALUE_ROWS} more; run `repoviz review` for all of them._")
+        signals += ["", "</details>"]
     files = ["", f"<details><summary>All changed files ({len(report.get('files', []))})</summary>", "",
              "| File | Change | +/− | Risk | Signals |", "|---|---|---:|---|---:|"]
     for f in sorted(report.get("files", []), key=lambda f: -((f.get("risk") or {}).get("score") or 0)):

@@ -19,7 +19,7 @@ how to test it.
 | Comparing states | `diff.py`, `flow.py`, `activity.py`, `session.py`, `repo.py`, `filechanges.py` (one file's recent changes) | "Caching and performance" |
 | Graph questions | `query.py` (why A depends on B, blast radius; mirrored in `app.js`) | `docs/architecture.md` ("Web application") |
 | Persistent cache | `diskcache.py` (per-file parse results in SQLite; JSON codecs in each analyzer) | "Caching and performance", `docs/configuration.md` ("Parse cache") |
-| Agent review | `review.py` (targets, scope, signals, feedback prompt), `risk.py` (risk score), `contracts.py` (architecture contracts, baseline) | `docs/review.md`, `docs/configuration.md` ("Architecture contracts") |
+| Agent review | `review.py` (targets, scope, signals, feedback prompt), `risk.py` (risk score), `contracts.py` (architecture contracts, baseline), `values.py` (constants and settings before → after, safety rules) | `docs/review.md`, `docs/configuration.md` ("Architecture contracts") |
 | Front ends | `cli.py`, `server.py`, `render/html.py`, `render/views.py`, `render/mermaid.py` | "Web application" |
 | CI outputs | `ci.py` (SARIF, GitHub annotations, pull-request comment), `.github/actions/review/action.yml` | `docs/review.md` ("Pull requests and CI") |
 | Agent front end | `mcp.py` (read-only MCP server over stdio: tools, prompts, output caps) | `docs/mcp.md` |

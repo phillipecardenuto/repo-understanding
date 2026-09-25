@@ -55,7 +55,7 @@ Labels:
 | [#11](https://github.com/phillipecardenuto/repo-understanding/issues/11) | Third-party dependency changes (manifests, lock files) with supply-chain signals | P2 | M |
 | [#12](https://github.com/phillipecardenuto/repo-understanding/issues/12) | Read existing coverage reports to flag changed lines no test runs | P2 | M |
 | [#13](https://github.com/phillipecardenuto/repo-understanding/issues/13) | Cross-service contract changes: HTTP routes, background tasks, env vars | P2 | L |
-| [#14](https://github.com/phillipecardenuto/repo-understanding/issues/14) | Constant and configuration value changes, before → after | P2 | S |
+| [#14](https://github.com/phillipecardenuto/repo-understanding/issues/14) | Constant and configuration value changes, before → after · **✓ done** | P2 | S |
 | [#15](https://github.com/phillipecardenuto/repo-understanding/issues/15) | Submodule edge cases: fetch hint for missing history, nested submodules | P3 | S |
 | [#20](https://github.com/phillipecardenuto/repo-understanding/issues/20) | Standing guidance on components, exported as agent context | P3 | S |
 | [#35](https://github.com/phillipecardenuto/repo-understanding/issues/35) | Review any branch against any other branch (since they diverged, or exact) · **✓ done** | P1 | M |
@@ -118,7 +118,7 @@ Labels:
 4. **UI at scale:** #27 (diagram readability), #29 (lists), #28 (why and blast
    radius) and #31 (history comparisons), all done.
 5. **Anytime:** #34 (parse cache in; the 5× target needs incremental graph
-   building), then #14, #25 and #11.
+   building), #14 (values before → after), done; then #25 and #11.
 
 ## Dependencies between items
 

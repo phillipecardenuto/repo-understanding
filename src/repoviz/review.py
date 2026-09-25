@@ -56,6 +56,7 @@ from .redact import redact as _redact
 from .risk import RiskContext
 from .sources import TreeSource, is_binary
 from .submodules import WithSubmoduleFiles, submodule_changes
+from .values import value_changes
 from .wiring import unwired_code
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -533,6 +534,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
 
     files: list[dict[str, Any]] = []
     total_diff_lines = 0
+    value_files = 0
     # Renamed or moved files are one entry at their new path, diffed against their old content.
     file_renames = {r["new_path"]: r["old_path"] for r in diff.renames
                     if r["kind"] == "file" and r["old_path"] and r["new_path"] and r["old_path"] != r["new_path"]
@@ -613,6 +615,14 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             })
         key_changes.sort(key=lambda k: (-(k["lines_added"] + k["lines_removed"]), k["qualified_name"]))
         entry["symbols"] = key_changes
+        # --- values: constants and settings, before → after (values.py) --------------------------
+        entry["values"] = []
+        if before is not None and after is not None:
+            if value_files < MAX_VALUE_FILES:
+                value_files += 1
+                entry["values"] = value_changes(path, before, after, lang)
+            else:
+                entry["values_omitted"] = f"values are compared in the first {MAX_VALUE_FILES} changed files only"
         # --- dependency changes originating in this file ---------------------------------------
         deps = []
         for ch in impact.edges_by_path.get(path, []):
@@ -648,6 +658,13 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             add(Finding("sensitive-file", "scope", "medium", f"Sensitive file changed ({sens})",
                         f"{path} is a {sens} file; changes here affect builds, deployments or data.", path,
                         component=cname))
+        for v in entry["values"]:
+            if v.get("weakens") and not is_test:
+                change = f"{v['value_before']} → {v['value']}" if v["value_before"] is not None else f"set to {v['value']}"
+                add(Finding("safety-flag-weakened", "security", "medium", f"Safety setting weakened: {v['name']}",
+                            f"{v['weakens']} ({v['name']}: {change}).", path, v["line"], component=cname,
+                            suggestion="Keep it only if this is a development-only setting that never reaches "
+                                       "production; otherwise revert it."), key=v["name"])
         if is_test and status == REMOVED:
             add(Finding("test-deleted", "tests", "medium", "Test file deleted", f"{path} was removed.", path,
                         component=cname, suggestion="Check the deleted tests are obsolete, not inconvenient."))
@@ -720,6 +737,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "lines_added": sum(f.get("lines_added") or 0 for f in files),
         "lines_removed": sum(f.get("lines_removed") or 0 for f in files),
         "symbols_changed": sum(len(f["symbols"]) for f in files),
+        "values_changed": sum(len(f.get("values") or []) for f in files),
         "tests_changed": sum(1 for f in files if f["is_test"]),
         "submodules_changed": len(sub_changes),
         "protected": sum(1 for f in files if f["scope"] == "protected"),
@@ -1296,6 +1314,7 @@ def _coupling_findings(add: Any, files: list[dict[str, Any]], coupling: Any, cha
 
 
 MAX_STALE_FILES = 60
+MAX_VALUE_FILES = 300  # changed files whose constants and settings are compared, per review
 MAX_RENAME_CHECKS = 200  # renamed symbols checked for leftover references per review
 
 
@@ -1687,6 +1706,18 @@ def _commit_title(c: dict[str, Any]) -> str:
     return c["subject"] if c.get("uncommitted") else f"{c['short']} {c['subject']}"
 
 
+def value_lines(report: dict[str, Any]) -> list[str]:
+    """One line per changed constant or setting: ``path:line  NAME: 20 → 200``."""
+    out = []
+    for f in report["files"]:
+        for v in f.get("values") or []:
+            loc = f"{f['path']}:{v['line']}" if v.get("line") else f["path"]
+            change = (f"{v['value_before']} → {v['value']}" if v["status"] == "modified"
+                      else f"added = {v['value']}" if v["status"] == "added" else f"removed (was {v['value_before']})")
+            out.append(f"{loc}  {v['name']}: {change}" + (f"  ⚠ {v['weakens']}" if v.get("weakens") else ""))
+    return out
+
+
 def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
     s = report["summary"]
     t = report["target"]
@@ -1747,6 +1778,15 @@ def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
                         out.append(f"          [{x['severity']:<6}] {x['title']}")
     if commits.get("note"):
         out.append(f"\nnote: {commits['note']}")
+    values = value_lines(report)
+    unread = sum(1 for f in report["files"] if f.get("values_omitted"))
+    if values or unread:
+        out.append(f"\nValues changed ({len(values)}):")
+        out += [f"  {x}" for x in values[:50]]
+        if len(values) > 50:
+            out.append(f"  … {len(values) - 50} more")
+        if unread:
+            out.append(f"  ({unread} more changed file(s) not compared: at most {MAX_VALUE_FILES} per review)")
     if report["findings"]:
         out.append("\nFindings:")
         for f in report["findings"]:

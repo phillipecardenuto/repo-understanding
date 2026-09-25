@@ -2901,7 +2901,8 @@
     const ids = new Set(components.map((c) => c.id));
     const summary = Object.assign({}, wave.summary, { files: files.length, components: components.length,
       lines_added: files.reduce((a, f) => a + (f.lines_added || 0), 0), lines_removed: files.reduce((a, f) => a + (f.lines_removed || 0), 0),
-      symbols_changed: files.reduce((a, f) => a + f.symbols.length, 0), tests_changed: files.filter((f) => f.is_test).length });
+      symbols_changed: files.reduce((a, f) => a + f.symbols.length, 0), values_changed: files.reduce((a, f) => a + (f.values || []).length, 0),
+      tests_changed: files.filter((f) => f.is_test).length });
     return Object.assign({}, wave, { files, components, summary, commit: item, filtered: true, risk: waveRiskOf(files),
       findings: wave.findings.filter((f) => f.path && paths.has(f.path)),
       component_edges: (wave.component_edges || []).filter((e) => ids.has(e.source) && ids.has(e.target)) });
@@ -3669,8 +3670,9 @@
           h("button", { class: "btn small", onclick: (ev) => this.noteForm(ev.target.closest(".actions"), { path: f.path }, "improve") }, "✎ Note on this file…"),
           f.module_id && this.app.snapshotIndex.nodes.has(f.module_id) ? h("button", { class: "btn small", onclick: () => this.app.focusDependencies(f.module_id) }, "Show dependencies") : null));
       if (f.kind === "submodule") { this.drawSubmodule(f); return; }
-      // Key changes: which functions / classes changed and how much.
-      this.fileEl.appendChild(h("h4", { text: `Key changes (${f.symbols.length})` }));
+      // Key changes: which functions / classes changed and how much, then constants and settings (before → after).
+      const values = f.values || [];
+      this.fileEl.appendChild(h("h4", { text: `Key changes (${f.symbols.length + values.length})` }));
       if (f.symbols.length) {
         this.fileEl.appendChild(table([
           { key: "status", label: "", render: (k) => statusPill(k.status) },
@@ -3680,7 +3682,18 @@
             ? h("span", { class: "mono" }, h("del", { text: k.signature_before }), " → ", h("ins", { text: k.signature || "" })) : h("span", { class: "mono faint", text: k.signature || "" }) },
           { key: "lines_added", label: "+/−", num: true, render: (k) => `+${k.lines_added} −${k.lines_removed}`, sort: (k) => k.lines_added + k.lines_removed },
         ], f.symbols, { onRow: (k) => this.scrollToLine(k.line), scroll: false }));
-      } else this.fileEl.appendChild(h("div", { class: "empty", text: f.language ? "No function or class changed (module-level or non-code change)." : "No symbol information for this file type." }));
+      } else if (!values.length) this.fileEl.appendChild(h("div", { class: "empty", text: f.language ? "No function or class changed (module-level or non-code change)." : "No symbol information for this file type." }));
+      if (f.values_omitted) this.fileEl.appendChild(h("div", { class: "faint small", text: `ⓘ Constants and settings not compared: ${f.values_omitted}.` }));
+      if (values.length) {
+        this.fileEl.appendChild(table([
+          { key: "status", label: "", render: (v) => statusPill(v.status) },
+          { key: "name", label: "Value", render: (v) => h("span", { class: "mono", text: `${v.kind} ${v.name}` }) },
+          { key: "value", label: "Before → after", render: (v) => h("span", { class: "mono value-change" },
+            v.value_before !== null && v.value_before !== undefined ? h("del", { text: v.value_before }) : h("span", { class: "faint", text: "(new)" }), " → ",
+            v.value !== null && v.value !== undefined ? h("ins", { text: v.value }) : h("span", { class: "faint", text: "(removed)" }),
+            v.weakens ? [" ", pill([iconEl("alert", true), " " + v.weakens], "medium")] : null) },
+        ], values, { onRow: (v) => this.scrollToLine(v.line), scroll: false }));
+      }
       if ((f.dependencies || []).length) {
         this.fileEl.appendChild(h("h4", { text: `Dependency changes (${f.dependencies.length})` }));
         this.fileEl.appendChild(h("ul", { class: "plain" }, f.dependencies.map((d) => h("li", null, statusPill(d.status) || pill(d.status), " ", d.relationship, " → ",
@@ -3854,6 +3867,7 @@
           "**Search** (press `/`) narrows the table by path, component or signal title. The **component chips** filter it (several can be on; they combine with the search). The search, chips, grouping and collapsed groups are remembered.",
           "**Risk** is a score from 0 to 100 with a level (*high*, *medium*, *low*), shown as an icon, a number and a word. Hover it, or open the file, to see each factor and its points: the most severe signal, how many places call the changed code, the entry points reaching it, missing or stale tests, a protected or sensitive path, a churn hotspot and the size of the change. The **wave risk** badge at the top is the riskiest file; click it to open that file. Weights are set in `[review.risk]`.",
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
+          "Key changes also list **values**: constants, settings-class defaults and configuration keys, before → after (`MAX_IMAGES: 20 → 200`). A safety setting switched the risky way (debug on, TLS verification off, a timeout removed, CORS `*`) carries a **⚠** pill and a *Safety setting weakened* signal. Secret-looking names show `•••`.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
           "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file."] },
         { h: "Commit by commit" },

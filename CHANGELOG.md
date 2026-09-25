@@ -6,6 +6,21 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Constants and settings, before → after** ([#14](https://github.com/phillipecardenuto/repo-understanding/issues/14)).
+  - A file's key changes also list its values: `MAX_IMAGES: 20 → 200`. That
+    covers module-level UPPER_CASE Python constants, settings-class defaults
+    (`Settings.debug`), exported JS/TS constants, and scalar keys of
+    configuration files under config-like paths and `.env.example`.
+  - Values are parsed, never evaluated (literals only), shortened to 120
+    characters and redacted. Secret-looking names show `•••`.
+  - Shown in the AI Review file card, `repoviz review` ("Values changed"), its
+    Markdown, the pull-request comment and the JSON (`files[].values`).
+  - New signal `safety-flag-weakened` (medium): `DEBUG` → true, TLS or
+    verification → false, `ALLOW_ALL*` → true, a timeout → 0 or none, CORS or
+    allowed hosts → `*`, CSRF / auth / secure / rate limit → false. Not raised
+    in tests. It can be disabled.
+  - Extracted at review time from the two versions of each changed file:
+    snapshots, caches and diagrams are unchanged.
 - **Persistent parse cache** ([#34](https://github.com/phillipecardenuto/repo-understanding/issues/34)).
   - Per-file parse results (Python, JavaScript/TypeScript, Git churn) are kept
     in `parse-cache.sqlite` in the state directory. The next command, a

@@ -751,6 +751,13 @@ def format_review_markdown(report: dict[str, Any]) -> str:
         scope = ", ".join(f"{v} {k}" for k, v in c["scope"].items())
         found = ", ".join(f"{v} {k}" for k, v in c["findings"].items() if v) or "–"
         lines.append(f"| {c['name']} | {c['files']} | +{c['lines_added']} −{c['lines_removed']} | {scope} | {found} |")
+    from .review import value_lines
+
+    values = value_lines(report)
+    if values:
+        lines += ["", f"**Values changed ({len(values)})**", ""] + [f"- `{x}`" for x in values[:20]]
+        if len(values) > 20:
+            lines.append(f"- … {len(values) - 20} more")
     if report["findings"]:
         lines += ["", "| Severity | Finding | Location |", "|---|---|---|"]
         for f in report["findings"]:
