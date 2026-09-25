@@ -1247,3 +1247,20 @@ def test_live_changes_offers_history_with_sizes(page, make_repo) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_sys_path_imports_and_inferred_projects_are_marked(page, make_repo, tmp_path: Path) -> None:
+    from test_analyzers import SYS_PATH_APP
+
+    repo = make_repo({**SYS_PATH_APP, "requirements.txt": "fastapi\n"})
+    report = tmp_path / "report.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    card = page.locator("#tab-structure .card:has(h3:has-text('Projects (1)'))")
+    assert "inferred from requirements.txt" in card.inner_text()
+    test_x = page.evaluate("() => [...repoviz.app.snapshotIndex.nodes.values()].find((n) => n.path === 'tests/test_x.py').id")
+    page.evaluate("(id) => repoviz.app.tabs.structure.details.showNode(repoviz.app.snapshotIndex, id)", test_x)
+    link = page.locator("#tab-structure li:has-text('app.schemas') span[title]:has-text('via sys.path')")
+    assert link.count() == 1 and link.get_attribute("title") == "resolved through tests/test_x.py:3"
+    assert page.errors == []  # type: ignore[attr-defined]

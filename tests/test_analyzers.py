@@ -405,3 +405,89 @@ def test_docker_command_parsing() -> None:
     tags = _docker_build_tags("build:\n\tdocker buildx build --platform linux/amd64 -t org/api:1 -f api/Dockerfile api\n"
                               "\tdocker build -t $(IMAGE) .\n# docker build -t commented/out .\n")
     assert tags == [(2, "org/api:1", "api")]
+
+
+# --------------------------------------------------------------------------- Python: sys.path edits (#25)
+
+
+def test_sys_path_patterns_are_read_statically() -> None:
+    def edits(code: str) -> list:
+        return parse_python(code).sys_paths
+
+    assert edits("import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))\n") \
+        == [["dir", "../app", 2, "insert"]]
+    assert edits("root = Path(__file__).parent.parent\nif str(root) not in sys.path:\n    sys.path.insert(0, str(root))\n") \
+        == [["dir", "..", 3, "insert"]]
+    assert edits("sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n") \
+        == [["dir", "..", 1, "append"]]
+    assert edits("here = Path(__file__).resolve().parent\nsys.path.append(str(here.parent / 'src'))\n") \
+        == [["dir", "../src", 2, "append"]]
+    assert edits("FILE = Path(__file__).absolute()\nsys.path.append(FILE.parents[0].as_posix())\n") \
+        == [["dir", ".", 2, "append"]]
+    assert edits("sys.path.insert(0, str(Path(__file__).parents[1].joinpath('libs')))\n") == [["dir", "../libs", 1, "insert"]]
+    assert edits("sys.path.append(os.path.dirname(__file__) + '/../lib')\n") == [["dir", "../lib", 1, "append"]]
+    assert edits("try:\n    import x\nexcept ImportError:\n    sys.path.extend(['src', 'lib'])\n") \
+        == [["cwd", "src", 4, "append"], ["cwd", "lib", 4, "append"]]
+    # Unknowable without running the code: environment, working directory, absolute paths, function bodies.
+    assert edits("sys.path.insert(0, os.environ['APP_HOME'])\nsys.path.insert(0, os.getcwd())\n"
+                 "sys.path.append('/opt/lib')\nsys.path.append(f'{BASE}/x')\n"
+                 "def setup():\n    sys.path.insert(0, 'src')\n") == []
+    root = "ROOT = Path(__file__).parent\nROOT = get_root()\nsys.path.insert(0, str(ROOT))\n"
+    assert edits(root) == []  # the name was rebound to something unknown
+
+
+SYS_PATH_APP = {
+    "app/__init__.py": "",
+    "app/schemas.py": "class ImageResponse:\n    pass\n\n\ndef make():\n    return ImageResponse()\n",
+    "app/utils/__init__.py": "",
+    "app/utils/panels.py": "def parse():\n    return 1\n",
+    "tests/test_x.py": (
+        "import os\nimport sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))\n\n"
+        "import schemas\nfrom utils.panels import parse\n\n\ndef test_it():\n    assert schemas.make() and parse()\n"),
+}
+
+
+def test_imports_through_sys_path_edits_are_internal(make_repo) -> None:
+    snap = Repository(make_repo(SYS_PATH_APP).path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    edge = imports[("test_x", "app.schemas")]
+    assert edge.metadata["via"] == "sys.path" and edge.metadata["sys_path_edit"] == "tests/test_x.py:3"
+    assert imports[("test_x", "app.utils.panels")].metadata["via"] == "sys.path"
+    assert not [n for n in snap.nodes() if "external" in n.tags and n.name in ("schemas", "utils")]
+    calls = edges_by_name(snap, "calls")
+    assert ("test_x.test_it", "app.schemas.make") in calls and ("test_x.test_it", "app.utils.panels.parse") in calls
+    [diag] = [d for d in snap.diagnostics if d.code == "sys-path-imports"]
+    assert diag.path == "tests/test_x.py" and diag.line == 3 and "tests/test_x.py (2)" in diag.message
+
+
+def test_conftest_sys_path_applies_to_its_directory_tree(make_repo) -> None:
+    repo = make_repo({
+        **{k: v for k, v in SYS_PATH_APP.items() if not k.startswith("tests/")},
+        "tests/conftest.py": "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).parent.parent / 'app'))\n",
+        "tests/test_a.py": "import schemas\n",
+        "tests/unit/test_b.py": "from utils import panels\n",
+        "scripts/run.py": "import schemas\n",  # outside the conftest's tree: still an unknown package
+    })
+    imports = edges_by_name(Repository(repo.path).snapshot("HEAD"))
+    assert imports[("test_a", "app.schemas")].metadata["sys_path_edit"] == "tests/conftest.py:4"
+    assert imports[("test_b", "app.utils.panels")].metadata["via"] == "sys.path"
+    assert ("run", "app.schemas") not in imports and ("run", "schemas") in imports
+
+
+def test_sys_path_order_script_directory_and_bounds(make_repo) -> None:
+    repo = make_repo({
+        "schemas.py": "X = 1\n",  # what `import schemas` normally reaches from the repository root
+        "app/__init__.py": "", "app/schemas.py": "Y = 1\n",
+        "first.py": "import sys\nsys.path.insert(0, 'app')\nimport schemas\n",  # inserted: searched first
+        "last.py": "import sys\nsys.path.append('app')\nimport schemas\n",  # appended: searched last
+        # a script's own directory is searched too (sys.path[0]), even when its edit points elsewhere
+        "svc/src/main.py": "import os, sys\nsys.path.append(os.path.dirname(os.path.dirname(__file__)))\nimport config\n",
+        "svc/src/config.py": "PORT = 1\n", "svc/src/__init__.py": "", "svc/__init__.py": "",
+        "gone.py": "import sys\nsys.path.insert(0, '../outside')\nsys.path.insert(0, 'missing')\nimport nothing\n",
+    })
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    assert imports[("first", "app.schemas")].metadata["via"] == "sys.path" and ("first", "schemas") not in imports
+    assert "via" not in imports[("last", "schemas")].metadata and ("last", "app.schemas") not in imports
+    assert imports[("svc.src.main", "svc.src.config")].metadata["via"] == "sys.path"
+    assert ("gone", "nothing") in imports and imports[("gone", "nothing")].metadata.get("external")

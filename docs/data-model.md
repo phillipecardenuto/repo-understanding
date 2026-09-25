@@ -39,7 +39,7 @@ language. Keys with `null` or empty values are omitted. `schema_version` is `1`.
 | `key` | canonical identity key the ID is derived from |
 | `fingerprint` | Git blob hash (files) or normalized-source hash (symbols) used for change detection |
 | `start_line`, `end_line` | for symbols and services |
-| `tags` | roles: `test`, `docs`, `generated`, `vendored`, `config`, `manifest`, `ci`, `container`, `entry-point`, `external`, `stdlib`, `unsupported`, `component`, `project`, `top-level`, `source-root` … |
+| `tags` | roles: `test`, `docs`, `generated`, `vendored`, `config`, `manifest`, `ci`, `container`, `entry-point`, `external`, `stdlib`, `unsupported`, `component`, `project`, `inferred` (a project inferred from `requirements.txt`), `top-level`, `source-root` … |
 | `metadata` | analyzer-specific: `component_id`, `project_id`, `semantic_fingerprint`, `signature`, `decorators`, `churn`, `version`, `role`, `entry_kind`, `dependency_details` … |
 
 ## DependencyEdge
@@ -53,7 +53,7 @@ language. Keys with `null` or empty values are omitted. `schema_version` is `1`.
 | `direct` | `false` for aggregated edges (`metadata.level`, `underlying_edges`, `underlying_count`) |
 | `cycle_ids` | cycles this edge participates in |
 | `confidence` | 0–1: 1.0 for resolved static imports, lower for dynamic imports, heuristic JS resolution, `self` calls… |
-| `metadata` | `type_checking_only`, `conditional_only`, `lazy_only`, `dynamic_only`, `test_only`, `external`, `imported_names`, `scope`, `spec`, `confirmed_by` … |
+| `metadata` | `type_checking_only`, `conditional_only`, `lazy_only`, `dynamic_only`, `test_only`, `external`, `imported_names`, `scope`, `spec`, `confirmed_by`, `via` (`sys.path`: resolved only through a `sys.path` edit) and `sys_path_edit` (its `file:line`) … |
 
 ## Submodules
 

@@ -329,6 +329,31 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
             "role": role, "workspace": workspace_members.get(d),
             "entry_points": sum(len(m.entry_points) for m in mds),
         })
+    # Requirements-only applications: a requirements*.txt next to (or directly above) a top-level Python package,
+    # in a directory no project manifest covers, makes a project inferred from it.
+    explicit = [proj["path"] for proj in prof.projects]
+    top_packages = {pkg for pkg in python_packages if posixpath.dirname(pkg) not in python_packages
+                    and pkg not in prof.generated_paths}
+    requirements: dict[str, list[str]] = {}
+    for path, md in prof.manifest_data.items():
+        if md.kind == "requirements" and path not in prof.vendored_paths and path not in prof.generated_paths:
+            d = md.dir
+            if posixpath.basename(d) == "requirements":  # requirements/base.txt, requirements/test.txt
+                d = posixpath.dirname(d)
+            requirements.setdefault(d, []).append(path)
+    for d, paths in sorted(requirements.items()):
+        if any(not e or e == d or d.startswith(e + "/") for e in explicit):
+            continue
+        if not any(posixpath.dirname(pkg) == d or posixpath.dirname(posixpath.dirname(pkg)) == d
+                   for pkg in top_packages):
+            continue
+        paths.sort(key=lambda m: (posixpath.basename(m).lower() != "requirements.txt", m.count("/"), m))
+        prof.projects.append({
+            "path": d, "name": posixpath.basename(d) if d else prof.name, "ecosystem": "python",
+            "manifest": paths[0], "manifests": paths, "version": None, "role": None, "workspace": None,
+            "entry_points": 0, "implicit": True, "inferred_from": posixpath.basename(paths[0]),
+        })
+    prof.projects.sort(key=lambda proj: proj["path"])
 
     # 6. source roots --------------------------------------------------------------------
     roots: dict[str, dict[str, Any]] = {}

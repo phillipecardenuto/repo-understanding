@@ -133,6 +133,9 @@ class PyFileInfo:
     loc: int = 0
     all_names: list[str] | None = None
     top_level_names: list[str] = field(default_factory=list)
+    # Static ``sys.path`` edits: [anchor, relative path, line, mode]; anchor "dir" is the file's directory and
+    # "cwd" a literal relative path (resolved against the repository root); mode is "insert" or "append".
+    sys_paths: list[list[Any]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         """Plain data for the persistent parse cache (``diskcache``); :meth:`from_json` reverses it."""
@@ -145,7 +148,8 @@ class PyFileInfo:
                    symbols=[RawSymbol(**{**s, "bases": [tuple(b) for b in s["bases"]]}) for s in d["symbols"]],
                    calls=[RawCallSite(c["caller"], c["class_qual"], tuple(c["parts"]), c["line"]) for c in d["calls"]],
                    unresolvable_calls=d["unresolvable_calls"], semantic_fingerprint=d["semantic_fingerprint"],
-                   loc=d["loc"], all_names=d["all_names"], top_level_names=d["top_level_names"])
+                   loc=d["loc"], all_names=d["all_names"], top_level_names=d["top_level_names"],
+                   sys_paths=d.get("sys_paths") or [])
 
 
 def _dotted(node: ast.AST) -> tuple[str, ...] | None:
@@ -185,6 +189,141 @@ def _catches_import_error(handler: ast.ExceptHandler) -> bool:
         if d and d[-1] in ("ImportError", "ModuleNotFoundError", "Exception", "BaseException"):
             return True
     return False
+
+
+# -- sys.path edits ----------------------------------------------------------------
+#
+# ``sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))`` and its pathlib spellings are
+# evaluated symbolically: a path value is (anchor, relative path) where anchor "file" is the file itself, "dir"
+# a path relative to the file's directory and "cwd" a relative literal.  Anything else (environment variables,
+# ``os.getcwd()``, absolute paths, computed strings) is not a path value, and the edit is ignored.
+
+_PathValue = tuple[str, str]
+_IDENTITY_CALLS = {"abspath", "realpath", "normpath", "fspath", "str", "Path", "PurePath", "PosixPath",
+                   "WindowsPath", "PurePosixPath"}
+_IDENTITY_METHODS = {"resolve", "absolute", "as_posix", "expanduser"}
+
+
+def _path_parent(v: _PathValue | None, times: int = 1) -> _PathValue | None:
+    for _ in range(times):
+        if v is None:
+            return None
+        anchor, rel = v
+        v = ("dir", ".") if anchor == "file" else (anchor, posixpath.normpath(posixpath.join(rel, "..")))
+    return v
+
+
+def _path_join(v: _PathValue | None, parts: list[ast.AST], env: dict[str, _PathValue]) -> _PathValue | None:
+    if v is None or v[0] == "file":
+        return None
+    anchor, rel = v
+    for part in parts:
+        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+            seg = part.value
+        else:
+            w = _path_value(part, env)
+            if w is None or w[0] != "cwd":
+                return None
+            seg = w[1]
+        if seg.startswith(("/", "\\", "~")) or re.match(r"^[A-Za-z]:", seg) or "$" in seg:
+            return None
+        rel = posixpath.normpath(posixpath.join(rel, seg.replace("\\", "/")))
+    return anchor, rel
+
+
+def _path_value(node: ast.AST, env: dict[str, _PathValue]) -> _PathValue | None:
+    """The symbolic value of a path expression, or None when it cannot be known without running the code."""
+    if isinstance(node, ast.Name):
+        return ("file", "") if node.id == "__file__" else env.get(node.id)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        seg = node.value
+        if not seg or seg.startswith(("/", "\\", "~")) or re.match(r"^[A-Za-z]:", seg) or "$" in seg:
+            return None
+        return "cwd", posixpath.normpath(seg.replace("\\", "/"))
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        return _path_parent(_path_value(node.value, env))
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "parents":
+        index = node.slice
+        if isinstance(index, ast.Constant) and isinstance(index.value, int) and 0 <= index.value < 20:
+            return _path_parent(_path_value(node.value.value, env), index.value + 1)
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):  # Path(...) / "app"
+        return _path_join(_path_value(node.left, env), [node.right], env)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and isinstance(node.right, ast.Constant) \
+            and isinstance(node.right.value, str) and node.right.value.startswith(("/", "\\")):  # dirname(...) + "/app"
+        return _path_join(_path_value(node.left, env), [ast.Constant(node.right.value.lstrip("/\\"))], env)
+    if not isinstance(node, ast.Call) or node.keywords:
+        return None
+    fn = _dotted(node.func)
+    if fn is None and isinstance(node.func, ast.Attribute):  # a method on a path value: .resolve(), .joinpath()
+        target = _path_value(node.func.value, env)
+        if node.func.attr in _IDENTITY_METHODS and not node.args:
+            return target
+        if node.func.attr == "joinpath":
+            return _path_join(target, list(node.args), env)
+        return None
+    if not fn:
+        return None
+    if len(fn) > 1 and fn[-1] in _IDENTITY_METHODS and not node.args:  # FILE.resolve() with FILE a name
+        return env.get(fn[0]) if len(fn) == 2 else None
+    if len(fn) > 1 and fn[-1] == "joinpath" and len(fn) == 2:
+        return _path_join(env.get(fn[0]), list(node.args), env)
+    name = fn[-1]
+    if name == "dirname" and len(node.args) == 1:
+        return _path_parent(_path_value(node.args[0], env))
+    if name == "join" and node.args and (len(fn) == 1 or fn[-2] == "path"):
+        return _path_join(_path_value(node.args[0], env), list(node.args[1:]), env)
+    if name in _IDENTITY_CALLS and node.args:
+        return _path_join(_path_value(node.args[0], env), list(node.args[1:]), env) if len(node.args) > 1 \
+            else _path_value(node.args[0], env)
+    return None
+
+
+def _sys_path_edits(tree: ast.Module) -> list[list[Any]]:
+    """``sys.path`` insertions whose value is known statically, in module-level code (including if/try/with)."""
+    env: dict[str, _PathValue] = {}
+    out: list[list[Any]] = []
+
+    def record(value: ast.AST, line: int, mode: str) -> None:
+        v = _path_value(value, env)
+        if v is not None and v[0] in ("dir", "cwd") and len(out) < 20:
+            out.append([v[0], v[1], line, mode])
+
+    def visit(body: list[ast.stmt]) -> None:
+        for stmt in body:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                v = _path_value(stmt.value, env)
+                if v is None:
+                    env.pop(stmt.targets[0].id, None)
+                else:
+                    env[stmt.targets[0].id] = v
+            elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                call = stmt.value
+                fn = _dotted(call.func) or ()
+                if fn[-3:] in (("sys", "path", "insert"),) and len(call.args) == 2:
+                    record(call.args[1], stmt.lineno, "insert")
+                elif fn[-3:] == ("sys", "path", "append") and len(call.args) == 1:
+                    record(call.args[0], stmt.lineno, "append")
+                elif fn[-3:] == ("sys", "path", "extend") and len(call.args) == 1 \
+                        and isinstance(call.args[0], (ast.List, ast.Tuple)):
+                    for elt in call.args[0].elts:
+                        record(elt, stmt.lineno, "append")
+                elif fn[-1:] == ("addsitedir",) and len(call.args) == 1:
+                    record(call.args[0], stmt.lineno, "append")
+            elif isinstance(stmt, ast.If):
+                visit(stmt.body)
+                visit(stmt.orelse)
+            elif isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+                visit(stmt.body)
+                for h in stmt.handlers:
+                    visit(h.body)
+                visit(stmt.orelse)
+                visit(stmt.finalbody)
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                visit(stmt.body)
+
+    visit(tree.body)
+    return out
 
 
 def _local_names(fn: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
@@ -464,6 +603,8 @@ def parse_python(text: str, path: str = "<file>") -> PyFileInfo:
     try:
         ex.imports(tree)
         ex.symbols(tree)
+        if "sys.path" in text or "addsitedir" in text:
+            info.sys_paths = _sys_path_edits(tree)
     except RecursionError:  # pragma: no cover - pathological nesting
         info.error = "RecursionError: file is too deeply nested to analyze"
     return info
@@ -499,7 +640,7 @@ _GRIMP_LOCK = threading.Lock()
 
 class PythonAnalyzer(Analyzer):
     name = "python"
-    version = "3"
+    version = "4"
     languages = ("python",)
     capabilities = (CAP_MODULES, CAP_CONTAINMENT, CAP_SYMBOLS, CAP_ENTRY_POINTS, CAP_DEPENDENCIES, CAP_CALLS,
                     CAP_EVIDENCE, CAP_DIAGNOSTICS)
@@ -582,6 +723,7 @@ class PythonAnalyzer(Analyzer):
             by_qual.setdefault(qual, []).append(f)
         ctx.shared["python.modules"] = modules
         ctx.shared["python.by_qual"] = by_qual
+        ctx.shared["python.sys_path_roots"] = self._sys_path_roots(modules)
 
         for f, mod in modules.items():
             info = mod.info
@@ -717,19 +859,21 @@ class PythonAnalyzer(Analyzer):
                 if base is None:
                     continue
                 bind = scope.bindings.setdefault if imp.lazy else scope.bindings.__setitem__
+                # a name that only resolves through this file's sys.path edits: bind the module it reaches
+                moved = (lambda d: self._sys_path_dotted(ctx, f, d) or d) if imp.level == 0 else (lambda d: d)
                 if imp.kind == "import":
                     for name, asname in imp.names:
                         if asname:
-                            bind(asname, self._binding(ctx, name))
+                            bind(asname, self._binding(ctx, moved(name)))
                         else:
                             top = name.split(".")[0]
-                            bind(top, (f"py:{top}", ()))
+                            bind(top, (f"py:{moved(top)}", ()))
                 else:
                     for name, asname in imp.names:
                         if name == "*":
-                            scope.star_imports.append(f"py:{base}")
+                            scope.star_imports.append(f"py:{moved(base)}")
                             continue
-                        bind(asname or name, self._binding(ctx, f"{base}.{name}" if base else name))
+                        bind(asname or name, self._binding(ctx, moved(f"{base}.{name}" if base else name)))
             if mod.is_package:
                 prefix = mod.qualname + "."
                 for q in by_qual:
@@ -745,6 +889,78 @@ class PythonAnalyzer(Analyzer):
                 caller_id = b.symbol_id(f, call.caller) if call.caller else mod.node_id
                 index.calls.append(RawCall(caller_id, scope.key, call.class_qual, call.parts, f, call.line,
                                            ctx.excerpt(f, call.line), caller_qual=call.caller or None))
+
+    # -- imports through sys.path edits ---------------------------------------------------
+
+    @staticmethod
+    def _sys_path_roots(modules: dict[str, _Module]) -> dict[str, list[tuple[str, str, str]]]:
+        """Extra import roots per file, as ``(directory, mode, "file:line" of the edit)``, from static ``sys.path``
+        edits.
+
+        A root must be a directory of the repository that holds Python files; a ``conftest.py``'s roots also
+        apply to every file in its directory tree.  A literal relative path is taken from the repository root.
+        Mode "script" is the editing file's own directory, which Python puts first when it runs a file directly.
+        """
+        known = {""}
+        for f in modules:
+            d = posixpath.dirname(f)
+            while d and d not in known:
+                known.add(d)
+                d = posixpath.dirname(d)
+        own: dict[str, list[tuple[str, str, str]]] = {}
+        for f, mod in modules.items():
+            for anchor, rel, line, mode in mod.info.sys_paths:
+                root = posixpath.normpath(posixpath.join("" if anchor == "cwd" else posixpath.dirname(f), rel))
+                root = "" if root == "." else root
+                if root in known and not any(r[0] == root and r[1] == mode for r in own.get(f, [])):
+                    own.setdefault(f, []).append((root, mode, f"{f}:{line}"))
+            if f in own:  # a file that edits sys.path is run directly (a script, or by pytest): Python searches
+                own[f].append((posixpath.dirname(f), "script", own[f][0][2]))  # its own directory too
+        out = {f: list(r) for f, r in own.items()}
+        conftests = {posixpath.dirname(f): r for f, r in own.items() if posixpath.basename(f) == "conftest.py"}
+        for d, roots in sorted(conftests.items()):
+            for f in modules:
+                if (not d or f.startswith(d + "/")) and f != posixpath.join(d, "conftest.py"):
+                    mine = out.setdefault(f, [])
+                    mine += [r for r in roots if not any(m[0] == r[0] and m[1] == r[1] for m in mine)]
+        return out
+
+    def _sys_path_target(self, ctx: AnalysisContext, f: str, dotted: str,
+                         normal: str | None) -> tuple[str, str] | None:
+        """The file that ``import dotted`` in ``f`` reaches through its ``sys.path`` edits, and where the edit is,
+        when that is not ``normal`` (the usual resolution).  Inserted roots come first, appended ones last."""
+        extra = ctx.shared.get("python.sys_path_roots", {}).get(f)
+        if not extra or not dotted:
+            return None
+        modules: dict[str, _Module] = ctx.shared.get("python.modules", {})
+
+        def by_root(root: str) -> str | None:
+            stem = (root + "/" if root else "") + dotted.replace(".", "/")
+            return next((c for c in (stem + ".py", stem + "/__init__.py", stem + ".pyi", stem + "/__init__.pyi")
+                         if c in modules and c != f), None)
+
+        for first in ("insert", "script"):
+            for root, mode, where in extra:
+                if mode == first and (found := by_root(root)):
+                    return None if found == normal else (found, where)
+        if normal:
+            return None
+        return next(((found, where) for root, mode, where in extra if mode == "append" and (found := by_root(root))),
+                    None)
+
+    def _sys_path_dotted(self, ctx: AnalysisContext, f: str, dotted: str) -> str | None:
+        """``dotted`` rewritten with the qualified name of the module it reaches through ``sys.path`` edits."""
+        if f not in ctx.shared.get("python.sys_path_roots", {}):
+            return None
+        by_qual = ctx.shared.get("python.by_qual", {})
+        modules: dict[str, _Module] = ctx.shared.get("python.modules", {})
+        parts = dotted.split(".")
+        for i in range(len(parts), 0, -1):
+            head = ".".join(parts[:i])
+            found = self._sys_path_target(ctx, f, head, (by_qual.get(head) or [None])[0])
+            if found:
+                return ".".join([modules[found[0]].qualname, *parts[i:]])
+        return None
 
     def _binding(self, ctx: AnalysisContext, dotted: str) -> tuple[str, tuple[str, ...]]:
         """Split ``a.b.c`` into the longest known module prefix and remaining attributes."""
@@ -785,6 +1001,7 @@ class PythonAnalyzer(Analyzer):
         declared = self._declared_distributions(ctx)
         internal_tops = {q.split(".")[0] for q in by_qual}
         undeclared: dict[str, list[SourceEvidence]] = {}
+        through_sys_path: dict[str, list[str]] = {}  # file -> the edits its imports resolved through
         n_edges = 0
 
         def pick(qual: str, importer: _Module) -> str | None:
@@ -823,7 +1040,8 @@ class PythonAnalyzer(Analyzer):
                             targets.append((base, "*"))
                         else:
                             sub = f"{base}.{name}" if base else name
-                            targets.append((sub if pick(sub, mod) else base, name))
+                            known = pick(sub, mod) or (not imp.level and self._sys_path_target(ctx, f, sub, None))
+                            targets.append((sub if known else base, name))
                 else:
                     targets = [(base, base)]
                 for dotted, imported in targets:
@@ -842,6 +1060,11 @@ class PythonAnalyzer(Analyzer):
                     if ctx.profile.is_test(f):
                         meta["test_only"] = True
                     target_path, exact = longest(dotted, mod)
+                    if not imp.level:
+                        moved = self._sys_path_target(ctx, f, dotted, target_path if exact else None)
+                        if moved:
+                            (target_path, meta["sys_path_edit"]), exact, meta["via"] = moved, True, "sys.path"
+                            through_sys_path.setdefault(f, []).append(moved[1])
                     top = dotted.split(".")[0]
                     if target_path is not None:
                         target_id = modules[target_path].node_id
@@ -873,6 +1096,14 @@ class PythonAnalyzer(Analyzer):
                         if declared and "stdlib" not in ext.tags and not ext.metadata.get("declared") \
                                 and not imp.conditional and not imp.type_checking and not ctx.profile.is_test(f):
                             undeclared.setdefault(ext.name, []).append(ev)
+        if through_sys_path:
+            listed = ", ".join(f"{p} ({len(w)})" for p, w in sorted(through_sys_path.items())[:10])
+            more = f" and {len(through_sys_path) - 10} more" if len(through_sys_path) > 10 else ""
+            edit_path, _, edit_line = sorted(through_sys_path.items())[0][1][0].rpartition(":")
+            b.diagnostic("info", "sys-path-imports",
+                         f"{len(through_sys_path)} file(s) have imports that resolve only through sys.path "
+                         f"manipulation: {listed}{more}. Packaging the code, or a source root in .repoviz.toml, "
+                         "makes them importable without it.", self.name, edit_path, int(edit_line))
         for name, evs in sorted(undeclared.items()):
             b.diagnostic("info", "undeclared-dependency",
                          f"'{name}' is imported ({len(evs)}x) but not declared in any Python manifest.", self.name,

@@ -97,6 +97,53 @@ and the manifest analyzer's entry points are linked to Python callables.
 | `go` | – | modules, symbols, dependencies |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
 
+### Python imports through `sys.path` edits
+
+Scripts and tests often do
+`sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))` and
+then `import schemas`. Without help that import looks like a third-party
+package. The Python analyzer reads such edits statically, per file (and caches
+them with the parse):
+
+- **Recognized.** `sys.path.insert`, `append` and `extend`, and
+  `site.addsitedir`, in module-level code (including `if`, `try` and `with`
+  blocks). The value may be `os.path.join` / `dirname` / `abspath` /
+  `realpath` over `__file__`, a `pathlib` equivalent (`Path(__file__).parent`,
+  `.parents[1]`, `/ "app"`, `.resolve()`, `.joinpath()`, `str()`,
+  `.as_posix()`), a name bound earlier to one of these, or a relative literal
+  (taken from the repository root).
+- **Not guessed.** Anything else is ignored: environment variables,
+  `os.getcwd()`, absolute paths, f-strings, edits inside functions.
+- **Where it applies.** The directory must exist in the repository and hold
+  Python files. A `conftest.py`'s edits apply to every file in its directory
+  tree.
+- **Order, as at runtime.** An edited file is run directly (as a script, or
+  by pytest), so Python also searches its own directory. Inserted directories
+  come first, then the file's own directory, then the usual resolution, then
+  appended directories.
+
+An import resolved this way is an internal `imports` edge with
+`metadata.via = "sys.path"` and `metadata.sys_path_edit` (the `file:line` of
+the edit); calls through it resolve too. One `sys-path-imports` diagnostic
+lists the files. Such code is not importable without the edit, and packaging
+it (or a `source_roots` entry) is the durable fix.
+
+### Projects inferred from `requirements.txt`
+
+Many applications have only a `requirements.txt` next to a top-level package.
+When a `requirements*.txt` (or `requirements/*.txt`) sits next to, or one level
+above, a top-level Python package, and no project manifest covers its
+directory, discovery adds a project:
+
+- named after the directory (the repository, at the root);
+- `implicit: true`, `inferred_from: "requirements.txt"`; the project node is
+  tagged `inferred`;
+- all those requirement files are its manifests. Files whose name mentions
+  dev, test, lint, doc or ci (`requirements-dev.txt`, `requirements/test.txt`)
+  declare `scope: dev` dependencies.
+
+A directory of scripts without a package is not a project.
+
 ### Call-flow resolution
 
 Language analyzers describe each module as a `ModuleScope`: local symbols,

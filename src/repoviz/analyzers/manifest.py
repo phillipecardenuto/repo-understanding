@@ -52,7 +52,7 @@ def _norm(ecosystem: str, name: str) -> str:
 
 class ManifestAnalyzer(Analyzer):
     name = "manifest"
-    version = "2"
+    version = "3"
     capabilities = (CAP_COMPONENTS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS, CAP_EVIDENCE, CAP_DIAGNOSTICS)
 
     def detect(self, ctx: AnalysisContext) -> Detection:
@@ -71,6 +71,8 @@ class ManifestAnalyzer(Analyzer):
             if proj.get("role"):
                 tags.append(proj["role"])
             ctype = "workspace-member" if proj.get("workspace") else "project"
+            if proj.get("implicit"):
+                tags.append("inferred")
             qualified = proj["name"] or node.qualified_name
             if "submodule" in node.tags:  # a submodule with a manifest at its root: still a submodule (tagged
                 ctype, qualified = "submodule", node.qualified_name  # project), named by its path like the others
@@ -81,6 +83,8 @@ class ManifestAnalyzer(Analyzer):
                           "manifest": proj["manifest"], "manifests": proj["manifests"], "role": proj.get("role"),
                           "workspace": proj.get("workspace"),
                           "qualified_name_authoritative": bool(proj["path"]) and ctype != "submodule"}))
+            if proj.get("implicit"):
+                b.nodes[ident].metadata["inferred_from"] = f"project inferred from {proj['inferred_from']}"
         for ws in prof.workspaces:
             d = posixpath.dirname(ws["path"])
             ident = self._project_node(b, d)
@@ -283,6 +287,8 @@ class ManifestAnalyzer(Analyzer):
             return next((s for s in subs if d == s or d.startswith(s + "/")), "")
 
         projects_by_dir = {p["path"]: p for p in prof.projects}
+        # the project each manifest belongs to: its own directory, or the inferred project of requirements/*.txt
+        project_of = {m: p["path"] for p in prof.projects for m in p.get("manifests") or []}
         self._jvm_groups: dict[str, str] = {}
         names: dict[tuple[str, str], str] = {}  # (ecosystem family, normalized name) -> project dir
         for path, md in prof.manifest_data.items():
@@ -301,9 +307,10 @@ class ManifestAnalyzer(Analyzer):
             if md.kind == "go.mod" and md.name:
                 go_modules.append((md.name, md.dir))
         for path, md in sorted(prof.manifest_data.items()):
-            if md.lockfile or md.dir not in projects_by_dir or md.kind in ("dockerfile", "compose", "ci"):
+            owner = project_of.get(path, md.dir)
+            if md.lockfile or owner not in projects_by_dir or md.kind in ("dockerfile", "compose", "ci"):
                 continue
-            source = self._project_node(b, md.dir)
+            source = self._project_node(b, owner)
             for dep in md.dependencies:
                 target_dir = self._internal_target(md, dep, names, gradle_projects, go_modules, projects_by_dir)
                 ev = [self.evidence(ctx, path, dep.line, dep.line, "manifest-dependency")] if dep.line else \
@@ -316,7 +323,7 @@ class ManifestAnalyzer(Analyzer):
                     if target == source:
                         continue
                     meta["internal"] = True
-                    if repo_of(md.dir) != repo_of(target_dir):  # into (or out of) an analyzed submodule
+                    if repo_of(owner) != repo_of(target_dir):  # into (or out of) an analyzed submodule
                         meta["cross_repository"] = True
                     b.add_edge(source, target, REL_DEPENDS_ON, analyzer=self.name, evidence=ev, metadata=meta)
                     b.stat(self.name, "internal_dependencies")

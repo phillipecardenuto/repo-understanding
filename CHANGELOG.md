@@ -6,6 +6,27 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Python imports through `sys.path` edits, and requirements-only apps as projects** ([#25](https://github.com/phillipecardenuto/repo-understanding/issues/25)).
+  - `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))`
+    followed by `import schemas` is now an internal import of
+    `app/schemas.py`, not a third-party package called `schemas`. Calls
+    through it resolve too.
+  - The edits are read statically: `insert`, `append`, `extend` and
+    `site.addsitedir`, with `os.path` or `pathlib` expressions over
+    `__file__` (also through a variable), or relative literals. Environment
+    variables, `os.getcwd()` and absolute paths are ignored.
+  - A `conftest.py`'s edits apply to its directory tree, and the editing
+    file's own directory is searched, in Python's order. Such imports are
+    marked `via: sys.path` (a pill in the link's details), and a
+    `sys-path-imports` diagnostic lists the files.
+  - A `requirements*.txt` next to (or one level above) a top-level Python
+    package, with no project manifest covering it, makes a project inferred
+    from it, with its dependencies (`requirements-dev.txt` and
+    `requirements/test.txt` as dev). Shown as *inferred from
+    requirements.txt*.
+  - **On ELIES:** 33 imports in 11 files resolve through `sys.path`, the
+    app is project `elies`, and the false third-party packages `schemas` and
+    `config` are gone. The Python and manifest analyzer versions are bumped.
 - **Constants and settings, before → after** ([#14](https://github.com/phillipecardenuto/repo-understanding/issues/14)).
   - A file's key changes also list its values: `MAX_IMAGES: 20 → 200`. That
     covers module-level UPPER_CASE Python constants, settings-class defaults

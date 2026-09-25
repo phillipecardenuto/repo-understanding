@@ -350,3 +350,42 @@ def test_compose_system_services(make_repo) -> None:
     # environment values never reach the snapshot, only variable names
     dumped = json.dumps(snap.to_dict())
     assert "hunter2secret" not in dumped and "s3cr3t-value-never-shown" not in dumped and "JWT_SECRET" in dumped
+
+
+def test_requirements_only_app_is_an_inferred_project(make_repo, capsys) -> None:
+    from repoviz.cli import main
+    from repoviz.model import REL_DEPENDS_ON
+    from repoviz.render.views import dependency_view
+
+    repo = make_repo({
+        "requirements.txt": "fastapi>=0.100\nrequests\n",
+        "requirements-dev.txt": "pytest\n",
+        "requirements/lint.txt": "ruff\n",
+        "app/__init__.py": "", "app/main.py": "import fastapi\n",
+        "worker/requirements.txt": "celery\n", "worker/src/jobs/__init__.py": "", "worker/src/jobs/run.py": "X = 1\n",
+        "scripts/requirements.txt": "click\n", "scripts/tool.py": "print(1)\n",  # scripts only: not a project
+        "lib/pyproject.toml": '[project]\nname = "lib"\n', "lib/requirements.txt": "attrs\n", "lib/lib/__init__.py": "",
+        "lib/sub/requirements.txt": "six\n", "lib/sub/pkg/__init__.py": "",  # a project manifest covers it
+    })
+    r = Repository(repo.path)
+    projects = {p["path"]: p for p in r.discover().projects}
+    assert set(projects) == {"", "lib", "worker"}
+    root, worker = projects[""], projects["worker"]
+    assert root["implicit"] and root["inferred_from"] == "requirements.txt" and root["name"] == Path(repo.path).name
+    assert root["manifest"] == "requirements.txt"
+    assert root["manifests"] == ["requirements.txt", "requirements-dev.txt", "requirements/lint.txt"]
+    assert worker["implicit"] and worker["name"] == "worker"  # directly above a top-level package (src layout)
+    assert not projects["lib"].get("implicit")
+    snap = r.snapshot("HEAD")
+    idx = snap.node_index()
+    node = next(n for n in snap.nodes() if n.path == "worker" and "project" in n.tags)
+    assert "inferred" in node.tags and node.metadata["inferred_from"] == "project inferred from requirements.txt"
+    deps = {(idx[e.source_id].path, idx[e.target_id].name): e.metadata["scope"] for e in snap.dependency_edges
+            if e.relationship == REL_DEPENDS_ON and e.metadata.get("external")}
+    assert deps[("", "fastapi")] == deps[("", "requests")] == "runtime"
+    assert deps[("", "pytest")] == deps[("", "ruff")] == "dev" and deps[("worker", "celery")] == "runtime"
+    # The project level of the Dependencies tab shows it.
+    view = dependency_view(snap, level="project", include_external=True)
+    assert any(n.label == "worker" for n in view.nodes)
+    assert main(["discover", "-C", repo.path]) == 0
+    assert "worker: worker [python] (inferred from requirements.txt)" in capsys.readouterr().out

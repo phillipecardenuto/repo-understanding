@@ -76,7 +76,7 @@ Labels:
 | [#21](https://github.com/phillipecardenuto/repo-understanding/issues/21) | Analyze checked-out submodules as nested sub-projects · **✓ done** | P1 | L |
 | [#22](https://github.com/phillipecardenuto/repo-understanding/issues/22) | System view from docker-compose: services linked to code, dev/prod merged, infrastructure separated · **✓ done** | P1 | L |
 | [#23](https://github.com/phillipecardenuto/repo-understanding/issues/23) | Runtime coupling edges: container images and service URLs in code · **✓ done** | P1 | M |
-| [#25](https://github.com/phillipecardenuto/repo-understanding/issues/25) | Python: imports through `sys.path` edits; requirements.txt-only apps as projects | P2 | S |
+| [#25](https://github.com/phillipecardenuto/repo-understanding/issues/25) | Python: imports through `sys.path` edits; requirements.txt-only apps as projects · **✓ done** | P2 | S |
 | [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26) | Import-level analyzers for Java/Kotlin, C#, Rust, Ruby, PHP, C/C++ | P3 | L |
 
 ### User interface
@@ -118,7 +118,8 @@ Labels:
 4. **UI at scale:** #27 (diagram readability), #29 (lists), #28 (why and blast
    radius) and #31 (history comparisons), all done.
 5. **Anytime:** #34 (parse cache in; the 5× target needs incremental graph
-   building), #14 (values before → after), done; then #25 and #11.
+   building), #14 (values before → after) and #25 (`sys.path` imports,
+   inferred projects), done; then #11.
 
 ## Dependencies between items
 

@@ -188,7 +188,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
             out.append(f"  … {len(items) - 40} more")
 
     section("Projects", prof.projects, lambda p: f"{p['path'] or '.'}: {p['name']} [{p['ecosystem']}]"
-            + (f" {p['role']}" if p.get("role") else "") + (" (workspace member)" if p.get("workspace") else ""))
+            + (f" {p['role']}" if p.get("role") else "") + (" (workspace member)" if p.get("workspace") else "")
+            + (f" (inferred from {p['inferred_from']})" if p.get("implicit") else ""))
     section("Workspaces", prof.workspaces, lambda w: f"{w['path']} [{w['kind']}] members: {', '.join(w['members']) or '-'}")
     section("Manifests", prof.manifests, lambda m: f"{m['path']} [{m['kind']}]")
     section("Lock files", prof.lockfiles, lambda m: f"{m['path']} [{m['kind']}]")
