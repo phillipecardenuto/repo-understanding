@@ -131,6 +131,10 @@ or as the *exact difference* between the two trees.
       A safety setting switched the risky way (`DEBUG` → true, `VERIFY_SSL` →
       false, a timeout → 0, CORS → `*`) is also a signal. Secret-looking names
       show `•••`;
+    - for a manifest or lock file, its third-party dependencies: added,
+      removed, upgraded ↑, downgraded ↓, or now from a Git URL, a tarball or a
+      path outside the repository, with resolved versions from the lock file.
+      The review header counts them (`dependencies: +2 −0 ↑1 ↓0`);
     - dependency changes;
     - tests that exercise it;
     - the diff, where any line can be annotated.

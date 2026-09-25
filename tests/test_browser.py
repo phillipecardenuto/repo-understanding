@@ -1264,3 +1264,34 @@ def test_sys_path_imports_and_inferred_projects_are_marked(page, make_repo, tmp_
     link = page.locator("#tab-structure li:has-text('app.schemas') span[title]:has-text('via sys.path')")
     assert link.count() == 1 and link.get_attribute("title") == "resolved through tests/test_x.py:3"
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_review_file_card_lists_dependency_changes(page, make_repo, tmp_path: Path) -> None:
+    from test_review import DEPS_APP, pyproject, uv_lock
+
+    repo = make_repo(DEPS_APP)
+    repo.write({
+        "pyproject.toml": pyproject('    "httpx>=0.27,<1",\n    "rich==13.6.0",\n    "click>=8",\n    "attrs~=23.1",\n'
+                                    '    "requests>=2.31,<3",\n'),
+        "uv.lock": uv_lock(deps=("httpx", "rich", "requests"), rich="13.6.0",
+                           extra='\n[[package]]\nname = "requests"\nversion = "2.32.3"\n'),
+        "web/package.json": DEPS_APP["web/package.json"].replace('"^4.17.21"', '"github:lodash/lodash"'),
+    })
+    report = tmp_path / "review.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert "+1 −0 ↑0 ↓1 · 2 other" in page.inner_text("#tab-review .stats")
+    page.click("#tab-review .files-split tbody tr >> text=pyproject.toml")
+    card = page.inner_text("#tab-review .file-card")
+    assert "Dependencies (3)" in card
+    rows = {r.split("\t")[1].split(" ")[0]: r for r in page.locator("#tab-review .file-card tr:has(.value-change)").all_inner_texts()}
+    assert "added" in rows["requests"] and "resolved 2.32.3" in rows["requests"]
+    assert "↓ downgraded" in rows["rich"] and "==13.7.0 → ==13.6.0" in rows["rich"] and "resolved 13.7.0 → 13.6.0" in rows["rich"]
+    assert "unpinned" in rows["click"]
+    page.click("#tab-review .files-split tbody tr >> text=uv.lock")
+    assert "(declared in pyproject.toml)" in page.inner_text("#tab-review .file-card")
+    page.click("#tab-review .files-split tbody tr >> text=web/package.json")
+    assert "source changed" in page.inner_text("#tab-review .file-card tr:has(.value-change)")
+    assert page.locator("#tab-review .file-card tr:has(.value-change) i.rvi-alert-circle").count() == 1
+    assert page.errors == []  # type: ignore[attr-defined]

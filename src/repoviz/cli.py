@@ -752,8 +752,14 @@ def format_review_markdown(report: dict[str, Any]) -> str:
         scope = ", ".join(f"{v} {k}" for k, v in c["scope"].items())
         found = ", ".join(f"{v} {k}" for k, v in c["findings"].items() if v) or "–"
         lines.append(f"| {c['name']} | {c['files']} | +{c['lines_added']} −{c['lines_removed']} | {scope} | {found} |")
-    from .review import value_lines
+    from .review import dependency_summary, package_lines, value_lines
 
+    packages = package_lines(report)
+    if packages:
+        lines += ["", f"**Dependencies changed** ({dependency_summary(report['summary']) or len(packages)})", ""]
+        lines += [f"- `{x}`" for x in packages[:30]]
+        if len(packages) > 30:
+            lines.append(f"- … {len(packages) - 30} more")
     values = value_lines(report)
     if values:
         lines += ["", f"**Values changed ({len(values)})**", ""] + [f"- `{x}`" for x in values[:20]]

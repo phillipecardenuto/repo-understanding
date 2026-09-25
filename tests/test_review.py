@@ -1372,3 +1372,142 @@ def test_values_are_compared_in_a_bounded_number_of_files(make_repo, monkeypatch
     assert "first 1 changed files only" in omitted[0]["values_omitted"]
     assert main(["review", "-C", repo.path, "all"]) == 0
     assert "(3 more changed file(s) not compared: at most 1 per review)" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- third-party dependencies (#11)
+
+UV_LOCK = """version = 1
+
+[[package]]
+name = "app"
+version = "0.1.0"
+source = {{ editable = "." }}
+dependencies = [{deps}]
+
+[[package]]
+name = "httpx"
+version = "0.27.0"
+
+[[package]]
+name = "rich"
+version = "{rich}"
+
+[[package]]
+name = "anyio"
+version = "{anyio}"
+{extra}"""
+
+
+def uv_lock(deps=("httpx", "rich"), rich="13.7.0", anyio="4.3.0", extra="") -> str:
+    return UV_LOCK.format(deps=", ".join(f'{{ name = "{d}" }}' for d in deps), rich=rich, anyio=anyio, extra=extra)
+
+
+def pyproject(deps: str) -> str:
+    return f'[project]\nname = "app"\nversion = "0.1.0"\ndependencies = [\n{deps}]\n'
+
+
+def npm_lock(lodash="4.17.21") -> str:
+    return json.dumps({"lockfileVersion": 3, "packages": {"": {"dependencies": {"lodash": "^4.17.21"}},
+                                                          "node_modules/lodash": {"version": lodash}}})
+
+
+DEPS_APP = {
+    "pyproject.toml": pyproject('    "httpx>=0.27,<1",\n    "rich==13.7.0",\n    "click>=8,<9",\n    "attrs~=23.1",\n'),
+    "uv.lock": uv_lock(),
+    "app/__init__.py": "import httpx\n",
+    "web/package.json": '{\n  "name": "web",\n  "dependencies": {\n    "lodash": "^4.17.21"\n  }\n}\n',
+    "web/package-lock.json": npm_lock(),
+}
+
+
+def test_added_dependency_with_its_resolved_version(make_repo, capsys) -> None:
+    repo = make_repo(DEPS_APP)
+    repo.write({
+        "pyproject.toml": pyproject('    "httpx>=0.27,<1",\n    "rich==13.7.0",\n    "click>=8,<9",\n    "attrs~=23.1",\n'
+                                    '    "requests>=2.31,<3",\n'),
+        "uv.lock": uv_lock(deps=("httpx", "rich", "requests"),
+                           extra='\n[[package]]\nname = "requests"\nversion = "2.32.3"\n\n'
+                                 '[[package]]\nname = "urllib3"\nversion = "2.2.1"\n'),
+        "app/__init__.py": "import httpx\nimport requests\n",
+    })
+    report = _review_all(repo)
+    files = {f["path"]: f for f in report["files"]}
+    [added] = files["pyproject.toml"]["packages"]
+    assert (added["name"], added["status"], added["after"], added["resolved"], added["line"]) == \
+        ("requests", "added", ">=2.31,<3", "2.32.3", 9)
+    lock = files["uv.lock"]
+    assert lock["lock"]["transitive"] == 1 and lock["packages"][0]["declared_in"] == "pyproject.toml"
+    assert report["summary"]["dependencies"] == {"added": 1, "removed": 0, "upgraded": 0, "downgraded": 0, "other": 0}
+    [f] = by_kind(report)["dependency-added"]
+    assert (f["severity"], f["path"], f["line"]) == ("medium", "pyproject.toml", 9)  # runtime, new to the repository
+    assert "resolved to 2.32.3" in f["detail"] and "First imported by app/__init__.py:2" in f["detail"]
+    [imported] = by_kind(report)["new-external-dependency"]  # the code's view, linked back to the manifest
+    assert imported["path"] == "app/__init__.py" and "declared in pyproject.toml:9" in imported["detail"]
+    kinds = by_kind(report)
+    assert "lockfile-without-manifest" not in kinds and "manifest-without-lockfile" not in kinds
+    assert main(["review", "-C", repo.path, "all"]) == 0
+    out = capsys.readouterr().out
+    assert "dependencies: +1 −0 ↑0 ↓0" in out and "pyproject.toml:9  requests: added >=2.31,<3 (resolved 2.32.3)" in out
+    assert "uv.lock  … and 1 indirect package(s) resolved differently" in out
+    from repoviz.ci import pr_comment
+
+    comment = pr_comment(report)
+    assert "dependencies +1 −0 ↑0 ↓0" in comment and "<summary>Dependencies changed: +1 −0 ↑0 ↓0</summary>" in comment
+    assert "| `requests` | added | _(none)_ → `>=2.31,<3` (resolved `2.32.3`) | `pyproject.toml:9` |" in comment
+
+
+def test_source_downgrade_unpinned_and_index_signals(make_repo) -> None:
+    repo = make_repo({**DEPS_APP, "requirements.txt": "flask==3.0.0\nnumpy==1.26.0\ngunicorn==21.2.0\n"})
+    repo.write({
+        "web/package.json": '{\n  "name": "web",\n  "dependencies": {\n'
+                            '    "lodash": "git+https://github.com/lodash/lodash.git"\n  }\n}\n',
+        "pyproject.toml": pyproject('    "httpx>=0.27,<1",\n    "rich==13.6.0",\n    "click>=8",\n    "attrs~=23.1",\n'),
+        "uv.lock": uv_lock(rich="13.6.0"),
+        "requirements.txt": "--extra-index-url https://pkgs.example.test/simple\nflask==3.0.0\nnumpy==1.26.0\n"
+                            "gunicorn==21.2.0\nboto3\n",
+    })
+    kinds = by_kind(_review_all(repo))
+    [src] = [f for f in kinds["dependency-source-changed"] if f["path"] == "web/package.json"]
+    assert (src["severity"], src["category"], src["path"], src["line"]) == ("high", "security", "web/package.json", 4)
+    assert "lodash now comes from a Git repository" in src["detail"] and "(was ^4.17.21)" in src["detail"]
+    assert any(f["title"] == "Package index added" and "pkgs.example.test" in f["detail"]
+               for f in kinds["dependency-source-changed"])
+    [down] = kinds["dependency-downgraded"]  # declared and resolved: reported once, on the manifest
+    assert (down["path"], down["detail"]) == ("pyproject.toml", "rich: ==13.7.0 → ==13.6.0.")
+    unpinned = {f["title"]: f for f in kinds["dependency-unpinned"]}
+    assert set(unpinned) == {"Dependency unpinned: click", "Dependency unpinned: boto3"}  # loosened; new amid pins
+    assert kinds["manifest-without-lockfile"][0]["path"] == "web/package.json"
+    assert kinds["dependency-added"][0]["severity"] == "medium"  # boto3
+
+
+def test_lock_file_changes_alone_and_bounds(make_repo, monkeypatch) -> None:
+    repo = make_repo(DEPS_APP)
+    repo.write({"uv.lock": uv_lock(anyio="4.4.0"), "web/package-lock.json": npm_lock(lodash="4.17.20")})
+    report = _review_all(repo)
+    kinds = by_kind(report)
+    assert {f["path"] for f in kinds["lockfile-without-manifest"]} == {"uv.lock", "web/package-lock.json"}
+    [down] = kinds["dependency-downgraded"]
+    assert down["path"] == "web/package-lock.json" and down["detail"] == "lodash now resolves to 4.17.20 (was 4.17.21)."
+    files = {f["path"]: f for f in report["files"]}
+    assert files["uv.lock"]["packages"] == [] and files["uv.lock"]["lock"]["transitive"] == 1
+    # Oversized lock files are skipped with a note; unparsable ones too.
+    import repoviz.depchanges as dc
+
+    monkeypatch.setattr(dc, "MAX_LOCK_BYTES", 100)
+    files = {f["path"]: f for f in _review_all(repo)["files"]}
+    assert "larger than" in files["uv.lock"]["lock"]["note"] and files["uv.lock"]["packages"] == []
+    monkeypatch.undo()
+    repo.write({"uv.lock": "this is [not toml"})
+    assert "could not be parsed" in {f["path"]: f for f in _review_all(repo)["files"]}["uv.lock"]["lock"]["note"]
+
+
+def test_new_manifest_is_one_signal_and_dependency_signals_can_be_disabled(make_repo) -> None:
+    repo = make_repo({**DEPS_APP, ".repoviz.toml": '[review]\ndisabled_checks = ["dependency-downgraded"]\n'})
+    repo.write({"svc/package.json": '{"name": "svc", "dependencies": {"express": "^4", "zod": "^3", "pino": "^9"}}',
+                "web/package-lock.json": npm_lock(lodash="4.17.20"), "web/package.json": DEPS_APP["web/package.json"]
+                .replace('"^4.17.21"', '"^4.17.21",\n    "left-pad": "1.3.0"')})
+    kinds = by_kind(_review_all(repo))
+    new = [f for f in kinds["dependency-added"] if f["path"] == "svc/package.json"]
+    assert len(new) == 1 and new[0]["title"] == "New manifest declares 3 dependencies"
+    assert "express, pino, zod" in new[0]["detail"]
+    assert "dependency-downgraded" not in kinds and "lockfile-without-manifest" not in kinds

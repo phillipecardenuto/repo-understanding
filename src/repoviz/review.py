@@ -26,7 +26,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from . import classify, globs
+from . import classify, depchanges, globs
 from .activity import _ImpactIndex, _tests_affected, nodes_by_path
 from .config import DependencyRule
 from .contracts import check as check_contracts
@@ -37,6 +37,7 @@ from .gitutil import GitError
 from .history import skip_companion
 from .ids import content_hash as _blob_hash
 from .ids import make_id, stable_hash
+from .manifests import normalize_python_name
 from .model import (
     ADDED,
     CATEGORY_MODULE,
@@ -656,7 +657,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         sens = _sensitive_kind(path)
         if scope.sensitive and sens and scope_status != "allowed":
             add(Finding("sensitive-file", "scope", "medium", f"Sensitive file changed ({sens})",
-                        f"{path} is a {sens} file; changes here affect builds, deployments or data.", path,
+                        f"{path} is sensitive ({sens}); changes here affect builds, deployments or data.", path,
                         component=cname))
         for v in entry["values"]:
             if v.get("weakens") and not is_test:
@@ -692,6 +693,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         _contract_findings(add, repo.config.contracts_baseline, contracts, base_snap, target_snap, base_src, target_src,
                            component_of)
     _rename_findings(add, diff, target_snap, target_src, component_of)
+    declared_added = _dependency_findings(add, files, base_src, target_src, base_snap, changed_set)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
         # One commit alone: the companion may be in another commit of the wave, so only mark partners as changed.
@@ -709,6 +711,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
             f.detail = f"{f.detail} (before the move: {f.path}{':' + str(f.line) if f.line else ''})".strip()
             f.path, f.line = moved_to[f.path], None
 
+    _link_dependency_findings(findings, declared_added)
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.category, f.path or "", f.line or 0))
     per_file: dict[str, list[str]] = {}
     for f in findings:
@@ -738,6 +741,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "lines_removed": sum(f.get("lines_removed") or 0 for f in files),
         "symbols_changed": sum(len(f["symbols"]) for f in files),
         "values_changed": sum(len(f.get("values") or []) for f in files),
+        "dependencies": depchanges.summary(files),
         "tests_changed": sum(1 for f in files if f["is_test"]),
         "submodules_changed": len(sub_changes),
         "protected": sum(1 for f in files if f["scope"] == "protected"),
@@ -1016,6 +1020,170 @@ def _parameter_change(base_src: Any, target_src: Any, ch: Any) -> str | None:
     return "; ".join(parts) or None
 
 
+
+# --------------------------------------------------------------------------- third-party dependencies (#11)
+
+
+def _full_text(source: TreeSource, path: str | None) -> tuple[str | None, bool]:
+    """A manifest or lock file's text up to ``depchanges.MAX_LOCK_BYTES``, and whether it was larger."""
+    data = source.read_bytes(path) if path else None
+    if data is None or is_binary(data):
+        return None, False
+    if len(data) > depchanges.MAX_LOCK_BYTES:
+        return None, True
+    return data.decode("utf-8", "replace"), False
+
+
+def _dependency_findings(add: Any, files: list[dict[str, Any]], base_src: TreeSource, target_src: TreeSource,
+                         base: RepositorySnapshot, changed: set[str]) -> dict[str, tuple[str, int | None]]:
+    """Fill ``packages`` (and ``lock``) on changed manifests and lock files, and raise the dependency signals.
+
+    Returns the packages newly declared, by normalized name → (manifest path, line), to link the signals
+    with ``new-external-dependency``."""
+    known = set()
+    for n in base.nodes():
+        if n.component_type == "external-package":
+            known |= {n.name.lower(), normalize_python_name(n.name)}
+    manifests: dict[str, dict[str, Any]] = {}
+    locks: dict[str, dict[str, Any]] = {}
+    for f in files:
+        mk = classify.manifest_kind(f["path"])
+        if mk is None or f.get("kind") == "submodule":
+            continue
+        if mk.lockfile:
+            if depchanges.lock_kind(f["path"]):
+                locks[f["path"]] = f
+        elif mk.kind in ("pyproject", "setup.cfg", "setup.py", "requirements", "pipfile", "conda", "package.json",
+                         "cargo", "go.mod", "composer", "gemfile", "pubspec"):
+            before, _ = _full_text(base_src, f.get("previous_path") or f["path"])
+            after, _ = _full_text(target_src, f["path"])
+            f["packages"] = depchanges.declared_changes(f["path"], before, after)
+            manifests[f["path"]] = f
+    # Lock files: which names are direct is known from the manifests they resolve.
+    governing = {m: depchanges.locks_for_manifest(m, target_src.exists) for m in manifests}
+    for path, f in locks.items():
+        direct: set[str] = set()
+        for m in [depchanges.manifest_for_lock(path)] + [m for m, lock in governing.items() if lock == path]:
+            direct |= {d.name for d in depchanges.declared(m or "", _full_text(target_src, m)[0])[1]}
+        before, big_b = _full_text(base_src, f.get("previous_path") or path)
+        after, big_a = _full_text(target_src, path)
+        eco = (classify.manifest_kind(path) or classify.ManifestKind("", "")).ecosystem
+        if big_b or big_a:
+            result = {"packages": [], "transitive": 0, "note": f"lock file larger than "
+                      f"{depchanges.MAX_LOCK_BYTES // 1_000_000} MB: resolved versions not compared"}
+        else:
+            result = depchanges.lock_changes(path, before, after, direct, eco)
+        f["packages"] = result["packages"]
+        f["lock"] = {k: v for k, v in result.items() if k != "packages"}
+    # The resolved versions of a manifest's changed packages, from the lock file that changed with it.
+    for m, f in manifests.items():
+        lock = locks.get(governing.get(m) or "")
+        if lock is None:
+            continue
+        by_name = {p["name"].lower(): p for p in lock["packages"]}
+        for p in f["packages"]:
+            r = by_name.get(p["name"].lower()) or by_name.get(normalize_python_name(p["name"]))
+            if r is not None:
+                p["resolved_before"], p["resolved"] = r["before"], r["after"]
+                r["declared_in"] = m  # listed with the manifest's change
+
+    declared_added: dict[str, tuple[str, int | None]] = {}
+    for path, f in manifests.items():
+        pkgs = [p for p in f["packages"] if not p.get("index")]
+        if f["is_test"]:
+            continue
+        added = [p for p in pkgs if p["status"] == "added"]
+        for p in added:
+            declared_added.setdefault(normalize_python_name(p["name"]), (path, p.get("line")))
+        new_runtime = [p["name"] for p in added if p["scope"] == "runtime"
+                       and p["name"].lower() not in known and normalize_python_name(p["name"]) not in known]
+        if f["status"] == ADDED and added:  # a new manifest: one signal for all its packages
+            names = ", ".join(p["name"] for p in added[:10]) + (f" and {len(added) - 10} more" if len(added) > 10 else "")
+            add(Finding("dependency-added", "dependencies", "medium" if new_runtime else "low",
+                        f"New manifest declares {len(added)} dependencies", f"{path} declares {names}.", path,
+                        component=f["component"], suggestion="Check each package is needed and trusted."), key=path)
+        else:
+            for p in added:
+                fresh = p["name"] in new_runtime
+                add(Finding("dependency-added", "dependencies", "medium" if fresh else "low",
+                            f"Dependency added: {p['name']}",
+                            f"{p['name']} {p['after'] or '(any version)'} ({p['scope']})"
+                            + (f", resolved to {p['resolved']}" if p.get("resolved") else "")
+                            + ("; new to the repository." if fresh else "."),
+                            path, p.get("line"), component=f["component"],
+                            suggestion="Check the package is needed, maintained and trusted." if fresh else None),
+                    key=p["name"])
+        for p in pkgs:
+            if p["status"] == "downgraded":
+                add(Finding("dependency-downgraded", "dependencies", "medium", f"Dependency downgraded: {p['name']}",
+                            f"{p['name']}: {p['before']} → {p['after']}.", path, p.get("line"), component=f["component"],
+                            suggestion="A downgrade can bring back fixed bugs and vulnerabilities; confirm it is "
+                                       "intended."), key=p["name"])
+            if p.get("source") in depchanges.RISKY_SOURCES and p["status"] in ("added", "source-changed"):
+                add(Finding("dependency-source-changed", "security", "high",
+                            f"Dependency from {depchanges.RISKY_SOURCES[p['source']]}: {p['name']}",
+                            f"{p['name']} now comes from {depchanges.RISKY_SOURCES[p['source']]}: {p['after']}"
+                            + (f" (was {p['before']})" if p.get("before") else "") + ".", path, p.get("line"),
+                            component=f["component"], suggestion="Packages from outside the default registry skip "
+                            "its checks; pin a released version unless this is intended."), key=p["name"])
+            if p.get("unpinned"):
+                add(Finding("dependency-unpinned", "dependencies", "medium", f"Dependency unpinned: {p['name']}",
+                            f"{p['name']}: {p['before'] or '(new)'} → {p['after'] or '(any version)'}; any future "
+                            "release will be installed.", path, p.get("line"), component=f["component"],
+                            suggestion="Keep an upper bound or a pin, as the rest of the file does."), key=p["name"])
+        for p in f["packages"]:
+            if p.get("index"):
+                add(Finding("dependency-source-changed", "security", "high", "Package index added",
+                            f"Packages may now come from {p['after']}.", path, p.get("line"), component=f["component"],
+                            suggestion="Confirm this index is trusted; an extra index can shadow public packages."),
+                    key=f"index:{p['after']}")
+        lock = governing.get(path)
+        if pkgs and lock and lock not in changed and f["status"] != REMOVED:
+            add(Finding("manifest-without-lockfile", "dependencies", "low", "Manifest changed, lock file did not",
+                        f"{path} changes its dependencies but {lock} was not updated.", path,
+                        component=f["component"], suggestion="Regenerate the lock file so installs match the manifest."),
+                key=lock)
+    for path, f in locks.items():
+        if f["is_test"] or not (f["packages"] or f["lock"].get("transitive")):
+            continue
+        explained = [m for m, lock in governing.items() if lock == path]
+        own = depchanges.manifest_for_lock(path)
+        if not explained and own not in changed:
+            n = len(f["packages"]) + f["lock"].get("transitive", 0)
+            add(Finding("lockfile-without-manifest", "dependencies", "medium", "Lock file changed without its manifest",
+                        f"{n} resolved version(s) changed in {path}, but no manifest changed: an upgrade run "
+                        "(npm update, uv lock --upgrade…) or a manual edit.", path, component=f["component"],
+                        suggestion="Ask why the lock file changed; revert it if the task did not need new versions."),
+                key=path)
+        reported = {p["name"].lower() for m in explained for p in manifests[m]["packages"]
+                    if p["status"] == "downgraded"}
+        for p in f["packages"]:
+            if p["status"] == "downgraded" and p["name"].lower() not in reported:
+                add(Finding("dependency-downgraded", "dependencies", "medium", f"Dependency downgraded: {p['name']}",
+                            f"{p['name']} now resolves to {p['after']} (was {p['before']}).", path,
+                            component=f["component"], suggestion="A downgrade can bring back fixed bugs and "
+                            "vulnerabilities; confirm it is intended."), key=p["name"])
+    return declared_added
+
+
+def _link_dependency_findings(findings: list[Finding], declared_added: dict[str, tuple[str, int | None]]) -> None:
+    """``new-external-dependency`` (code imports it) and ``dependency-added`` (a manifest declares it) point at
+    each other when they are about the same package."""
+    imported: dict[str, Finding] = {}
+    for f in findings:
+        if f.kind == "new-external-dependency" and " now uses " in (f.detail or ""):
+            pkg = normalize_python_name(f.detail.split(" now uses ", 1)[1].split(" (", 1)[0].strip())
+            imported.setdefault(pkg, f)
+            if pkg in declared_added:
+                where, line = declared_added[pkg]
+                f.detail = f"{f.detail}; declared in {where}{':' + str(line) if line else ''}"
+    for f in findings:
+        if f.kind == "dependency-added" and f.title.startswith("Dependency added: "):
+            pkg = normalize_python_name(f.title.split(": ", 1)[1])
+            if pkg in imported and imported[pkg].path:
+                f.detail = f"{f.detail} First imported by {imported[pkg].path}" + \
+                    (f":{imported[pkg].line}." if imported[pkg].line else ".")
+
 def _first_match(path: str, patterns: list[str]) -> str:
     return next((p for p in patterns if globs.match(path, p)), patterns[0] if patterns else "")
 
@@ -1186,8 +1354,9 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
                             loc_line, ev.excerpt if ev else None, component=component_of(src_path)[1],
                             suggestion="Check the layering: should this package know about that one?"),
                     key=f"{src_pkg}->{dst_pkg}")
-        elif dep["level"] == "external" and not dep["stdlib"]:
-            # Only news: a package the repository never used, or one this component never used.
+        elif dep["level"] == "external" and not dep["stdlib"] and "declared_name" not in e.metadata:
+            # Only news: a package the repository never used, or one this component never used.  (A package a
+            # manifest declares is dependency-added: see _dependency_findings.)
             comp_id = src.node.metadata.get("component_id") if src else None
             if (comp_id, e.target_id) not in external_uses:
                 new_to_repo = dst is None or dst.status == ADDED
@@ -1706,6 +1875,43 @@ def _commit_title(c: dict[str, Any]) -> str:
     return c["subject"] if c.get("uncommitted") else f"{c['short']} {c['subject']}"
 
 
+DEPENDENCY_WORD = {"added": "added", "removed": "removed", "upgraded": "upgraded ↑", "downgraded": "downgraded ↓",
+                   "source-changed": "source changed ⚠", "scope-changed": "scope changed", "changed": "changed"}
+
+
+def dependency_summary(summary: dict[str, Any]) -> str:
+    """``+2 −0 ↑1 ↓0`` (and other changes), or "" when no dependency changed."""
+    d = summary.get("dependencies") or {}
+    if not any(d.values()):
+        return ""
+    text = f"+{d.get('added', 0)} −{d.get('removed', 0)} ↑{d.get('upgraded', 0)} ↓{d.get('downgraded', 0)}"
+    return text + (f", {d['other']} other change(s)" if d.get("other") else "")
+
+
+def package_lines(report: dict[str, Any]) -> list[str]:
+    """One line per changed third-party dependency: ``pyproject.toml:4  requests: added >=2.31 (resolved 2.32.3)``."""
+    out = []
+    for f in report["files"]:
+        for p in f.get("packages") or []:
+            if p.get("declared_in"):
+                continue  # the manifest's line already shows it
+            loc = f"{f['path']}:{p['line']}" if p.get("line") else f["path"]
+            word = DEPENDENCY_WORD.get(p["status"], p["status"])
+            change = (f"{word} {p['after']}" if p["status"] == "added" else f"{word} (was {p['before']})"
+                      if p["status"] == "removed" else f"{word}: {p['before'] or '(none)'} → {p['after'] or '(none)'}")
+            if p.get("resolved"):
+                change += f" (resolved {p['resolved_before'] + ' → ' if p.get('resolved_before') else ''}{p['resolved']})"
+            flags = (["unpinned"] if p.get("unpinned") else []) + ([f"scope {p['scope_before']} → {p['scope']}"]
+                                                                    if p.get("scope_before") else [])
+            out.append(f"{loc}  {p['name']}: {change}" + (f"  [{', '.join(flags)}]" if flags else ""))
+        lock = f.get("lock") or {}
+        if lock.get("transitive"):
+            out.append(f"{f['path']}  … and {lock['transitive']} indirect package(s) resolved differently")
+        if lock.get("note"):
+            out.append(f"{f['path']}  ({lock['note']})")
+    return out
+
+
 def value_lines(report: dict[str, Any]) -> list[str]:
     """One line per changed constant or setting: ``path:line  NAME: 20 → 200``."""
     out = []
@@ -1732,6 +1938,9 @@ def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
     if scope["allowed"] or scope["protected"]:
         out.append(f"  scope: allowed {scope['allowed'] or '(any)'}; protected {scope['protected'] or '(none)'} "
                    f"→ {s['protected']} protected, {s['out_of_scope']} out-of-scope file(s)")
+    deps = dependency_summary(s)
+    if deps:
+        out.append(f"  dependencies: {deps}")
     risk = report.get("risk") or {}
     if risk.get("path"):
         out.append(f"  risk: {risk['level']} ({risk['score']}/100), because of {risk['path']}")
@@ -1778,6 +1987,12 @@ def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
                         out.append(f"          [{x['severity']:<6}] {x['title']}")
     if commits.get("note"):
         out.append(f"\nnote: {commits['note']}")
+    packages = package_lines(report)
+    if packages:
+        out.append(f"\nDependencies changed ({dependency_summary(s) or len(packages)}):")
+        out += [f"  {x}" for x in packages[:50]]
+        if len(packages) > 50:
+            out.append(f"  … {len(packages) - 50} more")
     values = value_lines(report)
     unread = sum(1 for f in report["files"] if f.get("values_omitted"))
     if values or unread:

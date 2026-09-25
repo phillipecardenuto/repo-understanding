@@ -52,7 +52,7 @@ Labels:
 | [#8](https://github.com/phillipecardenuto/repo-understanding/issues/8) | Expected changes: compare the agent's plan with what it changed | P2 | M |
 | [#9](https://github.com/phillipecardenuto/repo-understanding/issues/9) | Blocking review, structured verdict and a review-complete gate | P2 | M |
 | [#10](https://github.com/phillipecardenuto/repo-understanding/issues/10) | Parallel agents: Git worktrees and overlap between concurrent waves | P2 | L |
-| [#11](https://github.com/phillipecardenuto/repo-understanding/issues/11) | Third-party dependency changes (manifests, lock files) with supply-chain signals | P2 | M |
+| [#11](https://github.com/phillipecardenuto/repo-understanding/issues/11) | Third-party dependency changes (manifests, lock files) with supply-chain signals · **✓ done** | P2 | M |
 | [#12](https://github.com/phillipecardenuto/repo-understanding/issues/12) | Read existing coverage reports to flag changed lines no test runs | P2 | M |
 | [#13](https://github.com/phillipecardenuto/repo-understanding/issues/13) | Cross-service contract changes: HTTP routes, background tasks, env vars | P2 | L |
 | [#14](https://github.com/phillipecardenuto/repo-understanding/issues/14) | Constant and configuration value changes, before → after · **✓ done** | P2 | S |
@@ -118,8 +118,8 @@ Labels:
 4. **UI at scale:** #27 (diagram readability), #29 (lists), #28 (why and blast
    radius) and #31 (history comparisons), all done.
 5. **Anytime:** #34 (parse cache in; the 5× target needs incremental graph
-   building), #14 (values before → after) and #25 (`sys.path` imports,
-   inferred projects), done; then #11.
+   building), then #14 (values before → after), #25 (`sys.path` imports,
+   inferred projects) and #11 (dependency changes), done.
 
 ## Dependencies between items
 

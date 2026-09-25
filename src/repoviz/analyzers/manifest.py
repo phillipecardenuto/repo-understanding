@@ -52,7 +52,7 @@ def _norm(ecosystem: str, name: str) -> str:
 
 class ManifestAnalyzer(Analyzer):
     name = "manifest"
-    version = "3"
+    version = "4"
     capabilities = (CAP_COMPONENTS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS, CAP_EVIDENCE, CAP_DIAGNOSTICS)
 
     def detect(self, ctx: AnalysisContext) -> Detection:

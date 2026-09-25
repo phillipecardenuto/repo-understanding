@@ -6,6 +6,27 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Third-party dependency changes with supply-chain signals** ([#11](https://github.com/phillipecardenuto/repo-understanding/issues/11)).
+  - A changed manifest's card lists its dependencies, package by package:
+    added, removed, upgraded ↑, downgraded ↓, moved between scopes, or now
+    from a Git repository, a URL, a path outside the repository, an npm
+    alias or another registry. Covers pyproject (PEP 621, Poetry, uv
+    sources), requirements, Pipfile, package.json, Cargo, go.mod and more.
+  - Lock files are compared too (npm v1 to v3, yarn classic and Berry, pnpm,
+    poetry, uv, pdm, Pipfile.lock, Cargo, go.sum, composer). Direct
+    dependencies are listed with their resolved versions, the rest counted.
+    Parsing is text only, and lock files over 20 MB are skipped with a note.
+  - New signals: `dependency-added`, `dependency-downgraded`,
+    `dependency-unpinned`, `dependency-source-changed` (high),
+    `lockfile-without-manifest` and `manifest-without-lockfile`. All can be
+    disabled. `new-external-dependency` is now about code imports only, and
+    the two point at each other.
+  - The review header, `repoviz review`, its Markdown, the pull-request
+    comment and the JSON count them: `dependencies: +2 −0 ↑1 ↓0`.
+  - Manifest parsers now record where a dependency comes from
+    (`DeclaredDependency.source`), and pip lines given by URL
+    (`git+https://…#egg=name`) are dependencies too. The manifest analyzer
+    version is bumped.
 - **Python imports through `sys.path` edits, and requirements-only apps as projects** ([#25](https://github.com/phillipecardenuto/repo-understanding/issues/25)).
   - `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))`
     followed by `import schemas` is now an internal import of

@@ -151,7 +151,13 @@ Credential-like values are always redacted in excerpts and diffs.
 | `renamed-symbol-stale-references` | high / medium | correctness | a function or class was renamed, but code still uses the old name, with each location. *High* when a call the analyzer resolved to the old symbol still uses the old name; *medium* when the old name only appears as a word (an import, a use as a value) |
 | `renamed-symbol` | low | architecture | a function or class was renamed and no reference to the old name is left |
 | `submodule-moved` | medium | architecture | a submodule now lives at another path (same URL or commit, or a similar name in the same folder) |
-| `new-external-dependency` | low | architecture | a new third-party import |
+| `new-external-dependency` | low | architecture | code imports a third-party package it did not use before (a package a manifest declares is `dependency-added`; the two point at each other) |
+| `dependency-added` | low / medium | dependencies | a manifest declares a new direct dependency. *Medium* when it is a runtime dependency new to the repository. A new manifest gives one signal for all its packages. Example: `Dependency added: requests — requests >=2.31,<3 (runtime), resolved to 2.32.3; new to the repository. First imported by app/client.py:2.` See [Dependencies](#dependencies-declared-and-resolved) |
+| `dependency-downgraded` | medium | dependencies | a declared or resolved version went down: `rich: ==13.7.0 → ==13.6.0` |
+| `dependency-unpinned` | medium | dependencies | a spec went from pinned or bounded to one that accepts any future version (`*`, `latest`, no version, `>=x` with no upper bound), or a new dependency is unbounded while the rest of the file pins: `click: >=8,<9 → >=8` |
+| `dependency-source-changed` | high | security | a dependency now comes from a Git repository, a URL, a path outside the repository, an npm alias or a non-default registry, or a package index was added: `lodash now comes from a Git repository: git+https://github.com/lodash/lodash.git (was ^4.17.21)` |
+| `lockfile-without-manifest` | medium | dependencies | a lock file resolves other versions but no manifest it belongs to changed: an upgrade run or a manual edit |
+| `manifest-without-lockfile` | low | dependencies | a manifest's dependencies changed but its lock file (same directory, or the nearest parent for workspaces) did not |
 | `new-runtime-dependency` | low | architecture | code now starts a container built by this repository, or calls one of its services (`app.search now talks to the cbir-service service (http:8000)`), found without imports (see [data-model.md](data-model.md#runtime-coupling-from-code)) |
 | `untested-change` | medium | tests | changed code that no test imports, even indirectly |
 | `tests-not-updated` | low | tests | new public code while the tests covering the module were not touched |
@@ -240,6 +246,64 @@ Values are not drawn in diagrams. They appear in:
 - the JSON: `files[].values` (`name`, `kind`, `status`, `value_before`,
   `value`, `line`, and `weakens` when a safety rule trips) and
   `summary.values_changed`.
+
+### Dependencies: declared and resolved
+
+Agents add, upgrade and swap packages to get something working, and a
+3,000-line lock-file diff hides which. A manifest's or lock file's card
+therefore lists its **dependency changes**, package by package:
+
+```text
+dependencies: +1 −0 ↑0 ↓1, 2 other change(s)
+pyproject.toml:9  requests: added >=2.31,<3 (resolved 2.32.3)
+pyproject.toml:6  rich: downgraded ↓: ==13.7.0 → ==13.6.0 (resolved 13.7.0 → 13.6.0)
+pyproject.toml:7  click: changed: >=8,<9 → >=8  [unpinned]
+web/package.json:4  lodash: source changed ⚠: ^4.17.21 → git+https://github.com/lodash/lodash.git
+uv.lock  … and 1 indirect package(s) resolved differently
+```
+
+**Manifests.** `pyproject.toml` (PEP 621, Poetry, uv sources), `setup.cfg`,
+`setup.py`, `requirements*.txt`, `Pipfile`, conda, `package.json`,
+`Cargo.toml`, `go.mod`, `composer.json`, `Gemfile` and `pubspec.yaml` are
+compared by package name and scope:
+
+- added, removed, upgraded, downgraded, changed;
+- moved to another scope (dev ↔ runtime);
+- **source changed**: now from a Git repository (`git+…`, `github:user/repo`,
+  `user/repo`, `{ git = … }`), a URL, a path outside the repository, an npm
+  alias (`npm:other@1`) or a non-default registry (`registry = …`, a Poetry or
+  uv index);
+- a package index added (`--index-url` / `--extra-index-url` /
+  `--find-links` in `requirements*.txt`, `[[tool.uv.index]]`,
+  `[[tool.poetry.source]]`).
+
+Packages of this repository (workspace members, paths inside it) are not
+third-party and are not listed.
+
+**Versions** are compared best effort, with the standard library: a spec's
+version is its highest lower bound or pin (`^4.17.21` → 4.17.21, `>=1.2,<2` →
+1.2); pre-releases sort before releases.
+
+**Lock files.** `package-lock.json` / `npm-shrinkwrap.json` (v1 to v3),
+`yarn.lock` (classic and Berry), `pnpm-lock.yaml` (v5 to v9), `poetry.lock`,
+`uv.lock`, `pdm.lock`, `Pipfile.lock`, `Cargo.lock`, `go.sum` and
+`composer.lock`:
+
+- They are parsed as text (JSON, TOML, line patterns), never run.
+- Resolved versions of the **direct** dependencies are listed: the names the
+  matching manifests declare, plus what the lock file records itself (npm,
+  pnpm, uv). The others are counted ("indirect packages resolved
+  differently").
+- A package the manifest's change already lists shows its resolved version
+  there (`resolved 2.32.3`) and is marked *declared in* on the lock file's
+  card.
+- A lock file of 20 MB or more is skipped, with a note; so is one that does
+  not parse.
+
+The review header, `repoviz review`, its Markdown, the pull-request comment
+and the JSON (`summary.dependencies`, `files[].packages`, `files[].lock`)
+all carry the counts: `+added −removed ↑upgraded ↓downgraded`, and other
+changes. A package changed in a manifest and its lock file counts once.
 
 ### Renames and moves
 

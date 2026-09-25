@@ -35,6 +35,9 @@ class DeclaredDependency:
     local_path: str | None = None  # repository-relative directory for path/workspace dependencies
     workspace: bool = False
     raw: str = ""
+    # Where it comes from, when not the default registry: git | url | path | alias (another package name) |
+    # index (a named, non-default registry or index).  ``spec`` then holds the URL, path or alias.
+    source: str = ""
 
 
 @dataclass
@@ -117,14 +120,43 @@ def parse_pep508(req: str, scope: str, text: str = "", base_dir: str = "", start
         return None
     name, rest = m.group(1), m.group(3)
     spec = rest.split(";", 1)[0].strip()
-    local = None
+    local, source = None, ""
     if spec.startswith("@"):
         url = spec[1:].strip()
+        source = url_source(url)
         if url.startswith("file:"):
             path = re.sub(r"^file:(//)?", "", url)
             local = _join(base_dir, path) if not path.startswith("/") else None
     return DeclaredDependency(name=name, spec=spec, scope=scope, line=find_line(text, name, start) if text else None,
-                              local_path=local, raw=req)
+                              local_path=local, raw=req, source=source)
+
+
+def url_source(url: str) -> str:
+    """``git``, ``path`` or ``url`` for a dependency given by URL (PEP 508 ``name @ …``, pip lines, npm specs)."""
+    u = url.strip().lower()
+    if u.startswith(("git+", "git:", "git@", "hg+", "svn+", "bzr+", "github:", "gitlab:", "bitbucket:")) \
+            or u.endswith(".git"):
+        return "git"
+    if u.startswith("file:"):
+        return "path"
+    return "url"
+
+
+def _dict_source(dep: DeclaredDependency, spec: dict[str, Any], base: str) -> None:
+    """``{git = …}``, ``{url = …}``, ``{path = …}``, ``{registry | source | index = …}`` (Cargo, Poetry, Pipfile, uv)."""
+    if spec.get("git"):
+        ref = next((spec[k] for k in ("rev", "tag", "branch", "ref") if spec.get(k)), None)
+        dep.spec, dep.source = f"git+{spec['git']}" + (f"@{ref}" if ref else ""), "git"
+    elif spec.get("url") or spec.get("file"):
+        dep.spec, dep.source = str(spec.get("url") or spec.get("file")), "url"
+    elif spec.get("path"):
+        dep.source = "path"
+        dep.spec = dep.spec or str(spec["path"])
+        dep.local_path = _join(base, spec["path"])
+    for key in ("registry", "source", "index"):
+        if isinstance(spec.get(key), str) and not dep.source:
+            dep.source = "index"
+            dep.raw = f"{key} = {spec[key]}"
 
 
 def load_jsonc(text: str) -> Any:
@@ -270,8 +302,8 @@ def parse_pyproject(path: str, text: str, exists: Callable[[str], bool]) -> Mani
         if isinstance(src, dict):
             if src.get("workspace"):
                 dep.workspace = True
-            if src.get("path"):
-                dep.local_path = _join(base, src["path"])
+            else:
+                _dict_source(dep, src, base)
     md.source_roots = list(dict.fromkeys(md.source_roots))
     if md.entry_points:
         md.role = "application"
@@ -290,8 +322,7 @@ def _poetry_dep(name: str, spec: Any, scope: str, text: str, base: str, off: int
         dep.spec = spec
     elif isinstance(spec, dict):
         dep.spec = str(spec.get("version", ""))
-        if spec.get("path"):
-            dep.local_path = _join(base, spec["path"])
+        _dict_source(dep, spec, base)
         if spec.get("optional"):
             dep.scope = "optional"
     return dep
@@ -446,21 +477,33 @@ def parse_requirements(path: str, text: str, exists: Callable[[str], bool]) -> M
         if line.startswith(("-e ", "--editable")):
             target = line.split(None, 1)[1].strip() if " " in line else ""
             if target.startswith((".", "/")) or target.startswith("file:"):
+                spec = target
                 target = re.sub(r"^file:(//)?", "", target).split("#", 1)[0]
-                md.dependencies.append(DeclaredDependency(posixpath.basename(target.rstrip("/")) or target, "", scope,
-                                                          lineno, _join(base, target), raw=raw))
+                md.dependencies.append(DeclaredDependency(posixpath.basename(target.rstrip("/")) or target, spec, scope,
+                                                          lineno, _join(base, target), raw=raw, source="path"))
+            elif "://" in target or target.startswith(("git+", "git@")):
+                md.dependencies.append(_url_requirement(target, scope, lineno, raw))
             continue
         if line.startswith("-"):
             continue
         if line.startswith((".", "/")):
-            md.dependencies.append(DeclaredDependency(posixpath.basename(line.rstrip("/")), "", scope, lineno,
-                                                      _join(base, line), raw=raw))
+            md.dependencies.append(DeclaredDependency(posixpath.basename(line.rstrip("/")), line, scope, lineno,
+                                                      _join(base, line), raw=raw, source="path"))
+            continue
+        if re.match(r"^(git\+|hg\+|svn\+|bzr\+|https?://|file:)", line):  # a bare URL, named by #egg=
+            md.dependencies.append(_url_requirement(line, scope, lineno, raw))
             continue
         dep = parse_pep508(line, scope, base_dir=base)
         if dep:
             dep.line = lineno
             md.dependencies.append(dep)
     return md
+
+
+def _url_requirement(url: str, scope: str, line: int, raw: str) -> DeclaredDependency:
+    egg = re.search(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)", url)
+    name = egg.group(1) if egg else re.sub(r"(\.git)?([@#].*)?$", "", url.rstrip("/")).rsplit("/", 1)[-1] or url
+    return DeclaredDependency(name, url, scope, line, raw=raw, source=url_source(url))
 
 
 def parse_pipfile(path: str, text: str, exists: Callable[[str], bool]) -> ManifestData:
@@ -475,8 +518,8 @@ def parse_pipfile(path: str, text: str, exists: Callable[[str], bool]) -> Manife
         for name, spec in (data.get(section) or {}).items():
             dep = DeclaredDependency(name, spec if isinstance(spec, str) else str((spec or {}).get("version", "")),
                                      scope, find_line(text, name, off))
-            if isinstance(spec, dict) and spec.get("path"):
-                dep.local_path = _join(md.dir, spec["path"])
+            if isinstance(spec, dict):
+                _dict_source(dep, spec, md.dir)
             md.dependencies.append(dep)
     return md
 
@@ -528,7 +571,12 @@ def parse_package_json(path: str, text: str, exists: Callable[[str], bool]) -> M
             if spec.startswith("workspace:"):
                 dep.workspace = True
             elif spec.startswith(("file:", "link:", "portal:")):
-                dep.local_path = _join(base, spec.split(":", 1)[1])
+                dep.local_path, dep.source = _join(base, spec.split(":", 1)[1]), "path"
+            elif spec.startswith("npm:"):
+                dep.source = "alias"  # another package installed under this name
+            elif "://" in spec or spec.startswith(("git+", "git@", "github:", "gitlab:", "bitbucket:")) or \
+                    re.match(r"^[\w.-]+/[\w.-]+(#.*)?$", spec):  # user/repo on GitHub
+                dep.source = url_source(spec) if "://" in spec or ":" in spec.split("/")[0] else "git"
             md.dependencies.append(dep)
     ws = data.get("workspaces")
     if isinstance(ws, dict):
@@ -675,8 +723,7 @@ def parse_cargo(path: str, text: str, exists: Callable[[str], bool]) -> Manifest
                 dep.spec = spec
             elif isinstance(spec, dict):
                 dep.spec = str(spec.get("version", ""))
-                if spec.get("path"):
-                    dep.local_path = _join(base, spec["path"])
+                _dict_source(dep, spec, base)
                 if spec.get("workspace"):
                     dep.workspace = True
                 if spec.get("package"):

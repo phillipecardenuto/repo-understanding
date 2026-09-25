@@ -177,7 +177,7 @@ def _link(path: str | None, line: int | None, link_base: str | None) -> str:
 
 def _code(text: str) -> str:
     """Inline code for a table cell: backticks and pipes cannot break out of it."""
-    text = text.replace("|", "\\|")
+    text = str(text).replace("|", "\\|")
     return f"`` {text} ``" if "`" in text else f"`{text}`"
 
 
@@ -190,6 +190,10 @@ def pr_comment(report: dict[str, Any], *, link_base: str | None = None, max_char
     head = [COMMENT_MARKER, f"### repoviz review: {report['target']['label']}", "",
             f"`{report['base']['label']}` → `{report['head']['label']}` · {s['files']} file(s) in {s['components']} "
             f"component(s) · +{s['lines_added']} −{s['lines_removed']} · {counts}"]
+    from .review import dependency_summary
+
+    if dependency_summary(s):
+        head[-1] += f" · dependencies {dependency_summary(s)}"
     if risk.get("path"):
         icon = {"high": "🔴", "medium": "🟠"}.get(risk["level"], "🟢")
         head.append(f"\n**Risk: {icon} {risk['level']} ({risk['score']}/100)**, because of "
@@ -213,6 +217,23 @@ def pr_comment(report: dict[str, Any], *, link_base: str | None = None, max_char
                            f"{' — ' + detail if detail else ''} | {_link(f.get('path'), f.get('line'), link_base)} |")
     else:
         signals.append("No review signal.")
+    packages = [(f, pk) for f in report.get("files", []) for pk in f.get("packages") or [] if not pk.get("declared_in")]
+    if packages:
+        from .review import DEPENDENCY_WORD, dependency_summary
+
+        signals += ["", f"<details><summary>Dependencies changed: {dependency_summary(s) or len(packages)}</summary>",
+                    "", "| Package | Change | Before → after | Where |", "|---|---|---|---|"]
+        for f, pk in packages[:MAX_VALUE_ROWS]:
+            before = _code(pk["before"]) if pk.get("before") else "_(none)_"
+            after = _code(pk["after"]) if pk.get("after") else "_(none)_"
+            if pk.get("resolved"):
+                after += f" (resolved {_code(pk['resolved'])})"
+            word = DEPENDENCY_WORD.get(pk["status"], pk["status"]) + (" · unpinned" if pk.get("unpinned") else "")
+            signals.append(f"| {_code(pk['name'])} | {word} | {before} → {after} | "
+                           f"{_link(f['path'], pk.get('line'), link_base)} |")
+        if len(packages) > MAX_VALUE_ROWS:
+            signals.append(f"\n_{len(packages) - MAX_VALUE_ROWS} more; run `repoviz review` for all of them._")
+        signals += ["", "</details>"]
     values = [(f, v) for f in report.get("files", []) for v in f.get("values") or []]
     if values:
         signals += ["", f"<details><summary>Values changed ({len(values)})</summary>", "",

@@ -389,3 +389,87 @@ def test_requirements_only_app_is_an_inferred_project(make_repo, capsys) -> None
     assert any(n.label == "worker" for n in view.nodes)
     assert main(["discover", "-C", repo.path]) == 0
     assert "worker: worker [python] (inferred from requirements.txt)" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- dependency sources and lock files (#11)
+
+
+def test_dependency_sources_are_recorded() -> None:
+    def deps(path: str, text: str) -> dict:
+        return {d.name: (d.spec, d.source) for d in parse(path, text).dependencies}
+
+    npm = deps("package.json", '{"dependencies": {"a": "^1", "b": "git+https://github.com/x/b.git", "c": "user/c#v1", '
+                               '"d": "file:../d", "e": "npm:evil@1.0.0", "f": "https://x.test/f.tgz", "g": "workspace:*", '
+                               '"h": "github:u/h"}}')
+    assert {k: v[1] for k, v in npm.items()} == {"a": "", "b": "git", "c": "git", "d": "path", "e": "alias", "f": "url",
+                                                 "g": "", "h": "git"}
+    req = deps("requirements.txt", "requests==2.31\ngit+https://github.com/x/y.git@v1#egg=ypkg\n"
+                                   "-e git+https://github.com/x/z.git#egg=z\n./local\nfoo @ https://x.test/foo.whl\n")
+    assert req["ypkg"][1] == req["z"][1] == "git" and req["local"][1] == "path" and req["foo"][1] == "url"
+    cargo = deps("Cargo.toml", '[dependencies]\nserde = "1"\nx = { git = "https://github.com/x/x", tag = "v1" }\n'
+                               'y = { path = "../y" }\nz = { version = "1", registry = "corp" }\n')
+    assert cargo["x"] == ("git+https://github.com/x/x@v1", "git") and cargo["y"][1] == "path" and cargo["z"][1] == "index"
+    uv = deps("pyproject.toml", '[project]\nname = "p"\ndependencies = ["httpx", "lib"]\n[tool.uv.sources]\n'
+                                'httpx = { git = "https://github.com/encode/httpx" }\nlib = { workspace = true }\n')
+    assert uv["httpx"][1] == "git" and uv["lib"][1] == ""
+    poetry = deps("pyproject.toml", '[tool.poetry]\nname = "p"\n[tool.poetry.dependencies]\n'
+                                    'flask = { git = "https://github.com/pallets/flask.git", branch = "main" }\n')
+    assert poetry["flask"] == ("git+https://github.com/pallets/flask.git@main", "git")
+
+
+def test_lock_file_parsers() -> None:
+    import json
+
+    from repoviz.depchanges import resolved
+
+    npm3 = json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {"lodash": "^4"}, "devDependencies": {"jest": "^29"}},
+        "node_modules/lodash": {"version": "4.17.21"}, "node_modules/jest": {"version": "29.7.0"},
+        "node_modules/jest/node_modules/chalk": {"version": "4.1.2"}, "packages/ui": {"version": "1.0.0"},
+        "node_modules/ui": {"link": True, "resolved": "packages/ui"}}})
+    assert resolved("package-lock.json", npm3) == (
+        {"lodash": {"4.17.21"}, "jest": {"29.7.0"}, "chalk": {"4.1.2"}}, {"lodash", "jest"})
+    npm1 = json.dumps({"lockfileVersion": 1, "dependencies": {"a": {"version": "1.0.0", "dependencies": {
+        "b": {"version": "2.0.0"}}}}})
+    assert resolved("npm-shrinkwrap.json", npm1) == ({"a": {"1.0.0"}, "b": {"2.0.0"}}, {"a"})
+    yarn1 = '# yarn lockfile v1\n\n"@babel/core@^7.0.0", "@babel/core@^7.1.0":\n  version "7.24.0"\n\nlodash@^4.17.21:\n  version "4.17.21"\n'
+    assert resolved("yarn.lock", yarn1)[0] == {"@babel/core": {"7.24.0"}, "lodash": {"4.17.21"}}
+    berry = '"lodash@npm:^4.17.21":\n  version: 4.17.21\n  resolution: "lodash@npm:4.17.21"\n'
+    assert resolved("yarn.lock", berry)[0] == {"lodash": {"4.17.21"}}
+    pnpm9 = ("lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      lodash:\n        specifier: ^4\n"
+             "        version: 4.17.21\n    devDependencies:\n      '@types/node':\n        specifier: ^20\n"
+             "        version: 20.11.0\n\n  packages/ui:\n    dependencies:\n      react:\n        specifier: ^18\n\n"
+             "packages:\n\n  '@types/node@20.11.0':\n    resolution: {}\n\n  lodash@4.17.21:\n    resolution: {}\n\n"
+             "  react@18.2.0:\n    resolution: {}\n")
+    assert resolved("pnpm-lock.yaml", pnpm9) == (
+        {"@types/node": {"20.11.0"}, "lodash": {"4.17.21"}, "react": {"18.2.0"}}, {"lodash", "@types/node"})
+    pnpm6 = ("lockfileVersion: '6.0'\n\ndependencies:\n  lodash:\n    specifier: ^4\n    version: 4.17.21\n\n"
+             "packages:\n\n  /lodash@4.17.21:\n    resolution: {}\n\n  /@scope/pkg@1.2.3(react@18.2.0):\n    resolution: {}\n")
+    assert resolved("pnpm-lock.yaml", pnpm6) == ({"lodash": {"4.17.21"}, "@scope/pkg": {"1.2.3"}}, {"lodash"})
+    uv = ('version = 1\n[[package]]\nname = "app"\nversion = "0.1.0"\nsource = { editable = "." }\n'
+          'dependencies = [{ name = "httpx" }]\n[package.dev-dependencies]\ndev = [{ name = "pytest" }]\n'
+          '[[package]]\nname = "httpx"\nversion = "0.27.0"\n[[package]]\nname = "pytest"\nversion = "8.2.0"\n')
+    assert resolved("uv.lock", uv) == ({"httpx": {"0.27.0"}, "pytest": {"8.2.0"}}, {"httpx", "pytest"})
+    toml = '[[package]]\nname = "serde"\nversion = "1.0.200"\n'
+    for lock in ("poetry.lock", "pdm.lock", "Cargo.lock"):
+        assert resolved(lock, toml) == ({"serde": {"1.0.200"}}, set())
+    assert resolved("Pipfile.lock", json.dumps({"default": {"requests": {"version": "==2.32.3"}}, "develop": {}}))[0] \
+        == {"requests": {"2.32.3"}}
+    assert resolved("composer.lock", json.dumps({"packages": [{"name": "monolog/monolog", "version": "3.5.0"}]}))[0] \
+        == {"monolog/monolog": {"3.5.0"}}
+    assert resolved("go.sum", "github.com/a/b v1.2.3 h1:x=\ngithub.com/a/b v1.2.3/go.mod h1:y=\n"
+                              "github.com/c/d v0.1.0/go.mod h1:z=\n")[0] == {"github.com/a/b": {"v1.2.3"}}
+
+
+def test_versions_specs_and_bounds() -> None:
+    from repoviz.depchanges import spec_version, unbounded, version_key
+
+    assert version_key("1.10.0") > version_key("1.9.9") > version_key("1.9.9rc1")
+    assert version_key("v2") == version_key("2.0.0") and version_key("latest") is None
+    assert spec_version("^4.17.21") == "4.17.21" and spec_version(">=1.2,<2") == "1.2" and spec_version("<3") == "3"
+    assert spec_version("~=1.4.2") == "1.4.2" and spec_version("*") is None
+    for spec in ("", "*", "latest", ">=1.2", ">1"):
+        assert unbounded(spec, "npm") and unbounded(spec, "python"), spec
+    for spec in ("^1.2", "~1.2", "1.2.3", "==2.0", "~=1.4", ">=1,<2", "=1.0"):
+        assert not unbounded(spec, "npm") and not unbounded(spec, "python"), spec
+    assert not unbounded("", "go")
