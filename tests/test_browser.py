@@ -871,7 +871,8 @@ def test_orientation_from_shape_and_readable_fit(page, make_repo, tmp_path: Path
     assert page.evaluate("document.querySelector('#tab-structure .diagram-card').textContent").count("flowchart TB") == 1
     page.reload()
     page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
-    assert page.evaluate("repoviz.app.tabs.structure.diagram.view.direction") == "TB"
+    # the remembered direction (waited for: under load the first render can finish before the view is set)
+    page.wait_for_function("() => ((repoviz.app.tabs.structure.diagram || {}).view || {}).direction === 'TB'", timeout=30_000)
     assert page.errors == []  # type: ignore[attr-defined]
 
 
@@ -1454,4 +1455,40 @@ def test_verdict_bar_banner_staleness_and_static_json(page, make_repo, tmp_path:
     data = json.loads(page.evaluate("window.copied"))
     assert data["verdict"] == "reject" and data["recorded"] is False and data["target"]["key"] == key
     assert data["fingerprint"] == r.state.load_verdict(key)["fingerprint"] and data["prompt"].startswith("# Review feedback")
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_fleet_card_switches_worktree_and_reports_show_it(page, make_repo, tmp_path: Path) -> None:
+    from test_review import fleet_repo
+
+    main, a, b = fleet_repo(make_repo)
+    srv = create_server(Repository(main.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=activity")
+        page.wait_for_selector("#fleet-card .fleet-matrix", timeout=60_000)
+        assert "3 worktrees" in page.inner_text("header")
+        assert page.locator("header select[aria-label='Worktree shown on this page']").count() == 1
+        card = page.inner_text("#fleet-card")
+        assert "agent/a" in card and "agent/b" in card and "this page" in card
+        assert page.locator("#fleet-card .fleet-matrix i.rvi-alert-circle").count() >= 2  # icons and words per cell
+        assert "wt-a changes the signature of search" in card
+        page.locator("#fleet-card tbody tr", has_text="agent/b").first.click()
+        page.wait_for_function("() => typeof repoviz !== 'undefined' && repoviz.app && repoviz.app.ready && "
+                               "(repoviz.app.bundle.worktrees || []).some(w => w.current && w.branch === 'agent/b')", timeout=60_000)
+        page.evaluate("repoviz.app.show('review')")
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        signals = page.inner_text("#tab-review .findings-card")
+        assert "Same code changed in another worktree" in signals and "Calls a function another worktree is changing" in signals
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    report = tmp_path / "fleet.html"
+    report.write_text(render_static_html(build_bundle(Repository(main.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=activity")
+    page.wait_for_selector("#fleet-card .fleet-matrix", timeout=60_000)
+    card = page.inner_text("#fleet-card")
+    assert "need the live app" in card and "agent/b" in card
+    assert page.locator("header select[aria-label='Worktree shown on this page']").count() == 0
     assert page.errors == []  # type: ignore[attr-defined]

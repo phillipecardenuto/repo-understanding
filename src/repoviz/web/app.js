@@ -96,11 +96,25 @@
   }
 
   class LiveApi {
-    constructor() { this.live = true; this.etags = new Map(); }
+    constructor() {
+      this.live = true; this.etags = new Map();
+      try { this.worktree = sessionStorage.getItem("rv.worktree") || ""; } catch (e) { this.worktree = ""; }
+    }
+    /* Another worktree of the repository (parallel agents): every call then answers for that worktree. The choice
+       lasts for this browser tab. */
+    setWorktree(path) {
+      this.worktree = path || "";
+      try { if (path) sessionStorage.setItem("rv.worktree", path); else sessionStorage.removeItem("rv.worktree"); } catch (e) { /* ignore */ }
+    }
+    headers(extra) {
+      const hd = Object.assign({ "X-Repoviz": "1" }, extra || {});
+      if (this.worktree) hd["X-Repoviz-Worktree"] = encodeURIComponent(this.worktree);
+      return hd;
+    }
     /* Every API call carries X-Repoviz (the server rejects requests without it: cross-site pages cannot add it).
        With `cached`, the last response is reused when the server answers 304 Not Modified. */
     async get(path, cached) {
-      const headers = { Accept: "application/json", "X-Repoviz": "1" };
+      const headers = this.headers({ Accept: "application/json" });
       const prev = cached && this.etags.get(path);
       if (prev) headers["If-None-Match"] = prev.etag;
       const r = await fetch(path, { headers, cache: "no-store" });
@@ -111,7 +125,7 @@
       return body;
     }
     async post(path, payload) {
-      const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Repoviz": "1" }, body: JSON.stringify(payload || {}) });
+      const r = await fetch(path, { method: "POST", headers: this.headers({ "Content-Type": "application/json" }), body: JSON.stringify(payload || {}) });
       const body = await r.json().catch(() => ({ error: r.statusText }));
       if (!r.ok) throw new Error(body.error || r.statusText);
       return body;
@@ -128,6 +142,7 @@
     checkpoint(label) { return this.post("/api/session/checkpoint", { label: label || "" }); }
     verdict(payload) { return this.post("/api/review/verdict", payload); }
     saveReviewed(key, reviewed) { return this.post("/api/review/reviewed", { key, reviewed }); }
+    fleet(risk) { return this.get("/api/fleet" + (risk ? "?risk=1" : "")); }
   }
 
   // ---------------------------------------------------------------- indexes
@@ -2705,12 +2720,16 @@
       this.tableEl = h("div", { class: "card" });
       this.flowSide = h("div", { class: "card" });
       this.timelineEl = h("div", { class: "card timeline-card", hidden: true });
-      put(this.root, this.headEl, this.statsEl, this.timelineEl, h("div", { class: "split" }, h("div", null, this.mapDiagram.el, this.tableEl), this.details.el),
+      this.fleetEl = h("div", { class: "card fleet-card", id: "fleet-card", tabindex: "-1", hidden: true });
+      put(this.root, this.headEl, this.fleetEl, this.statsEl, this.timelineEl, h("div", { class: "split" }, h("div", null, this.mapDiagram.el, this.tableEl), this.details.el),
         h("h2", { text: "Execution / call flow that may be affected", style: { fontSize: "16px", margin: "16px 0 8px" } }),
         h("div", { class: "split" }, h("div", null, this.flowDiagram.el), this.flowSide));
       await this.load();
     }
-    activate() { if (this.app.api.live && this.opts.auto) this.schedule(); }
+    activate() {
+      if (this.app.api.live && this.opts.auto) this.schedule();
+      if ((this.app.bundle.worktrees || []).length > 1 && (!this.app.api.live || Date.now() - (this.fleetAt || 0) > 15000)) this.loadFleet(false);
+    }
     deactivate() { clearTimeout(this.timer); }
     schedule() {
       clearTimeout(this.timer);
@@ -2762,6 +2781,75 @@
       }
       this.updatedEl = h("span", { class: "muted", text: `updated ${fmtTime(d.generated_at)}` });
       put(this.headEl, h("button", { class: "btn small", onclick: () => this.app.show("review") }, "Review this work →"), this.updatedEl);
+    }
+    // -- parallel agents: the repository's worktrees ------------------------------------------
+    async loadFleet(risk) {
+      const app = this.app;
+      this.fleetEl.hidden = false;
+      if (!app.api.live) { this.fleet = app.bundle.fleet || null; this.drawFleet(); return; }
+      if (this.fleetBusy) return;
+      this.fleetBusy = true; this.fleetAt = Date.now(); this.drawFleet();
+      try { this.fleet = await app.api.fleet(risk); this.fleetError = null; }
+      catch (err) { this.fleetError = err.message; }
+      this.fleetBusy = false; this.drawFleet();
+    }
+    drawFleet() {
+      const el = this.fleetEl, f = this.fleet, app = this.app, live = app.api.live;
+      el.innerHTML = "";
+      put(el, h("h3", null, iconEl("branch"), " Parallel agents: worktrees ", h("span", { class: "faint small", text: "each worktree's work since it left the default branch" + (f && f.default_branch ? ` (${f.default_branch})` : "") })),
+        live ? h("div", { class: "group" },
+          h("button", { class: "btn small", onclick: () => this.loadFleet(false) }, "↻ Refresh"),
+          h("button", { class: "btn small", title: "Review each worktree's wave to show its risk (slower)", onclick: () => this.loadFleet(true) }, iconEl("gauge", true), " Compute risk"),
+          this.fleetBusy ? [h("span", { class: "spinner" }), " reading worktrees…"] : f ? h("span", { class: "faint small", text: `${f.elapsed_ms} ms` }) : null) : null,
+        this.fleetError ? h("div", { class: "notice error", text: "Worktrees unavailable: " + this.fleetError }) : null);
+      if (!f) return;
+      const names = new Map(f.worktrees.map((w) => [w.path, w.name]));
+      const verdictOf = (v) => {
+        if (!v) return h("span", { class: "faint", text: "none" });
+        const k = VERDICT_KINDS[v.verdict] || {};
+        return h("span", { title: v.target ? `on ${v.target}` + (v.summary ? `: ${v.summary}` : "") : "" }, iconEl(k.icon), " " + (k.label || v.verdict), v.stale ? [" · ", iconEl("alert"), " stale"] : "");
+      };
+      put(el, table([
+        { key: "name", label: "Worktree", render: (w) => [iconEl("folder"), " ", h("b", { text: w.name }), w.current ? [" ", pill("this page", "cycle")] : null,
+          w.locked ? [" ", pill([iconEl("lock", true), " locked"])] : null, w.prunable ? [" ", pill("prunable")] : null], sort: (w) => w.name },
+        { key: "label", label: "Branch", render: (w) => h("span", { class: "mono", text: w.label }) },
+        { key: "ahead", label: "Ahead", num: true, title: "Commits not on the default branch", render: (w) => w.ahead === null || w.ahead === undefined ? "?" : String(w.ahead) },
+        { key: "dirty", label: "Uncommitted", num: true, render: (w) => String(w.dirty) },
+        { key: "session", label: "Session", render: (w) => w.session ? [iconEl("pulse", true), ` ${w.session.label || w.session.id} · since ${fmtTime(w.session.started_at)}`] : h("span", { class: "faint", text: "none" }), sort: (w) => (w.session || {}).started_at || "" },
+        { key: "last_activity", label: "Last activity", render: (w) => w.last_activity ? fmtTime(w.last_activity) : "", sort: (w) => w.last_activity || "" },
+        { key: "verdict", label: "Verdict", render: (w) => verdictOf(w.verdict), sort: (w) => (w.verdict || {}).verdict || "" },
+        { key: "risk", label: "Risk", render: (w) => w.risk ? riskPill(w.risk) : h("span", { class: "faint", text: live ? "—" : "" }), sort: (w) => (w.risk || {}).score || 0 },
+      ], f.worktrees, { onRow: live ? (w) => app.switchWorktree(w.path) : null, isSelected: (w) => w.current, scroll: false }),
+        live ? h("div", { class: "faint small", text: "Click a worktree to show it on this page (every tab then reads it)." }) : null);
+      // Overlaps: a worktree × worktree matrix; a cell lists what the two waves share.
+      const pairOf = (a, b) => f.overlaps.find((p) => (p.a === a && p.b === b) || (p.a === b && p.b === a));
+      const active = f.worktrees.filter((w) => w.changed);
+      const detail = h("div", { class: "fleet-detail" });
+      const showPair = (p) => {
+        detail.innerHTML = "";
+        const an = names.get(p.a), bn = names.get(p.b);
+        put(detail, h("h4", { text: `${an} ↔ ${bn}` }), h("ul", { class: "plain" }, p.items.map((o) => h("li", null, fleetItem(o, an, bn)))),
+          p.more ? h("div", { class: "faint", text: `… ${p.more} more` }) : null);
+      };
+      const cell = (a, b) => {
+        if (a.path === b.path) return h("td", { class: "faint", text: "—" });
+        const p = pairOf(a.path, b.path);
+        if (!p) return h("td", null, iconEl("check"), " none");
+        const c = p.counts, parts = [];
+        if (c["overlap-symbol"]) parts.push([iconEl("alert-circle"), ` ${plural(c["overlap-symbol"], "symbol")}`]);
+        if (c["overlap-contract"]) parts.push([iconEl("alert-circle"), ` ${plural(c["overlap-contract"], "contract")}`]);
+        if (c["overlap-file"]) parts.push([iconEl("alert"), ` ${plural(c["overlap-file"], "file")}`]);
+        return h("td", null, h("button", { class: "btn small fleet-cell", title: "List what the two waves share", onclick: () => showPair(p) }, parts.map((x, i) => [i ? " · " : "", x])));
+      };
+      put(el, h("h4", null, "Overlaps ", h("span", { class: "faint small", text: "same symbol and contract: high · same file: medium" })),
+        active.length < 2 ? h("div", { class: "empty", text: "Fewer than two worktrees have work of their own: nothing can overlap." })
+          : h("div", { class: "table-scroll" }, h("table", { class: "fleet-matrix" },
+            h("thead", null, h("tr", null, h("th", { text: "" }), active.map((w) => h("th", { scope: "col", text: w.name })))),
+            h("tbody", null, active.map((a) => h("tr", null, h("th", { scope: "row", text: a.name }), active.map((b) => cell(a, b))))))),
+        detail,
+        (f.diagnostics || []).length ? h("div", { class: "muted small" }, "Not listed: ", f.diagnostics.map((d, i) => [i ? "; " : "", h("span", { class: "mono", text: d.path }), `: ${d.reason}`])) : null,
+        live ? null : h("div", { class: "faint small", text: "Switching worktree and computing risk need the live app (repoviz serve)." }));
+      if (f.overlaps.length) showPair(f.overlaps[0]);
     }
     /* The session's checkpoints and notes, newest first; a checkpoint opens its step (previous → this) in AI Review. */
     drawTimeline() {
@@ -2940,7 +3028,7 @@
   const VERDICT_LABELS = { "should-not-touch": "Should not have been modified", "logic-error": "Logic error", missed: "Missed / incomplete",
     improve: "Should be improved", question: "Question", ok: "Looks good / not an issue" };
   const VERDICT_FOR_CATEGORY = { scope: "should-not-touch", correctness: "logic-error", tests: "missed", security: "logic-error",
-    architecture: "improve", hygiene: "improve", plan: "missed", dependencies: "improve" };
+    architecture: "improve", hygiene: "improve", plan: "missed", dependencies: "improve", coordination: "question" };
   const splitGlobs = (text) => (text || "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
   function scopePill(scope) {
     return { protected: pill([iconEl("lock", true), " protected"], "high"), "out-of-scope": pill([iconEl("alert", true), " out of scope"], "medium"),
@@ -2950,6 +3038,17 @@
   function sevPill(sev) { return pill(sev, sev === "high" ? "high" : sev === "medium" ? "medium" : "low"); }
   /* Risk (review.risk): shown as icon + score + word, never colour alone. */
   const RISK_ICON = { high: "alert-circle", medium: "alert" };
+  /* One overlap between two worktrees' waves (fleet.py), with its severity as an icon and a word. */
+  function fleetItem(o, an, bn) {
+    const sev = o.kind === "overlap-file" ? "medium" : "high";
+    const head = [iconEl(SEV_ICON[sev]), " ", h("b", { text: sev }), " "];
+    if (o.kind === "overlap-file") return [head, "same file: ", h("span", { class: "mono", text: o.path })];
+    if (o.kind === "overlap-symbol") return [head, "same code: ", h("span", { class: "mono", text: `${o.symbol}` }), " in ", h("span", { class: "mono", text: o.path }), h("span", { class: "faint", text: ` (${an} line ${o.line_a}, ${bn} line ${o.line_b})` })];
+    const [changer, caller] = o.changed_by === "a" ? [an, bn] : [bn, an];
+    const sig = o.before.length + o.after.length <= 100 ? `${o.before} → ${o.after}` : o.delta;
+    return [head, `${changer} changes the signature of `, h("span", { class: "mono", text: o.symbol }), " ", h("span", { class: "mono", text: sig, title: `${o.before} → ${o.after}` }),
+      `; ${caller} calls it at `, h("span", { class: "mono", text: `${o.call_path}:${o.call_line}` })];
+  }
   function riskPill(risk, suffix) {
     if (!risk) return null;
     const icon = RISK_ICON[risk.level];
@@ -3274,7 +3373,8 @@
       this.loading = false;
       this.loadedAt = Date.now();
       if (!r) { this.statusEl.textContent = ""; this.showEmpty("No review in this report", "There were no changes to review when this report was generated."); return; }
-      const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope), (r.commits || {}).head || ""].join("|");
+      // others_key: other worktrees' work, which shows as overlap signals here (live app)
+      const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope), (r.commits || {}).head || "", r.others_key || ""].join("|");
       if (prev && prev.sig === sig) {
         if (JSON.stringify(r.verdict || null) !== JSON.stringify(this.verdict || null)) { this.verdict = r.verdict || null; this.drawVerdict(); }
         if (announce) this.statusEl.textContent = `${r.base.label} → ${r.head.label} · up to date`;
@@ -4309,6 +4409,11 @@
           "**Affected flow** follows the static call graph from the changed code to the entry points (routes, CLIs, handlers) and tests that reach it: run those tests first.",
           "The **timeline** lists the session's **checkpoints**, newest first: each with the files changed since the previous one and ±lines; **reworked ×N** marks files changed in 3 or more. Click one to review that step alone in AI Review (live app).",
           "Checkpoints come from **Mark checkpoint**, from `repoviz session checkpoint` (an agent hook can call it after every edit: see docs/review.md), and automatically while this page is open (at most every 30 s). Notes from `repoviz session note` appear in the timeline too."] },
+        { h: "Parallel agents (worktrees)" },
+        { ul: ["When the repository has several `git worktree`s (one agent each), the header shows **N worktrees** and, in the live app, a **Worktree** picker: every tab then reads the chosen worktree, for this browser tab. Only this repository's worktrees can be opened.",
+          "The **Parallel agents** card lists each worktree: its branch, commits ahead of the default branch, uncommitted files, session, last activity and the verdict on its wave (**Compute risk** adds each wave's risk). Click a row to switch to it.",
+          "The **Overlaps** matrix compares every pair, each from its merge base with the default branch: **symbol** (high) when both change the same function, method or class; **contract** (high) when one changes a signature the other's new code calls; **file** (medium) otherwise. Click a cell for the list.",
+          "The same signals appear in each worktree's AI Review, naming the other branch, so you can decide which agent owns the code before the waves are merged. `repoviz fleet` prints the same overview."] },
         { tip: "The flow is a static approximation: calls through dynamic dispatch, reflection or configuration are not resolved." },
       ] },
     { id: "diagrams", title: "Reading the diagrams", icon: "layers", intro: "Colours are never the only signal: every state also has a border style, a marker and a word.",
@@ -4488,6 +4593,18 @@
           "Declared entry points: console scripts, package mains, container commands, Compose services. Opens their list in the Structure tab.",
           async () => { await this.show("structure"); const card = document.getElementById("entry-points-card"); if (card) { card.scrollIntoView({ block: "center" }); card.focus({ preventScroll: true }); } });
       }
+      const wts = b.worktrees || [];
+      if (wts.length > 1) {  // parallel agents: the fleet, and (live) which worktree this page shows
+        info.appendChild(h("button", { class: "chip chip-button", type: "button", "data-chip": "worktrees", title: "Git worktrees of this repository (parallel agents): their state and where their work overlaps. Opens the fleet in the Activity tab.",
+          onclick: async () => { await this.show("activity"); const card = document.getElementById("fleet-card"); if (card) { card.scrollIntoView({ block: "start" }); card.focus({ preventScroll: true }); } } },
+          iconEl("branch", true), ` ${plural(wts.length, "worktree")}`));
+        if (this.api.live) {
+          const pick = select(wts.map((w) => [w.path, `${w.name} · ${w.label}`]), (wts.find((w) => w.current) || wts[0]).path, (v) => this.switchWorktree(v));
+          pick.setAttribute("aria-label", "Worktree shown on this page");
+          pick.title = "Show another worktree of this repository: every tab then reads that worktree";
+          info.appendChild(h("label", { class: "chip worktree-pick" }, "Worktree ", pick));
+        }
+      }
       const badge = $("#mode-badge");
       badge.textContent = this.api.live ? "● live" : `static report · ${fmtTime(b.generated_at)}`;
       badge.classList.toggle("live", this.api.live);
@@ -4560,6 +4677,13 @@
       if (t && t.details) t.details.showNode(idx, id);
       if (t && t.diagram) t.diagram.select(id);
     }
+    /* Every tab reads the chosen worktree: the page starts again on it. */
+    switchWorktree(path) {
+      const current = ((this.bundle.worktrees || []).find((w) => w.current) || {}).path;
+      if (!this.api.live || !path || path === current) return;
+      this.api.setWorktree(path);
+      location.reload();
+    }
     async focusDependencies(id) { await this.show("dependencies"); this.tabs.dependencies.setFocus(id); }
     /* Open the AI Review tab on a target that may not be listed (a checkpoint step from the Activity timeline). */
     async openReview(id, label) {
@@ -4606,7 +4730,15 @@
     try {
       const embedded = await readEmbedded();
       if (embedded) { api = new StaticApi(embedded); bundle = embedded; }
-      else { api = new LiveApi(); bundle = await api.bundle(); }
+      else {
+        api = new LiveApi();
+        try { bundle = await api.bundle(); }
+        catch (err) {  // the worktree chosen earlier is gone: back to the one the server started in
+          if (!api.worktree) throw err;
+          api.setWorktree("");
+          bundle = await api.bundle();
+        }
+      }
     } catch (err) { fail("Could not load repository data: " + err.message); return; }
     const app = new App(api, bundle);
     APP = app;

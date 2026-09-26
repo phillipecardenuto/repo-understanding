@@ -15,6 +15,7 @@ Examples::
     repoviz review --format prompt        # feedback to paste back to the agent
     repoviz review --wait --format json   # an agent waits for the reviewer's verdict (exit 0 / 2 / 3, 4 timeout)
     repoviz gate                          # before a push: exit 3 unless a fresh verdict approves the work
+    repoviz fleet                         # parallel agents: every worktree, and where their work overlaps
     repoviz activity
     repoviz why app.routes app.db         # which imports make the routes depend on the database?
     repoviz impact app.services.images.list_images   # what may break if it changes
@@ -571,7 +572,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
         if not disabled_by_env() and repo.config.cache_disk:
             why = "unavailable"
         print(f"repoviz: the parse cache is off ({why})", file=sys.stderr)
-        disk = DiskCache(repo.state.dir, int(repo.config.cache_max_mb * 1e6))
+        disk = DiskCache(repo.parse_cache_dir, int(repo.config.cache_max_mb * 1e6))
         if not disk.path.exists():
             return EXIT_OK
     if args.action == "clear":
@@ -926,6 +927,20 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 2 if args.hook_input else EXIT_GATE
 
 
+def cmd_fleet(args: argparse.Namespace) -> int:
+    """``repoviz fleet``: every worktree of the repository (parallel agents), and where their work overlaps."""
+    from .fleet import fleet, format_fleet
+    from .render.html import dumps
+
+    repo = _open(args)
+    if repo.git is None:
+        print("repoviz: fleet needs a Git repository", file=sys.stderr)
+        return EXIT_ERROR
+    res = fleet(repo, with_risk=args.risk)
+    _write(dumps(res) if args.json else format_fleet(res), args.output)
+    return EXIT_OK
+
+
 def format_review_markdown(report: dict[str, Any]) -> str:
     s = report["summary"]
     lines = [f"### AI change review: {report['target']['label']}", "",
@@ -1199,6 +1214,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8765, help="--wait: port of the server it starts when none is running "
                    "(another free port when taken)")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("fleet", parents=[common],
+                       help="parallel agents: every Git worktree of the repository (branch, commits ahead, uncommitted "
+                       "files, session, verdict) and where their work overlaps (same file, same function, a changed "
+                       "signature the other one calls)")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--risk", action="store_true", help="also review each worktree for its risk (slower)")
+    p.set_defaults(func=cmd_fleet)
 
     p = sub.add_parser("gate", parents=[common],
                        help="exit 3 unless a fresh verdict approves the review (run it before a push: pre-push hook, "

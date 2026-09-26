@@ -749,6 +749,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     _rename_findings(add, diff, target_snap, target_src, component_of)
     declared_added = _dependency_findings(add, files, base_src, target_src, base_snap, changed_set)
     plan_report = _plan_findings(add, scope, files)
+    if target.target == "WORKTREE" and not commit and repo.git is not None and not set(OVERLAP_KINDS) <= disabled:
+        _overlap_findings(add, repo, changed_set, component_of)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
         # One commit alone: the companion may be in another commit of the wave, so only mark partners as changed.
@@ -1238,6 +1240,54 @@ def _dependency_findings(add: Any, files: list[dict[str, Any]], base_src: TreeSo
                             component=f["component"], suggestion="A downgrade can bring back fixed bugs and "
                             "vulnerabilities; confirm it is intended."), key=p["name"])
     return declared_added
+
+
+OVERLAP_KINDS = ("overlap-file", "overlap-symbol", "overlap-contract")
+
+
+def _changes(o: dict[str, Any]) -> str:
+    from .fleet import short_signatures
+
+    return short_signatures(o)
+
+
+def _overlap_findings(add: Any, repo: "Repository", changed: set[str], component_of: Any) -> None:
+    """Work this wave shares with another worktree's (fleet.py): the same file, the same function, or a signature
+    one side changes while the other side calls it."""
+    from .fleet import overlaps_with_others
+
+    for o in overlaps_with_others(repo):
+        other = o["other"]
+        who = f"worktree {other['name']} (branch {other['branch']})" if other["branch"] else \
+            f"worktree {other['name']} ({other['label']})"
+        key = other["path"]
+        if o["kind"] == "overlap-file" and o["path"] in changed:
+            add(Finding("overlap-file", "coordination", "medium", "Also changed in another worktree",
+                        f"{o['path']} is also changed by {who}: the two waves may conflict when they are merged.",
+                        path=o["path"], component=component_of(o["path"])[1],
+                        suggestion="Coordinate with the other agent, or merge one wave before the other goes on."),
+                key=key)
+        elif o["kind"] == "overlap-symbol" and o["path"] in changed:
+            add(Finding("overlap-symbol", "coordination", "high", "Same code changed in another worktree",
+                        f"{o['symbol']} is also changed by {who}: both waves edit the same definition, so merging "
+                        "them will conflict or silently combine two intentions.", path=o["path"], line=o["line_a"],
+                        symbol=o["symbol"], component=component_of(o["path"])[1],
+                        suggestion="Decide which wave owns this code; the other one should rebase onto it."),
+                key=f"{key}:{o['symbol']}")
+        elif o["kind"] == "overlap-contract" and o["changed_by"] == "a" and o["path"] in changed:
+            add(Finding("overlap-contract", "coordination", "high", "Signature changed while another worktree calls it",
+                        f"{o['symbol']} changes here ({_changes(o)}), and {who} adds a call to it "
+                        f"at {o['call_path']}:{o['call_line']}: `{_redact(o['call'])}`.", path=o["path"],
+                        line=o["line"], symbol=o["symbol"], component=component_of(o["path"])[1],
+                        suggestion="Keep the old signature working, or tell the other agent before either wave merges."),
+                key=f"{key}:{o['symbol']}:{o['call_path']}:{o['call_line']}")
+        elif o["kind"] == "overlap-contract" and o["changed_by"] == "b" and o["call_path"] in changed:
+            add(Finding("overlap-contract", "coordination", "high", "Calls a function another worktree is changing",
+                        f"{who} changes the signature of {o['symbol']} ({o['path']}: {_changes(o)}), and this wave "
+                        "calls it here.", path=o["call_path"], line=o["call_line"],
+                        excerpt=_redact(o["call"]), symbol=o["symbol"], component=component_of(o["call_path"])[1],
+                        suggestion="Check the call against the new signature, or agree on one with the other agent."),
+                key=f"{key}:{o['symbol']}:{o['call_path']}:{o['call_line']}")
 
 
 def _plan_findings(add: Any, scope: ScopePolicy, files: list[dict[str, Any]]) -> dict[str, Any] | None:

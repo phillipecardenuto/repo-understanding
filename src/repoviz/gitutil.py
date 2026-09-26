@@ -320,6 +320,42 @@ class Git:
             result.append((short, sha))
         return result[:limit]
 
+    def git_dirs(self) -> tuple[Path | None, Path | None]:
+        """``(git dir, common dir)`` as absolute paths: they differ in a linked worktree (``git worktree add``)."""
+        out = self.try_run("rev-parse", "--git-dir", "--git-common-dir")
+        parts = [x for x in (out or "").splitlines() if x]
+        if len(parts) != 2:
+            return None, None
+        return tuple((self.root / x).resolve() for x in parts)  # type: ignore[return-value]
+
+    def worktree_list(self) -> list[dict[str, Any]]:
+        """``git worktree list --porcelain``: each worktree's path, HEAD and branch, and whether it is detached,
+        locked, prunable or bare (read-only)."""
+        out, sep = self.try_run("worktree", "list", "--porcelain", "-z"), "\0"
+        if out is None:  # Git < 2.36
+            out, sep = self.try_run("worktree", "list", "--porcelain"), "\n"
+        records: list[dict[str, Any]] = []
+        cur: dict[str, Any] | None = None
+        for line in (out or "").split(sep):
+            key, _, value = line.partition(" ")
+            if not line:
+                cur = None
+            elif key == "worktree":
+                cur = {"path": value, "head": None, "branch": None, "detached": False, "locked": False,
+                       "prunable": False, "bare": False}
+                records.append(cur)
+            elif cur is None:
+                continue
+            elif key == "HEAD":
+                cur["head"] = value
+            elif key == "branch":
+                cur["branch"] = value.removeprefix("refs/heads/")
+            elif key in ("detached", "locked", "prunable", "bare"):
+                cur[key] = True
+                if value:
+                    cur[f"{key}_reason"] = value[:200]
+        return records
+
     def ahead_count(self, base_sha: str, tip_sha: str) -> int | None:
         """Commits reachable from ``tip_sha`` but not from ``base_sha`` (full commit IDs only)."""
         if not (_SHA.match(base_sha) and _SHA.match(tip_sha)):

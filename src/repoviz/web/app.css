@@ -376,3 +376,14 @@ ol.timeline > li.clickable:focus-visible { box-shadow: 0 0 0 2px var(--accent); 
 .verdict-btn.request-changes { border-color: var(--modified); }
 .verdict-btn.reject { border-color: var(--removed); }
 .verdict-btn[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 1px; font-weight: 600; }
+
+/* Parallel agents (#10): the worktree switcher in the header and the fleet card in Activity & Flow. Overlap cells
+   carry an icon and words (severity), never colour alone. */
+.worktree-pick select { margin-left: 4px; max-width: 280px; font: inherit; }
+.fleet-card h4 { margin: 12px 0 4px; }
+.table-scroll { overflow-x: auto; }
+.fleet-matrix { border-collapse: collapse; margin: 6px 0; }
+.fleet-matrix th, .fleet-matrix td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; white-space: nowrap; }
+.fleet-matrix thead th { font-weight: 600; }
+.fleet-detail ul { margin: 6px 0; }
+.fleet-detail li { margin: 3px 0; }

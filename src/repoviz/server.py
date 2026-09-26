@@ -33,11 +33,12 @@ from collections import OrderedDict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
 from .activity import observe
 from .gitutil import GitError
+from .ids import stable_hash
 from .model import RepositoryDiff
 from .render.html import (
     asset_bytes,
@@ -112,8 +113,9 @@ class AppState:
     the state directory (sessions, scope, notes, observations) are serialized.
     """
 
-    def __init__(self, repo: Repository, *, auto_session: bool = False) -> None:
+    def __init__(self, repo: Repository, *, auto_session: bool = False, parent: "AppState | None" = None) -> None:
         self.repo = repo
+        self.parent = parent  # the state of the worktree the server was started in
         self.write_lock = threading.Lock()
         self.activity_lock = threading.Lock()
         self.cache_lock = threading.Lock()
@@ -124,8 +126,38 @@ class AppState:
         self._snapshot_body: tuple[Any, bytes] | None = None
         self._reviews = _Lru(6)
         self._auto_checkpoint: tuple[str, float] = ("", 0.0)  # (activity etag, monotonic time) of the last try
+        self._worktrees: dict[str, AppState] = {}  # other worktrees of this repository, opened on demand
         if auto_session and repo.is_git and repo.current_session() is None:
             repo.state.start_session(repo.git, repo.root, label="started with repoviz serve")
+
+    def for_worktree(self, path: str | None) -> "AppState":
+        """The state of another worktree of this repository (the page's worktree switcher sends its path in
+        ``X-Repoviz-Worktree``); this one when none is given.  Only this repository's worktrees are served."""
+        if self.parent is not None:
+            return self.parent.for_worktree(path)
+        if not path or path == str(self.repo.root):
+            return self
+        with self.cache_lock:
+            hit = self._worktrees.get(path)
+        if hit is not None:
+            return hit
+        from .fleet import list_worktrees
+
+        known = {w.path for w in list_worktrees(self.repo.git)[0]} if self.repo.git is not None else set()
+        if path not in known:
+            raise ApiError(403, "not a worktree of this repository")
+        try:
+            opened = AppState(Repository(path), parent=self)
+        except (RepositoryError, OSError) as exc:
+            raise ApiError(400, str(exc)) from exc
+        with self.cache_lock:
+            return self._worktrees.setdefault(path, opened)
+
+    def fleet(self, query: dict[str, str]) -> dict[str, Any]:
+        """Every worktree of the repository, and where their work overlaps (fleet.py)."""
+        from .fleet import fleet
+
+        return fleet(self.repo, with_risk=query.get("risk") == "1", repo_for=lambda p: self.for_worktree(p).repo)
 
     def bundle(self) -> bytes:
         """The page's initial data; the large snapshot part is serialized once per working-tree state."""
@@ -255,6 +287,7 @@ class AppState:
         return [t.to_dict() for t in review_targets(self.repo)]
 
     def review(self, query: dict[str, str]) -> bytes:
+        from .fleet import others_state
         from .review import build_review, resolve_target, scope_for
 
         try:
@@ -265,9 +298,11 @@ class AppState:
             scope = scope_for(self.repo, target, expected=expected)
             commit = (query.get("commit") or "").strip() or None  # one step of the range, reviewed on its own
             sources = (self.repo.open_source(target.base), self.repo.open_source(target.target))
+            # other worktrees' work shows as overlap signals in a review of this working tree (fleet.py)
+            others = others_state(self.repo) if target.target == "WORKTREE" and not commit else ()
             key = (target.key, target.base, target.target, sources[0].revision_id, sources[1].revision_id,
                    tuple(scope.allowed), tuple(scope.protected), tuple(scope.expected), self.repo.config.fingerprint(),
-                   commit,
+                   commit, others,
                    self.repo.git.head() if self.repo.git else None)  # commits and uncommitted work depend on HEAD
             with self.cache_lock:
                 body = self._reviews.get(key)
@@ -281,7 +316,8 @@ class AppState:
         except (RepositoryError, GitError, ValueError) as exc:
             raise ApiError(400, str(exc)) from exc
         return _splice({"notes": self.repo.state.load_notes(target.key), "reviewed": self.repo.state.load_reviewed(target.key),
-                        "verdict": self._verdict_view(target, sources)}, body)
+                        "verdict": self._verdict_view(target, sources),
+                        "others_key": stable_hash("others", repr(others)) if others else ""}, body)
 
     def _verdict_view(self, target: Any, sources: tuple[Any, Any]) -> dict[str, Any] | None:
         from .verdict import fingerprint, view
@@ -466,6 +502,11 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
             q = parse_qs(urlparse(self.path).query, max_num_fields=50)
             return {k: v[-1][:2000] for k, v in q.items()}
 
+        def _worktree(self) -> str | None:
+            """The worktree the page is looking at (URL-encoded path; none: the one the server started in)."""
+            raw = self.headers.get("X-Repoviz-Worktree")
+            return unquote(raw)[:4096] if raw else None
+
         def _guard(self, path: str) -> bool:
             """Host check for everything; the X-Repoviz header for every API call."""
             if not self._host_ok():
@@ -492,46 +533,49 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 self._client_gone(path)
                 return
             try:
+                st = state.for_worktree(self._worktree()) if path.startswith("/api/") else state
                 if path in ("/", "/index.html"):
-                    self._send(200, render_live_html(state.repo.name).encode("utf-8"), "text/html; charset=utf-8")
+                    self._send(200, render_live_html(st.repo.name).encode("utf-8"), "text/html; charset=utf-8")
                 elif path in ASSETS:
                     name, ctype = ASSETS[path]
                     self._send(200, asset_bytes(name), ctype, {"Cache-Control": "max-age=300"})
                 elif path == "/favicon.ico" or path == "/favicon.svg":
                     self._send(200, FAVICON, "image/svg+xml", {"Cache-Control": "max-age=86400"})
                 elif path == "/api/health":
-                    self._json(200, {"ok": True, "version": __version__, "repository": str(state.repo.root)})
+                    self._json(200, {"ok": True, "version": __version__, "repository": str(st.repo.root)})
                 elif path == "/api/bundle":
-                    self._json(200, state.bundle())
+                    self._json(200, st.bundle())
                 elif path == "/api/revisions":
-                    self._json(200, state.repo.revisions())
+                    self._json(200, st.repo.revisions())
                 elif path == "/api/diff":
-                    self._json(200, state.diff(self._query()))
+                    self._json(200, st.diff(self._query()))
                 elif path == "/api/snapshot":
-                    self._json(200, state.snapshot(self._query()))
+                    self._json(200, st.snapshot(self._query()))
                 elif path == "/api/activity":
-                    etag, body = state.activity()
+                    etag, body = st.activity()
                     tag = f'"{etag}"'
                     if tag in (self.headers.get("If-None-Match") or ""):
                         self._send(HTTPStatus.NOT_MODIFIED, b"", "application/json; charset=utf-8", {"ETag": tag})
                     else:
                         self._send(200, body, "application/json; charset=utf-8", {"ETag": tag})
                 elif path == "/api/profile":
-                    self._json(200, state.repo.discover().to_dict())
+                    self._json(200, st.repo.discover().to_dict())
                 elif path == "/api/review/targets":
-                    self._json(200, state.review_targets())
+                    self._json(200, st.review_targets())
                 elif path == "/api/review":
-                    self._json(200, state.review(self._query()))
+                    self._json(200, st.review(self._query()))
                 elif path == "/api/review/notes":
-                    self._json(200, state.notes(self._query()))
+                    self._json(200, st.notes(self._query()))
                 elif path == "/api/file/changes":
-                    self._json(200, state.file_changes(self._query()))
+                    self._json(200, st.file_changes(self._query()))
+                elif path == "/api/fleet":
+                    self._json(200, st.fleet(self._query()))
                 elif path == "/api/comparisons":
-                    self._json(200, state.comparisons())
+                    self._json(200, st.comparisons())
                 elif path == "/api/path":
-                    self._json(200, state.why(self._query()))
+                    self._json(200, st.why(self._query()))
                 elif path == "/api/impact":
-                    self._json(200, state.impact(self._query()))
+                    self._json(200, st.impact(self._query()))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:
@@ -560,25 +604,26 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 self._error(413 if length > 0 else 400, "invalid or too large request body")
                 return
             try:
+                st = state.for_worktree(self._worktree())
                 body = json.loads(self.rfile.read(length) or b"{}") if length else {}
                 if not isinstance(body, dict):
                     raise ApiError(400, "expected a JSON object")
                 if path == "/api/session/start":
-                    self._json(200, state.session_start(body))
+                    self._json(200, st.session_start(body))
                 elif path == "/api/session/end":
-                    self._json(200, state.session_end())
+                    self._json(200, st.session_end())
                 elif path == "/api/session/checkpoint":
-                    self._json(200, state.checkpoint(body))
+                    self._json(200, st.checkpoint(body))
                 elif path == "/api/review/notes":
-                    self._json(200, state.save_notes(body))
+                    self._json(200, st.save_notes(body))
                 elif path == "/api/review/verdict":
-                    self._json(200, state.save_verdict(body))
+                    self._json(200, st.save_verdict(body))
                 elif path == "/api/review/reviewed":
-                    self._json(200, state.save_reviewed(body))
+                    self._json(200, st.save_reviewed(body))
                 elif path == "/api/session/scope":
-                    self._json(200, state.save_scope(body))
+                    self._json(200, st.save_scope(body))
                 elif path == "/api/plan/parse":
-                    self._json(200, state.parse_plan(body))
+                    self._json(200, st.parse_plan(body))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:

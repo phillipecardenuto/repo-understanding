@@ -16,7 +16,7 @@ how to test it.
 | Read-only Git and trees | `gitutil.py`, `sources.py`, `submodules.py` | `docs/architecture.md` ("Layers", "Git hardening") |
 | Discovery and parsers | `discovery.py`, `classify.py`, `manifests.py`, `yamlish.py`, `config.py` | `docs/configuration.md` |
 | Graph building | `analyzers/*.py`, `pipeline.py`, `graph.py`, `ids.py`, `model.py` | `docs/data-model.md`, "Analyzer interface" |
-| Comparing states | `diff.py`, `flow.py`, `activity.py`, `session.py`, `checkpoints.py` (steps of a session, timeline), `repo.py`, `filechanges.py` (one file's recent changes) | "Caching and performance" |
+| Comparing states | `diff.py`, `flow.py`, `activity.py`, `session.py`, `checkpoints.py` (steps of a session, timeline), `fleet.py` (worktrees of parallel agents, overlaps between their waves), `repo.py`, `filechanges.py` (one file's recent changes) | "Caching and performance" |
 | Graph questions | `query.py` (why A depends on B, blast radius; mirrored in `app.js`) | `docs/architecture.md` ("Web application") |
 | Persistent cache | `diskcache.py` (per-file parse results in SQLite; JSON codecs in each analyzer) | "Caching and performance", `docs/configuration.md` ("Parse cache") |
 | Agent review | `review.py` (targets, scope, signals, feedback prompt), `verdict.py` (verdict, staleness, `review --wait`, `gate`), `risk.py` (risk score), `contracts.py` (architecture contracts, baseline), `values.py` (constants and settings before → after, safety rules), `depchanges.py` (declared and locked dependency changes), `plan.py` (expected changes: plan vs actual, Markdown plan import) | `docs/review.md`, `docs/configuration.md` ("Architecture contracts") |

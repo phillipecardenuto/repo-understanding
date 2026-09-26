@@ -114,7 +114,18 @@ class Repository:
         self.state = StateStore(self.root, self.name, self.config.state_dir)
         # per-file parse results: in memory, and on disk in the state directory (diskcache; off with
         # REPOVIZ_NO_DISK_CACHE=1 or [cache] disk = false)
-        self.file_cache: Any = file_cache_for(self.state.dir, self.config)
+        self.parse_cache_dir = self._parse_cache_dir()
+        self.file_cache: Any = file_cache_for(self.parse_cache_dir, self.config)
+
+    def _parse_cache_dir(self) -> Path:
+        """Where the parse cache lives: worktrees of one repository (``git worktree add``) share the main working
+        tree's, since results are keyed by content; sessions and notes stay per worktree."""
+        if self.git is not None and (self.root / ".git").is_file():  # a linked worktree (or a submodule)
+            gitdir, common = self.git.git_dirs()
+            if gitdir and common and gitdir != common:
+                main = common.parent if common.name == ".git" else common
+                return StateStore(main, main.name, self.config.state_dir).dir
+        return self.state.dir
 
     # -- identity -------------------------------------------------------------
 

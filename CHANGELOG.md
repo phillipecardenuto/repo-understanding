@@ -6,6 +6,26 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Parallel agents: one view over Git worktrees, and overlaps between concurrent waves** ([#10](https://github.com/phillipecardenuto/repo-understanding/issues/10)).
+  - `repoviz fleet [--json] [--risk]` lists every worktree of the repository
+    (`git worktree list`). Only those that exist, pass Git's ownership check
+    and share the repository's common directory are read; the others are
+    listed with the reason. For each: branch, commits ahead of the default
+    branch, uncommitted files, active session, last activity, the verdict on
+    its wave and, with `--risk`, the wave's risk.
+  - Every pair of worktrees is compared, each from its merge base with the
+    default branch. Three new signals, also shown in each worktree's review
+    and naming the other branch: `overlap-symbol` (high, the same function,
+    method or class), `overlap-contract` (high, a signature one side changes
+    while the other side's new code calls it) and `overlap-file` (medium).
+  - Live app: a **Worktree** picker in the header switches every tab to
+    another worktree (`X-Repoviz-Worktree`; only this repository's worktrees
+    are served, anything else gets 403). `GET /api/fleet` and the Activity
+    tab's **Parallel agents** card show the fleet with a worktree × worktree
+    matrix of overlaps. Reports embed the card, read-only.
+  - Sessions, notes and verdicts stay per worktree. The parse cache is shared
+    between the worktrees of a repository.
+  - Five Flask worktrees: `repoviz fleet` in 0.4 s from a fresh process.
 - **Close the loop with the agent: verdict, `review --wait` and `repoviz gate`** ([#9](https://github.com/phillipecardenuto/repo-understanding/issues/9)).
   - A **Verdict** bar at the end of the AI Review tab records *Approve*,
     *Request changes* or *Reject*, with a summary and the reviewer. A banner

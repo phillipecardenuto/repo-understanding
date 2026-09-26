@@ -153,7 +153,8 @@ code is never run.
 Parsing a file depends on its content alone, so repoviz keeps each result in
 `<state dir>/repos/<repository>/parse-cache.sqlite`. It is reused by the next
 `repoviz` command, a restarted `repoviz serve`, and any revision that has the
-same file content.
+same file content. Linked worktrees of the repository (`git worktree add`) use
+the main working tree's cache, while their sessions and notes stay their own.
 
 ```toml
 [cache]

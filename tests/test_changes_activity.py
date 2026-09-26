@@ -581,3 +581,38 @@ def test_static_report_embeds_the_timeline_not_the_steps(make_repo) -> None:
     tl = bundle["activity"]["timeline"]
     assert tl["session"]["id"] == s.id and [c["label"] for c in tl["checkpoints"]] == ["one"]
     assert not any(t["kind"] == "checkpoint" for t in bundle["review_targets"])
+
+
+def test_worktrees_are_listed_with_their_state_and_keep_their_own_sessions(make_repo, tmp_path) -> None:
+    from repoviz.fleet import fleet, format_fleet, list_worktrees
+    from test_review import fleet_repo
+
+    main, a, b = fleet_repo(make_repo)
+    gone = main.root.parent / f"{main.root.name}-wt-gone"
+    main.git("worktree", "add", "-q", str(gone), "-b", "agent/gone")
+    import shutil
+
+    shutil.rmtree(gone)
+    repo = Repository(main.path)
+    wts, notes = list_worktrees(repo.git)
+    assert [(w.name, w.branch, w.current) for w in wts] == [(main.root.name, "main", True),
+                                                            (a.root.name, "agent/a", False),
+                                                            (b.root.name, "agent/b", False)]
+    assert notes and notes[0]["path"].endswith("-wt-gone") and "gone" in notes[0]["reason"]
+    # Each worktree keeps its own sessions and notes; they share one parse cache.
+    ra, rb = Repository(a.path), Repository(b.path)
+    ra.state.start_session(ra.git, ra.root, "agent a")
+    assert ra.state.dir != rb.state.dir != repo.state.dir
+    assert rb.current_session() is None and repo.current_session() is None
+    assert ra.parse_cache_dir == rb.parse_cache_dir == repo.parse_cache_dir == repo.state.dir
+    res = fleet(repo)
+    rows = {r["branch"]: r for r in res["worktrees"]}
+    assert (rows["agent/a"]["ahead"], rows["agent/a"]["dirty"], rows["agent/a"]["session"]["label"]) == (1, 0, "agent a")
+    assert (rows["agent/b"]["ahead"], rows["agent/b"]["dirty"], rows["agent/b"]["session"]) == (0, 3, None)
+    assert rows["main"]["changed"] == 0 and rows["agent/a"]["wave"] == "session" and rows["agent/b"]["wave"] == "all"
+    assert all(r["last_activity"] for r in res["worktrees"])
+    [pair] = res["overlaps"]
+    assert pair["counts"] == {"overlap-symbol": 1, "overlap-contract": 1, "overlap-file": 1}
+    text = format_fleet(res)
+    assert "same symbol: search in app/search.py" in text and "calls it at app/api.py:5" in text
+    assert "Not listed:" in text and "-wt-gone" in text

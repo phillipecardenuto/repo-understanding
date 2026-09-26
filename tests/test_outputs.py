@@ -847,3 +847,64 @@ def test_verdict_api_review_wait_and_gate(make_repo, monkeypatch, tmp_path, caps
     r.state.save_server({"url": "http://127.0.0.1:9/", "pid": 2 ** 22 + 12345, "root": str(r.root)})
     assert find_running(r) is None
     assert main(["review", "-C", repo.path, "--wait", "--format", "markdown"]) == 1
+
+
+# --------------------------------------------------------------------------- parallel agents: worktrees (#10)
+
+
+def test_fleet_api_worktree_switch_and_cli(make_repo, capsys) -> None:
+    from urllib.parse import quote
+
+    from test_review import fleet_repo
+
+    main, a, b = fleet_repo(make_repo)
+    r = Repository(main.path)
+    srv = create_server(r, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, _ = request(srv, "GET", "/api/fleet", headers={})
+        assert status == 403  # the X-Repoviz header is required
+        status, _, body = request(srv, "GET", "/api/fleet")
+        f = json.loads(body)
+        assert status == 200 and [w["branch"] for w in f["worktrees"]] == ["main", "agent/a", "agent/b"]
+        assert f["overlaps"][0]["counts"]["overlap-symbol"] == 1
+        # The page's worktree switcher: every call then reads that worktree.
+        wt = {"X-Repoviz": "1", "X-Repoviz-Worktree": quote(b.path)}
+        status, _, body = request(srv, "GET", "/api/bundle", headers=wt)
+        bundle = json.loads(body)
+        assert status == 200 and [w["current"] for w in bundle["worktrees"]] == [False, False, True]
+        status, _, body = request(srv, "GET", "/api/review?id=all", headers=wt)
+        kinds = {x["kind"] for x in json.loads(body)["findings"]}
+        assert {"overlap-symbol", "overlap-contract", "overlap-file"} <= kinds
+        # the cached review follows the other worktrees: a new overlap appears when agent a edits api() too
+        before = json.loads(body)["others_key"]
+        a.write({"app/api.py": FLEET_API_A})
+        status, _, body = request(srv, "GET", "/api/review?id=all", headers=wt)
+        rev = json.loads(body)
+        assert rev["others_key"] != before
+        assert any(x["kind"] == "overlap-symbol" and x["path"] == "app/api.py" for x in rev["findings"])
+        status, _, body = request(srv, "POST", "/api/session/start", {"label": "agent b"}, headers=wt)
+        assert status == 200 and Repository(b.path).current_session().label == "agent b"
+        assert r.current_session() is None  # the other worktrees' sessions are untouched
+        # Anything but this repository's worktrees is refused, whatever the path looks like.
+        for bad in ("/etc", str(main.root.parent), f"{b.path}/..", make_repo({"x.py": "X = 1\n"}).path):
+            status, _, body = request(srv, "GET", "/api/review?id=all", headers={"X-Repoviz": "1", "X-Repoviz-Worktree": quote(bad)})
+            assert status == 403 and b"not a worktree of this repository" in body, bad
+        status, _, _ = request(srv, "GET", "/api/fleet", headers={"X-Repoviz-Worktree": quote(b.path)})
+        assert status == 403  # still needs X-Repoviz
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert main_cli(["fleet", "-C", a.path, "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [(w["branch"], w["current"]) for w in out["worktrees"]] == [("main", False), ("agent/a", True), ("agent/b", False)]
+    assert main_cli(["fleet", "-C", main.path]) == 0
+    assert "agent/a" in capsys.readouterr().out
+    # a report embeds the fleet (switching needs the live app)
+    bundle = build_bundle(Repository(main.path))
+    assert len(bundle["worktrees"]) == 3 and bundle["fleet"]["overlaps"]
+    assert "fleet" not in build_bundle(Repository(main.path), mode="live", include_reviews=False, embed_snapshot=False)
+
+
+main_cli = main
+FLEET_API_A = "from app.search import search\n\n\ndef api():\n    return search(\"y\")\n"

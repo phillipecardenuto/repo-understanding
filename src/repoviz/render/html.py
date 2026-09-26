@@ -16,6 +16,7 @@ import dataclasses
 import gzip
 import html
 import json
+import logging
 import os
 import re
 from importlib import resources
@@ -28,6 +29,8 @@ from ..pipeline import utcnow
 from ..repo import Comparison, Repository
 from .mermaid import theme
 from .views import breakdown
+
+log = logging.getLogger("repoviz.report")
 
 COMPRESS_THRESHOLD = 1_500_000
 
@@ -283,11 +286,29 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
                    "external_dependencies": repo.config.external_dependencies},
         "errors": errors,
     }
+    bundle.update(_worktrees(repo, mode))
     if embed_snapshot:
         snap = compact_snapshot(snapshot.to_dict())
         snap["diagnostics"] = snap["diagnostics"] + errors
         bundle["snapshot"] = snap
     return bundle
+
+
+def _worktrees(repo: Repository, mode: str) -> dict[str, Any]:
+    """The repository's worktrees when there are several (parallel agents): the list for the live app's switcher,
+    and in a report the whole fleet (each worktree's state and the overlaps between them)."""
+    if repo.git is None:
+        return {}
+    from ..fleet import fleet, list_worktrees
+
+    try:
+        wts, _ = list_worktrees(repo.git)
+        if len(wts) < 2:
+            return {}
+        return {"worktrees": [w.to_dict() for w in wts], **({"fleet": fleet(repo)} if mode == "static" else {})}
+    except Exception as exc:  # never break the page over the fleet
+        log.warning("worktrees: %s", exc)
+        return {}
 
 
 def _current_session(repo: Repository) -> dict[str, Any] | None:

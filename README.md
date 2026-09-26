@@ -23,6 +23,7 @@ implementation waves, and for understanding any codebase. It answers questions l
 | What are the key changes in a module, and do they look right? | **AI Review** → change cards (symbols, signatures, values, diff) |
 | What should I tell the agent to fix, complete or revert? | **AI Review** → notes → feedback prompt, `repoviz review --format prompt` |
 | Has a human approved this wave? May the agent push? | **AI Review** → verdict, `repoviz review --wait`, `repoviz gate` |
+| Several agents in parallel worktrees: what is each doing, and where do they clash? | **Activity & Flow** → Parallel agents, header **Worktree** picker, `repoviz fleet` |
 | What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
 | What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
 | Why does A depend on B? Which import chain, in which files? | **Dependencies** → right-click a link (or `w`), `repoviz why A B` |
@@ -64,6 +65,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 |---|---|
 | `repoviz review [TARGET] [--format text\|markdown\|prompt\|json\|sarif\|github\|pr-comment] [--fail-on …] [--commit SHA] [--by-commit] [--from-report FILE]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. `sarif`, `github` (inline annotations) and `pr-comment` are for CI; `--from-report` re-renders a saved JSON report without analysing again. |
 | `repoviz review --wait [--open] [--timeout 30m] [--format json]` | For agents: block until the reviewer submits a verdict in the live app, then print it with the notes and the feedback prompt. Exit 0 approve, 2 request changes, 3 reject, 4 timeout. |
+| `repoviz fleet [--json] [--risk]` | Parallel agents: every Git worktree of the repository (branch, commits ahead, uncommitted files, session, verdict, optionally risk) and where their work overlaps: the same symbol, a changed signature the other one calls, the same file. |
 | `repoviz gate [TARGET] [--require approve\|any] [--require-all-reviewed] [--max-open SEVERITY] [--json] [--hook-input]` | Before a push: exit 3 unless a fresh verdict approves the work (and, optionally, every file is marked reviewed and no signal is left without a note). `--hook-input` makes it a Claude Code `PreToolUse` hook that blocks `git push`. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
@@ -416,6 +418,34 @@ can start or restart sessions. Session data lives in `~/.cache/repoviz`
 Parse results are kept there too, so the next command, or a restarted
 `repoviz serve`, re-parses only files whose content changed. See
 [docs/configuration.md](docs/configuration.md#parse-cache).
+
+### Supervising several agents
+
+Agents that run in parallel usually get a `git worktree` each, on their own
+branch. repoviz reads all the worktrees of the repository it was started in, and
+never creates or changes them.
+
+```bash
+repoviz fleet            # each worktree: branch, commits ahead, uncommitted files, session, verdict; overlaps
+repoviz fleet --risk     # also each wave's risk (slower: it reviews every worktree)
+```
+
+- **Overlaps.** Each worktree's work is measured from its merge base with the
+  default branch, and every pair is compared:
+  - two waves that change the same function are `overlap-symbol` (high);
+  - one that changes a signature the other one's new code calls is
+    `overlap-contract` (high);
+  - the same file otherwise is `overlap-file` (medium).
+
+  Each worktree's AI Review shows these signals too, naming the other branch.
+- **In the live app**, the header's **Worktree** picker switches every tab to
+  another worktree. The Activity tab's **Parallel agents** card shows the fleet
+  and a worktree × worktree matrix of overlaps.
+- **Separate state.** Sessions, notes and verdicts stay per worktree; the parse
+  cache is shared.
+- **Speed.** Five worktrees of a Flask-sized repository take about 0.4 s.
+
+See [docs/review.md](docs/review.md#parallel-agents-worktrees).
 
 ### Let the agent ask first: the MCP server
 

@@ -218,6 +218,71 @@ so the app, the listed target and the CLI share them. Revisions are resolved wit
 `git rev-parse --end-of-options`, so a name can never act as an option, and
 nothing is checked out.
 
+## Parallel agents (worktrees)
+
+When several agents work at once, each in its own `git worktree` on its own
+branch, repoviz shows all of them:
+
+```bash
+git worktree add ../wt-search -b agent/search      # one worktree per agent (repoviz never creates them)
+repoviz fleet                                      # every worktree, and where their work overlaps
+repoviz fleet --json                               # the same, machine-readable
+repoviz fleet --risk                               # also each wave's risk (reviews every worktree: slower)
+```
+
+```text
+3 worktree(s); default branch main
+
+* shop       main              ahead   0  uncommitted   0  active 2026-09-26T14:53
+  wt-a       agent/a           ahead   1  uncommitted   0  session “agent a” since 2026-09-26T14:55  verdict: approved
+  wt-b       agent/b           ahead   0  uncommitted   3  active 2026-09-26T14:53
+
+Overlaps between worktrees (each from its merge base with the default branch):
+  wt-a ↔ wt-b: 1 symbol, 1 contract, 1 file
+    [high] same symbol: search in app/search.py (wt-a line 1, wt-b line 1)
+    [high] wt-a changes the signature of search (app/search.py:1) (q, limit=10) → (q, *, limit=10, offset=0); wt-b calls it at app/api.py:5
+    [medium] same file: README.md
+```
+
+- **Which worktrees.** `git worktree list`, keeping only worktrees that still
+  exist, pass Git's ownership check and belong to this repository (same
+  `git rev-parse --git-common-dir`). The others are listed under "Not listed"
+  with the reason.
+- **Each worktree's work** is everything it changed since its merge base with
+  the default branch, committed or not. The fleet shows, per worktree:
+  - its branch and the commits ahead of the default branch;
+  - the uncommitted files;
+  - the active session, and the last activity (the latest commit or edit);
+  - the verdict of its wave (session, else branch, else uncommitted changes),
+    and whether it is stale;
+  - with `--risk`, the wave's risk.
+- **Overlaps** compare every pair of worktrees:
+  - the same definition changed on both sides is `overlap-symbol`. Definitions
+    are parsed as text: Python, JavaScript and TypeScript. A class counts only
+    when its own code changed, not when two agents edit different methods;
+  - a signature changed on one side while the other side's new lines call it
+    is `overlap-contract`;
+  - otherwise, the same file is `overlap-file`.
+- **In a review**, the same three signals appear on the files this wave shares
+  with another worktree, naming it ("also changed by worktree wt-b (branch
+  agent/b)"). They are checked for reviews whose target is the working tree
+  (session, uncommitted changes, branch), not for past commits. They can be
+  disabled in `review.disabled_checks`.
+- **Sessions, notes and verdicts are per worktree**: the state directory is
+  keyed by the worktree's path. The parse cache is shared, since results are
+  keyed by content, so a worktree opened for the first time is fast.
+
+In the live app, the header shows **N worktrees** and a **Worktree** picker.
+Every tab then reads the chosen worktree, for this browser tab. The server
+only opens this repository's worktrees and refuses any other path. The
+Activity tab's **Parallel agents** card lists the worktrees (click one to
+switch) and shows the overlaps as a worktree × worktree matrix. A cell shows
+what two waves share, with an icon and words; click it for the list. A report
+embeds the same card, read-only.
+
+On a Flask-sized repository with five worktrees, `repoviz fleet` takes about
+0.4 s in a fresh process.
+
 ## Scope
 
 The scope says which paths the agent was **allowed** to change and which it
@@ -314,6 +379,9 @@ Credential-like values are always redacted in excerpts and diffs.
 | `submodule-added` / `submodule-removed` | medium | architecture | a Git submodule was added or removed |
 | `submodule-updated` | medium | architecture | a submodule now points to another commit (commits listed when available) |
 | `submodule-uncommitted` | medium | correctness | files changed inside a submodule are not committed there, so the superproject cannot record them |
+| `overlap-symbol` | high | coordination | another worktree changes the same function, method or class (Python, JavaScript, TypeScript). Example: `Same code changed in another worktree — search is also changed by worktree wt-a (branch agent/a)` at `app/search.py:1`. See [Parallel agents](#parallel-agents-worktrees) |
+| `overlap-contract` | high | coordination | one worktree changes a function's signature while another one's new code calls it; reported on both sides. Example: `Calls a function another worktree is changing — worktree wt-a (branch agent/a) changes the signature of search (app/search.py) from (q, limit=10) to (q, *, limit=10, offset=0), and this wave calls it here` at `app/api.py:5` |
+| `overlap-file` | medium | coordination | another worktree changes the same file, but not the same definition (or in a language repoviz does not parse for definitions) |
 
 ### Values: constants and settings
 

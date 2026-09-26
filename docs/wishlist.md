@@ -51,7 +51,7 @@ Labels:
 | [#7](https://github.com/phillipecardenuto/repo-understanding/issues/7) | Checkpoints and an edit timeline inside a wave (agent-hook recipe) · **✓ done** | P2 | M |
 | [#8](https://github.com/phillipecardenuto/repo-understanding/issues/8) | Expected changes: compare the agent's plan with what it changed · **✓ done** | P2 | M |
 | [#9](https://github.com/phillipecardenuto/repo-understanding/issues/9) | Blocking review, structured verdict and a review-complete gate · **✓ done** | P2 | M |
-| [#10](https://github.com/phillipecardenuto/repo-understanding/issues/10) | Parallel agents: Git worktrees and overlap between concurrent waves | P2 | L |
+| [#10](https://github.com/phillipecardenuto/repo-understanding/issues/10) | Parallel agents: Git worktrees and overlap between concurrent waves · **✓ done** | P2 | L |
 | [#11](https://github.com/phillipecardenuto/repo-understanding/issues/11) | Third-party dependency changes (manifests, lock files) with supply-chain signals · **✓ done** | P2 | M |
 | [#12](https://github.com/phillipecardenuto/repo-understanding/issues/12) | Read existing coverage reports to flag changed lines no test runs | P2 | M |
 | [#13](https://github.com/phillipecardenuto/repo-understanding/issues/13) | Cross-service contract changes: HTTP routes, background tasks, env vars | P2 | L |
@@ -121,8 +121,8 @@ Labels:
    after), #25 (`sys.path` imports, inferred projects) and #11 (dependency
    changes), done.
 6. **Next:** the other P2 items in number order: #7 (checkpoints), #8
-   (plan vs actual) and #9 (verdict and gate), done; then #10, #12, #13 and
-   #30, then the P3 items.
+   (plan vs actual), #9 (verdict and gate) and #10 (parallel agents), done;
+   then #12, #13 and #30, then the P3 items.
 
 ## Dependencies between items
 

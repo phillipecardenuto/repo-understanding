@@ -1743,3 +1743,102 @@ def test_wait_polls_for_a_newer_verdict_and_times_out(make_repo) -> None:
     assert verdict.result(None, target, fingerprint_now=None, waited=True)["exit_code"] == 4
     with pytest.raises(ValueError):
         verdict.record(r, target, "maybe")
+
+
+# --------------------------------------------------------------------------- parallel agents: worktrees (#10)
+
+FLEET_APP = {
+    "app/__init__.py": "",
+    "app/search.py": "def search(q, limit=10):\n    return [q][:limit]\n\n\ndef other():\n    return 1\n",
+    "app/api.py": "from app.search import search\n\n\ndef api():\n    return search(\"x\")\n",
+    "README.md": "# App\n",
+}
+
+
+def fleet_repo(make_repo, extra: dict | None = None):
+    """A repository with two worktrees whose agents clash: wt-a changes search()'s signature (committed), wt-b
+    changes its body and calls it the old way (uncommitted); both edit the README."""
+    from conftest import RepoFactory
+
+    main = make_repo({**FLEET_APP, **(extra or {})})
+    wts = []
+    for name in ("a", "b"):
+        path = main.root.parent / f"{main.root.name}-wt-{name}"
+        main.git("worktree", "add", "-q", str(path), "-b", f"agent/{name}")
+        wts.append(RepoFactory(path))
+    a, b = wts
+    a.write({"app/search.py": FLEET_APP["app/search.py"].replace("(q, limit=10)", "(q, *, limit=10, offset=0)"),
+             "README.md": "# App\n\nSearch takes an offset.\n"})
+    a.commit("search: keyword-only limit, offset")
+    b.write({"app/search.py": FLEET_APP["app/search.py"].replace("[q][:limit]", "[q, q][:limit]"),
+             "app/api.py": FLEET_APP["app/api.py"].replace('search("x")', 'search("x", 5)'),
+             "README.md": "# App\n\nThe API returns five results.\n"})
+    return main, a, b
+
+
+def test_overlap_signals_name_the_other_worktree(make_repo) -> None:
+    _main, a, b = fleet_repo(make_repo)
+    rb = Repository(b.path)
+    report = build_review(rb, resolve_target(rb, "all"))
+    got = {f["kind"]: f for f in report["findings"] if f["kind"].startswith("overlap")}
+    assert set(got) == {"overlap-file", "overlap-symbol", "overlap-contract"}
+    assert got["overlap-symbol"]["severity"] == "high" and got["overlap-symbol"]["path"] == "app/search.py"
+    assert "branch agent/a" in got["overlap-symbol"]["detail"] and got["overlap-symbol"]["category"] == "coordination"
+    assert got["overlap-file"]["path"] == "README.md" and got["overlap-file"]["severity"] == "medium"
+    c = got["overlap-contract"]
+    assert (c["title"], c["path"], c["line"]) == ("Calls a function another worktree is changing", "app/api.py", 5)
+    assert "search (app/search.py: (q, limit=10) → (q, *, limit=10, offset=0))" in c["detail"]
+    # the other side: its branch since it left main (the work is committed)
+    ra = Repository(a.path)
+    report = build_review(ra, resolve_target(ra, "branch"))
+    got = {f["kind"]: f for f in report["findings"] if f["kind"].startswith("overlap")}
+    assert set(got) == {"overlap-file", "overlap-symbol", "overlap-contract"}
+    assert "branch agent/b" in got["overlap-symbol"]["detail"]
+    assert got["overlap-contract"]["title"] == "Signature changed while another worktree calls it"
+    assert "app/api.py:5" in got["overlap-contract"]["detail"] and got["overlap-contract"]["path"] == "app/search.py"
+    # a past commit is not concurrent work
+    assert not [f for f in build_review(ra, resolve_target(ra, "last-commit"))["findings"] if f["kind"].startswith("overlap")]
+
+
+def test_overlap_signals_can_be_disabled_and_need_other_work(make_repo) -> None:
+    main, a, b = fleet_repo(make_repo, {".repoviz.toml": '[review]\ndisabled_checks = ["overlap-file"]\n'})
+    rb = Repository(b.path)
+    kinds = {f["kind"] for f in build_review(rb, resolve_target(rb, "all"))["findings"]}
+    assert "overlap-file" not in kinds and {"overlap-symbol", "overlap-contract"} <= kinds
+    # the main worktree has no work of its own: nothing overlaps with it
+    main.write({"notes.txt": "unrelated\n"})
+    rm = Repository(main.path)
+    assert not [f for f in build_review(rm, resolve_target(rm, "all"))["findings"] if f["kind"].startswith("overlap")]
+
+
+def test_signature_changes_in_words() -> None:
+    from repoviz.fleet import short_signatures, signature_delta
+
+    assert signature_delta("(q, limit=10)", "(q, *, limit=10, offset=0)") == "added * (keyword-only), offset"
+    assert signature_delta("(a, b)", "(b, a)") == "parameters reordered"
+    assert signature_delta("(a: int)", "(a: str)") == "annotations or defaults changed"
+    assert signature_delta("(a, **kw) -> dict[str, int]", "(a)") == "removed **kw"
+    long = {"before": "(" + ", ".join(f"p{i}: int = {i}" for i in range(12)) + ")"}
+    long["after"] = long["before"].replace("(", "(user: str, ", 1)
+    assert short_signatures(long) == "added user" and short_signatures({"before": "(a)", "after": "(a, b)"}) == "(a) → (a, b)"
+
+
+def test_symbol_overlap_ignores_different_functions_of_one_class(make_repo) -> None:
+    from repoviz.fleet import compare, default_of, list_worktrees, side_of
+
+    src = "class Store:\n    def get(self, k):\n        return k\n\n    def put(self, k, v):\n        return v\n"
+    main, a, b = fleet_repo(make_repo, {"app/store.py": src})
+    a.write({"app/store.py": src.replace("return k", "return k.lower()")}).commit("get")
+    b.write({"app/store.py": src.replace("return v", "return v or None")})
+    repo = Repository(main.path)
+    wts, notes = list_worktrees(repo.git)
+    default, sha = default_of(repo)
+    sa, sb = (side_of(w, default, sha) for w in wts[1:])
+    store = [o for o in compare(sa, sb) if o["path"] == "app/store.py"]
+    assert [o["kind"] for o in store] == ["overlap-file"]  # get() and put(): the class is not "the same code"
+    assert notes == []
+    # both deleting the same file merges cleanly: no "same code" for each of its definitions
+    for x in (a, b):
+        x.delete("app/store.py")
+    sa, sb = (side_of(w, default, sha) for w in wts[1:])
+    assert [o["kind"] for o in compare(sa, sb) if o["path"] == "app/store.py"] == ["overlap-file"]
