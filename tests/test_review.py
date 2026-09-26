@@ -1842,3 +1842,155 @@ def test_symbol_overlap_ignores_different_functions_of_one_class(make_repo) -> N
         x.delete("app/store.py")
     sa, sb = (side_of(w, default, sha) for w in wts[1:])
     assert [o["kind"] for o in compare(sa, sb) if o["path"] == "app/store.py"] == ["overlap-file"]
+
+
+# --------------------------------------------------------------------------- coverage reports (#12)
+
+COV_APP = {
+    "app/__init__.py": "",
+    "app/calc.py": "def add(a, b):\n    return a + b\n",
+    "app/plugin.py": "def hook():\n    return 1\n",  # loaded by name at run time: no test imports it
+    "tests/test_calc.py": "from app.calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+    ".gitignore": "coverage.xml\nlcov.info\ncover.out\ncoverage/\nout/\n",
+}
+COV_DIV = "def add(a, b):\n    return a + b\n\n\ndef div(a, b):\n    if b == 0:\n        raise ZeroDivisionError(\"b\")\n    return a / b\n"
+
+
+def cobertura(files: dict[str, dict[int, int]], sources: tuple[str, ...] = ("/home/ci/project",)) -> str:
+    classes = "".join(f'<class name="{n}" filename="{n}"><lines>'
+                      + "".join(f'<line number="{k}" hits="{v}"/>' for k, v in lines.items()) + "</lines></class>"
+                      for n, lines in files.items())
+    src = "".join(f"<source>{s}</source>" for s in sources)
+    return f'<?xml version="1.0" ?><coverage version="7.4"><sources>{src}</sources><packages><package name="app">' \
+           f"<classes>{classes}</classes></package></packages></coverage>"
+
+
+def _report(repo, name: str, text: str, age: float) -> None:
+    import os
+    import time
+
+    p = Path(repo.path, name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+    t = time.time() + age
+    os.utime(p, (t, t))
+
+
+def _cov_wave(make_repo, extra: dict | None = None):
+    repo = make_repo({**COV_APP, **(extra or {})})
+    repo.write({"app/calc.py": COV_DIV, "app/plugin.py": "def hook():\n    return 2\n"})
+    return repo
+
+
+def test_fresh_coverage_flags_changed_lines_no_test_runs(make_repo) -> None:
+    repo = _cov_wave(make_repo)
+    # calc.py by its repository path; plugin.py as an absolute path from the CI machine (mapped by suffix)
+    _report(repo, "coverage.xml", cobertura({"app/calc.py": {1: 1, 2: 1, 5: 1, 6: 1, 7: 0, 8: 1},
+                                             "/home/ci/project/app/plugin.py": {1: 1, 2: 1}}), +100)
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    files = {f["path"]: f for f in report["files"]}
+    calc = files["app/calc.py"]["coverage"]
+    assert (calc["fresh"], calc["executable"], calc["covered"], calc["uncovered_lines"]) == (True, 4, 3, [7])
+    assert files["app/plugin.py"]["coverage"]["covered"] == 1
+    got = [f for f in report["findings"] if f["kind"] == "changed-lines-uncovered"]
+    assert [(f["path"], f["line"], f["severity"]) for f in got] == [("app/calc.py", 7, "medium")]
+    assert "1 of 4 changed executable line(s)" in got[0]["detail"] and "coverage.xml" in got[0]["detail"]
+    # measured beats the static guess: nothing imports plugin.py, but the report says its new line ran
+    assert not [f for f in report["findings"] if f["kind"] == "untested-change" and f["path"] == "app/plugin.py"]
+    cov = report["coverage"]
+    assert (cov["executable"], cov["covered"], cov["percent"], cov["stale_count"]) == (5, 4, 80, 0)
+    assert cov["reports"][0]["format"] == "cobertura"
+    factors = [x["text"] for x in files["app/calc.py"]["risk"]["factors"]]
+    assert "1 of 4 changed lines not run by any test (coverage.xml)" in factors
+    from repoviz.ci import pr_comment
+    from repoviz.cli import format_review_markdown
+    from repoviz.review import format_review_text
+
+    line = "4 of 5 changed executable lines run by a test (80%, coverage.xml)"
+    assert f"coverage: {line}" in format_review_text(report)
+    assert f"**Coverage:** {line}" in format_review_markdown(report) and f"**Coverage:** {line}" in pr_comment(report)
+
+
+def test_stale_coverage_is_not_used_for_changed_lines(make_repo) -> None:
+    repo = _cov_wave(make_repo)
+    _report(repo, "coverage.xml", cobertura({"app/calc.py": {1: 1, 2: 1, 5: 0}, "app/plugin.py": {1: 1, 2: 1}}), -100)
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    kinds = [f["kind"] for f in report["findings"]]
+    assert "changed-lines-uncovered" not in kinds and kinds.count("coverage-stale") == 1
+    stale = next(f for f in report["findings"] if f["kind"] == "coverage-stale")
+    assert stale["severity"] == "info" and "Re-run your test suite with coverage" in stale["suggestion"]
+    assert all(f["coverage"]["fresh"] is False for f in report["files"] if f.get("coverage"))
+    assert report["coverage"]["stale_count"] == 2 and report["coverage"]["percent"] is None
+    from repoviz.review import coverage_line
+
+    assert coverage_line(report) == "2 changed file(s) newer than the report: unknown"
+    assert any(f["kind"] == "untested-change" and f["path"] == "app/plugin.py" for f in report["findings"])
+
+
+def test_coverage_formats_paths_and_settings(make_repo, tmp_path) -> None:
+    import json
+
+    import pytest
+
+    from repoviz import coverage
+
+    repo = _cov_wave(make_repo, {"a/utils.py": "X = 1\n", "b/utils.py": "Y = 1\n"})
+    out = tmp_path
+    (out / "lcov.info").write_text("TN:\nSF:/ci/app/calc.py\nDA:5,1\nDA:6,0\nend_of_record\nSF:utils.py\nDA:1,1\nend_of_record\n")
+    (out / "coverage-final.json").write_text(json.dumps({"/ci/app/calc.py": {
+        "path": "/ci/app/calc.py", "statementMap": {"0": {"start": {"line": 6}, "end": {"line": 6}},
+                                                   "1": {"start": {"line": 7}, "end": {"line": 7}}}, "s": {"0": 2, "1": 0}}}))
+    (out / "cover.out").write_text("mode: set\nexample.com/m/app/calc.go:5.2,7.3 2 1\nexample.com/m/app/calc.go:8.1,8.9 1 0\n")
+    (out / "jacoco.xml").write_text('<?xml version="1.0"?><!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">'
+                                    '<report name="x"><package name="com/acme"><sourcefile name="Calc.java">'
+                                    '<line nr="3" mi="0" ci="2"/><line nr="4" mi="1" ci="0"/></sourcefile></package></report>')
+    lcov = coverage.parse(out / "lcov.info", "lcov.info", 10**6)
+    assert lcov.format == "lcov" and lcov.files["/ci/app/calc.py"] == {5: True, 6: False}
+    ist = coverage.parse(out / "coverage-final.json", "c.json", 10**6)
+    assert ist.format == "istanbul" and ist.files["/ci/app/calc.py"] == {6: True, 7: False}
+    go = coverage.parse(out / "cover.out", "cover.out", 10**6)
+    assert go.format == "go" and go.files["example.com/m/app/calc.go"] == {5: True, 6: True, 7: True, 8: False}
+    jac = coverage.parse(out / "jacoco.xml", "jacoco.xml", 10**6)
+    assert jac.format == "jacoco" and jac.files["com/acme/Calc.java"] == {3: True, 4: False}
+    mapped, ambiguous = coverage.map_paths(lcov, ["app/calc.py", "a/utils.py", "b/utils.py"], Path(repo.path))
+    assert list(mapped) == ["app/calc.py"] and ambiguous == ["utils.py"]  # two files end with utils.py: skipped
+    assert coverage.ranges([3, 7, 8, 9, 12]) == "3, 7-9, 12"
+    # A configured path (and only files inside the repository for relative paths); the threshold.
+    _report(repo, "out/cov.info", "SF:app/calc.py\nDA:5,1\nDA:6,1\nDA:7,0\nDA:8,1\nend_of_record\n", +100)
+    Path(repo.path, ".repoviz.toml").write_text('[review.coverage]\npaths = ["out/cov.info", "../outside.info"]\n'
+                                                "min_uncovered = 2\n")
+    (Path(repo.path).parent / "outside.info").write_text("SF:app/calc.py\nDA:5,0\nend_of_record\n")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    assert [x["path"] for x in report["coverage"]["reports"]] == ["out/cov.info"]
+    assert not [f for f in report["findings"] if f["kind"] == "changed-lines-uncovered"]  # 1 line < min_uncovered
+    Path(repo.path, ".repoviz.toml").write_text("[review.coverage]\nenabled = false\n")
+    r = Repository(repo.path)
+    assert build_review(r, resolve_target(r, "all"))["coverage"] is None
+    from repoviz.config import Config, ConfigError, apply_mapping
+
+    for bad in ({"min_uncovered": 0}, {"max_mb": "big"}, {"min_uncovered": True}):
+        with pytest.raises(ConfigError):
+            apply_mapping(Config(), {"review": {"coverage": bad}}, "t")
+    with pytest.raises(ConfigError):
+        apply_mapping(Config(), {"review": {"coverage": ["coverage.xml"]}}, "t")
+    cfg = apply_mapping(Config(), {"review": {"coverage": {"max_mb": 5, "bogus": 1}}}, "t")
+    assert cfg.review_coverage_max_mb == 5 and any("review.coverage.bogus" in x for x in cfg.sources)
+
+
+def test_coverage_of_a_commit_needs_the_same_content_on_disk(make_repo) -> None:
+    import os
+
+    repo = _cov_wave(make_repo)
+    repo.commit("div")
+    _report(repo, "coverage.xml", cobertura({"app/calc.py": {5: 1, 6: 1, 7: 0, 8: 1}}), +100)
+    r = Repository(repo.path)
+    calc = next(f for f in build_review(r, resolve_target(r, "last-commit"))["files"] if f["path"] == "app/calc.py")
+    assert calc["coverage"]["fresh"] and calc["coverage"]["uncovered_lines"] == [7]
+    p = Path(repo.path, "app/calc.py")
+    p.write_text(COV_DIV + "\n# edited after the report\n")
+    os.utime(p, (1, 1))  # older than the report, but not the committed content: the report cannot describe it
+    calc = next(f for f in build_review(r, resolve_target(r, "last-commit"))["files"] if f["path"] == "app/calc.py")
+    assert calc["coverage"]["fresh"] is False

@@ -261,7 +261,14 @@ class RiskContext:
         if code and entry.get("status") != REMOVED and entry.get("language") is not None \
                 and any(s.get("status") in (ADDED, MODIFIED) for s in entry.get("symbols") or []):
             tests = set(entry.get("tests_affected") or []) | reached_tests
-            if not tests:
+            measured = entry.get("coverage") or {}
+            if measured.get("fresh") and measured.get("executable"):  # a coverage report beats the static guess
+                missing = measured["executable"] - measured["covered"]
+                if missing:
+                    self._factor(factors, "tests", missing / measured["executable"],
+                                 f"{missing} of {measured['executable']} changed lines not run by any test "
+                                 f"({measured['report']})")
+            elif not tests:
                 self._factor(factors, "tests", 1.0, "no test imports or calls this code")
             elif not tests & self.changed_tests:
                 verb = "covers" if len(tests) == 1 else "cover"

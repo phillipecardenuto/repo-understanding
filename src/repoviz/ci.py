@@ -200,6 +200,10 @@ def pr_comment(report: dict[str, Any], *, link_base: str | None = None, max_char
                     f"{_link(risk['path'], None, link_base)}")
     if s.get("protected") or s.get("out_of_scope"):
         head.append(f"\n🔒 {s['protected']} protected · ⚠ {s['out_of_scope']} out-of-scope file(s)")
+    from .review import coverage_line
+
+    if coverage_line(report):
+        head.append(f"\n**Coverage:** {coverage_line(report)}")
     diagram, hidden = review_map(report, max_nodes)
     body = ["", "#### Where the agent went", "", "```mermaid", diagram, "```"]
     if hidden:

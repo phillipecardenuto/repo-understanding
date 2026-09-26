@@ -136,3 +136,34 @@ def test_parse_cache_entries_are_never_unpickled_or_run(make_repo, tmp_path) -> 
     assert again.file_cache.stats["misses"] >= 1 and any(n.qualified_name == "m.f" for n in snap.symbols)
     assert again.file_cache.disk.get(("python", "0", "planted"), lambda d: d)[1]["error"].startswith("__import__")
     assert not marker.exists()
+
+
+def test_coverage_reports_are_parsed_safely_and_bounded(make_repo) -> None:
+    from repoviz import coverage
+    from repoviz.review import build_review, resolve_target
+    from repoviz.repo import Repository
+    from test_review import COV_APP, COV_DIV
+
+    repo = make_repo(COV_APP)
+    repo.write({"app/calc.py": COV_DIV})
+    bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;">'
+            '<!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">]><coverage><packages><package><classes>'
+            '<class filename="app/calc.py"><lines><line number="5" hits="&lol2;"/></lines></class>'
+            "</classes></package></packages></coverage>")
+    Path(repo.path, "coverage.xml").write_text(bomb)
+    t = time.time() + 100
+    os.utime(Path(repo.path, "coverage.xml"), (t, t))
+    report = coverage.parse(Path(repo.path, "coverage.xml"), "coverage.xml", 10**6)
+    assert report.files == {} and "entity declarations are not supported" in (report.error or "")
+    r = Repository(repo.path)
+    rev = build_review(r, resolve_target(r, "all"))  # the review goes on, and says why the report was not used
+    assert "entity declarations" in rev["coverage"]["reports"][0]["error"]
+    assert not [f for f in rev["findings"] if f["kind"] == "changed-lines-uncovered"]
+    # too large: ignored, with a note (never read)
+    Path(repo.path, "coverage.xml").write_text("SF:app/calc.py\n" + "DA:1,1\n" * 200_000)
+    big = coverage.parse(Path(repo.path, "coverage.xml"), "coverage.xml", 1_000_000)
+    assert big.files == {} and "larger than 1 MB" in (big.error or "")
+    # a symbolic link is not followed
+    Path(repo.path, "coverage.xml").unlink()
+    Path(repo.path, "lcov.info").symlink_to("/etc/hostname")
+    assert coverage.find_reports(Path(repo.path), None) == []

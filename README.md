@@ -385,7 +385,9 @@ Review signals flag likely problems for a human to check:
   instead of showing as a removal plus an addition);
 - a usual companion change that is missing: a file that almost always changes
   together with an edited one (a migration, a test, a client) was left untouched;
-- untested changes and weakened tests (skips, removed assertions);
+- untested changes and weakened tests (skips, removed assertions), and changed
+  lines no test runs according to an existing coverage report (Cobertura, LCOV,
+  Istanbul, Go, JaCoCo: read, never produced);
 - swallowed exceptions, debugger statements and possible secrets.
 
 **Runtime coupling** is visible too. Code that starts a container this

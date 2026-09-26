@@ -57,6 +57,7 @@ from .redact import redact as _redact
 from .risk import RiskContext
 from .sources import TreeSource, is_binary
 from .submodules import WithSubmoduleFiles, submodule_changes
+from .coverage import coverage_for, file_coverage
 from .values import value_changes
 from .verdict import fingerprint
 from .wiring import unwired_code
@@ -595,6 +596,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
                     and r["new_path"] in changed_set and base_src.content_hash(r["old_path"]) is not None
                     and target_src.content_hash(r["old_path"]) is None}
     renamed_away = set(file_renames.values())
+    # existing coverage reports (read, never produced): which changed lines a test ran
+    cov = coverage_for(repo.root, target_src.files(), repo.config) if repo.root.is_dir() else None
     for path in changed_paths:
         if path in renamed_away:
             continue
@@ -697,6 +700,9 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         entry["dependencies"] = deps
         module_id = node.id if node is not None and node.category == CATEGORY_MODULE else None
         entry["tests_affected"] = [path] if is_test else _tests_affected(module_id, impact) if exists_after else []
+        if cov is not None and path in cov.lines and exists_after and after is not None and not is_test:
+            fresh = _fresh_on_disk(repo.root, path, target_src, cov.lines[path][0].time)
+            entry["coverage"] = file_coverage(cov, path, [n for n, _ in added_lines], fresh=fresh)
         files.append(entry)
 
         # --- per-file findings ------------------------------------------------------------------
@@ -741,6 +747,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
                     base_src)
     if not {"unwired-module", "unwired-symbol", "unreachable-from-entry"} <= disabled:
         _wiring_findings(add, diff, target_snap, target_src, component_of, repo.config.review_wiring_ignore)
+    coverage_report = _coverage_findings(add, files, cov, repo.config.review_coverage_min_uncovered)
     _test_coverage_findings(add, files, impact)
     contracts = contracts_of(repo.config)
     if contracts and not {"contract-broken", "contract-fixed", "contract-baseline-changed"} <= disabled:
@@ -819,6 +826,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "component_edges": comp_edges,
         "files": files,
         "plan": plan_report,
+        "coverage": coverage_report,
         "findings": [f.to_dict() for f in findings],
         "flow": flow.to_dict(),
         "new_dependencies": diff.new_dependencies,
@@ -1865,11 +1873,65 @@ def _contract_findings(add: Any, baseline_path: str, contracts: list[Any], base:
                     f"{baseline_path}: {problem}. Every violation is reported.", baseline_path), key="baseline-invalid")
 
 
+def _fresh_on_disk(root: Any, path: str, target_src: TreeSource, report_time: float) -> bool:
+    """A coverage report describes ``path`` as reviewed: the file on disk did not change after the report was
+    written, and (for a commit or a past wave) it is the reviewed content."""
+    p = root / path
+    try:
+        st = p.lstat()
+        if st.st_mtime > report_time:
+            return False
+        if getattr(target_src, "kind", "") == "worktree":
+            return True
+        data = p.read_bytes() if st.st_size <= 5_000_000 else None
+    except OSError:
+        return False
+    return data is not None and _blob_hash(data) == target_src.content_hash(path)
+
+
+def _coverage_findings(add: Any, files: list[dict[str, Any]], cov: Any, min_uncovered: int) -> dict[str, Any] | None:
+    """``changed-lines-uncovered`` per file with a fresh report, ``coverage-stale`` when the report is older than
+    the changes, and the wave's patch coverage (covered / changed executable lines)."""
+    if cov is None:
+        return None
+    from .coverage import ranges
+
+    measured = [f for f in files if (f.get("coverage") or {}).get("fresh")]
+    stale = [f for f in files if f.get("coverage") and not f["coverage"]["fresh"]]
+    for f in measured:
+        c = f["coverage"]
+        missing = c["executable"] - c["covered"]
+        if missing >= min_uncovered and missing:
+            lines = c["uncovered_lines"]
+            add(Finding("changed-lines-uncovered", "tests", "medium", "Changed lines no test runs",
+                        f"{missing} of {c['executable']} changed executable line(s) are not run by any test, "
+                        f"according to {c['report']} (line(s) {ranges(lines)}).", f["path"],
+                        line=lines[0] if lines else None, component=f["component"],
+                        suggestion="Add a test that runs these lines, or explain why they cannot be tested."),
+                key="uncovered")
+    if stale:
+        names = ", ".join(sorted({f["coverage"]["report"] for f in stale}))
+        shown = ", ".join(f["path"] for f in stale[:3]) + (", …" if len(stale) > 3 else "")
+        add(Finding("coverage-stale", "tests", "info", "Coverage report older than the changes",
+                    f"{names} was written before {len(stale)} changed file(s) last changed ({shown}), so it cannot "
+                    "tell whether their new lines run.",
+                    suggestion="Re-run your test suite with coverage to refresh the report (repoviz never runs it)."),
+            key="stale")
+    executable = sum(f["coverage"]["executable"] for f in measured)
+    covered = sum(f["coverage"]["covered"] for f in measured)
+    return {**cov.summary(), "executable": executable, "covered": covered, "files": len(measured),
+            "percent": round(100 * covered / executable) if executable else None,
+            "stale_files": [f["path"] for f in stale][:50], "stale_count": len(stale)}
+
+
 def _test_coverage_findings(add: Any, files: list[dict[str, Any]], impact: _ImpactIndex) -> None:
     changed_tests = {f["path"] for f in files if f["is_test"]}
     for f in files:
         if f["is_test"] or f["status"] == REMOVED or not f["symbols"] or f["language"] is None:
             continue
+        measured = f.get("coverage") or {}
+        if measured.get("fresh") and measured.get("executable"):
+            continue  # a fresh coverage report measured the changed lines: better than the static guess
         if not any(s["status"] in (ADDED, MODIFIED) for s in f["symbols"]):
             continue
         tests = set(f.get("tests_affected") or [])
@@ -2052,6 +2114,25 @@ def dependency_summary(summary: dict[str, Any]) -> str:
     return text + (f", {d['other']} other change(s)" if d.get("other") else "")
 
 
+def coverage_line(report: dict[str, Any]) -> str:
+    """Patch coverage in words: ``3 of 4 changed executable lines run by a test (75%, coverage.xml)``."""
+    cov = report.get("coverage") or {}
+    if not cov:
+        return ""
+    names = ", ".join(r["path"] for r in cov.get("reports") or [] if not r.get("error")) or "no readable report"
+    parts = []
+    if cov.get("executable"):
+        parts.append(f"{cov['covered']} of {cov['executable']} changed executable lines run by a test "
+                     f"({cov['percent']}%, {names})")
+    elif cov.get("files"):
+        parts.append(f"no changed executable line in the {cov['files']} file(s) {names} describes")
+    if cov.get("stale_count"):
+        parts.append(f"{cov['stale_count']} changed file(s) newer than the report: unknown")
+    errors = [f"{r['path']}: {r['error']}" for r in cov.get("reports") or [] if r.get("error")]
+    parts += errors
+    return "; ".join(parts) or f"{names} describes none of the changed files"
+
+
 def plan_lines(report: dict[str, Any]) -> list[str]:
     """``✔ app/routes/x.py — app/routes/x.py`` / ``✖ test — not changed``, then unplanned large files."""
     plan = report.get("plan") or {}
@@ -2122,6 +2203,9 @@ def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
     deps = dependency_summary(s)
     if deps:
         out.append(f"  dependencies: {deps}")
+    cov = coverage_line(report)
+    if cov:
+        out.append(f"  coverage: {cov}")
     risk = report.get("risk") or {}
     if risk.get("path"):
         out.append(f"  risk: {risk['level']} ({risk['score']}/100), because of {risk['path']}")

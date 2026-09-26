@@ -947,6 +947,10 @@ def format_review_markdown(report: dict[str, Any]) -> str:
              f"`{report['base']['label']}` → `{report['head']['label']}` · {s['files']} files · "
              f"{s['components']} components · +{s['lines_added']} −{s['lines_removed']} · "
              + (", ".join(f"{v} {k}" for k, v in s["findings"].items() if v) or "no findings"), ""]
+    from .review import coverage_line
+
+    if coverage_line(report):
+        lines += [f"**Coverage:** {coverage_line(report)}", ""]
     risk = report.get("risk") or {}
     if risk.get("path"):
         lines += [f"**Risk: {risk['level']} ({risk['score']}/100)**, because of `{risk['path']}`.", "",

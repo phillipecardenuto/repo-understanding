@@ -6,6 +6,23 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Existing coverage reports for the changed lines** ([#12](https://github.com/phillipecardenuto/repo-understanding/issues/12)).
+  - A review reads coverage reports that already exist (Cobertura, JaCoCo,
+    LCOV, Istanbul `coverage-final.json`, Go `cover.out`); repoviz never runs
+    tests. `[review.coverage]` sets `paths`, `min_uncovered`, `max_mb` and
+    `enabled`. XML with entity declarations is refused, and reports are size
+    capped.
+  - Report paths map to repository paths directly, under Cobertura
+    `<source>` roots, or by a unique path suffix (absolute paths from CI
+    machines work); ambiguous ones are listed and skipped.
+  - A report is used for a changed file only when the file did not change
+    since it was written (and, for a commit, the file on disk is the reviewed
+    content).
+  - New signals `changed-lines-uncovered` (medium) and `coverage-stale`
+    (info). A measured file no longer gets the static `untested-change`, and
+    its risk factor is the share of changed lines not run.
+  - Patch coverage per file (card, ● / ○ in the diff gutter) and per wave
+    (header stat, text, Markdown and pull-request outputs).
 - **Parallel agents: one view over Git worktrees, and overlaps between concurrent waves** ([#10](https://github.com/phillipecardenuto/repo-understanding/issues/10)).
   - `repoviz fleet [--json] [--risk]` lists every worktree of the repository
     (`git worktree list`). Only those that exist, pass Git's ownership check

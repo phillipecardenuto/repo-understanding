@@ -869,10 +869,14 @@ def test_orientation_from_shape_and_readable_fit(page, make_repo, tmp_path: Path
     page.wait_for_function("() => repoviz.app.tabs.structure.diagram.view.direction === 'TB'", timeout=30_000)
     assert toggle.inner_text() == "⇅" and page.evaluate("localStorage.getItem('rv.orient.structure')") == '"TB"'
     assert page.evaluate("document.querySelector('#tab-structure .diagram-card').textContent").count("flowchart TB") == 1
-    page.reload()
+    # localStorage reaches the browser process asynchronously: come back once another page of the origin reads it
+    blank = tmp_path / "blank.html"
+    blank.write_text("<!doctype html><title>probe</title>")
+    page.goto(blank.as_uri())
+    page.wait_for_function("() => localStorage.getItem('rv.orient.structure') === '\"TB\"'", timeout=30_000)
+    page.goto(uri + "#tab=structure")
     page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
-    # the remembered direction (waited for: under load the first render can finish before the view is set)
-    page.wait_for_function("() => ((repoviz.app.tabs.structure.diagram || {}).view || {}).direction === 'TB'", timeout=30_000)
+    assert page.evaluate("repoviz.app.tabs.structure.diagram.view.direction") == "TB"
     assert page.errors == []  # type: ignore[attr-defined]
 
 
@@ -1426,7 +1430,7 @@ def test_verdict_bar_banner_staleness_and_static_json(page, make_repo, tmp_path:
         assert list(r.state.load_reviewed(key)) == ["app/a.py"]
         # a change after the verdict: the page says it is stale
         repo.write({"app/b.py": "X = 2\n"})
-        page.evaluate("repoviz.app.tabs.review.refresh(true)")
+        page.evaluate("() => { repoviz.app.tabs.review.refresh(true); }")  # started here, waited for below
         page.wait_for_selector(f"{banner}.stale", timeout=30_000)
         assert "Stale: files changed since this verdict" in page.inner_text(banner)
         assert page.locator(f"{banner} i.rvi-alert").count() == 1
@@ -1491,4 +1495,23 @@ def test_fleet_card_switches_worktree_and_reports_show_it(page, make_repo, tmp_p
     card = page.inner_text("#fleet-card")
     assert "need the live app" in card and "agent/b" in card
     assert page.locator("header select[aria-label='Worktree shown on this page']").count() == 0
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_coverage_on_the_file_card_and_in_the_diff_gutter(page, make_repo, tmp_path: Path) -> None:
+    from test_review import _cov_wave, _report, cobertura
+
+    repo = _cov_wave(make_repo)
+    _report(repo, "coverage.xml", cobertura({"app/calc.py": {1: 1, 2: 1, 5: 1, 6: 1, 7: 0, 8: 1}}), +100)
+    report = tmp_path / "cov.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert "75% · 3/4" in page.inner_text("#tab-review .stats")
+    page.evaluate("repoviz.app.tabs.review.selectFile('app/calc.py')")
+    card = page.inner_text("#tab-review .file-card")
+    assert "3 of 4 changed executable line(s) run by a test" in card and "not run: line(s) 7" in card
+    marks = page.evaluate("Array.from(document.querySelectorAll('#tab-review table.diff td.mk .cov')).map(e => [e.closest('tr').dataset.line, e.textContent, e.title])")
+    assert ["7", "○", "not run by any test (coverage.xml)"] in marks and ["5", "●", "run by a test (coverage.xml)"] in marks
+    assert "Changed lines no test runs" in page.inner_text("#tab-review .findings-card")
     assert page.errors == []  # type: ignore[attr-defined]

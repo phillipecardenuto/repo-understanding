@@ -387,3 +387,9 @@ ol.timeline > li.clickable:focus-visible { box-shadow: 0 0 0 2px var(--accent); 
 .fleet-matrix thead th { font-weight: 600; }
 .fleet-detail ul { margin: 6px 0; }
 .fleet-detail li { margin: 3px 0; }
+
+/* Coverage (#12): a symbol per changed line in the diff gutter (● run, ○ not run) with a tooltip. */
+table.diff td.mk .cov { margin-left: 2px; font-size: 1em; }
+table.diff td.mk .cov.not-run { color: var(--removed); font-weight: 700; }
+table.diff td.mk .cov.run { color: var(--added); }
+.coverage-line { margin: 4px 0; }

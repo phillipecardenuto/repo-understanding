@@ -135,6 +135,11 @@ class Config:
     review_sensitive: bool = True
     review_disabled_checks: list[str] = field(default_factory=list)
     review_wiring_ignore: list[str] = field(default_factory=list)  # new files that need no importer
+    # [review.coverage]: existing coverage reports, read (never produced) for the changed lines (coverage.py)
+    review_coverage_enabled: bool = True
+    review_coverage_paths: list[str] = field(default_factory=list)  # empty: coverage.DEFAULT_PATHS
+    review_coverage_min_uncovered: int = 1
+    review_coverage_max_mb: float = 50.0
     review_risk_weights: dict[str, float] = field(default_factory=dict)  # [review.risk] factor weights
     review_risk_thresholds: dict[str, float] = field(default_factory=dict)  # [review.risk] high / medium
     # Architecture contracts ([[contracts]]; [[review.rules]] are "forbidden" contracts) and their baseline.
@@ -334,6 +339,26 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
             cfg.review_disabled_checks = _as_list(review["disabled_checks"], "review.disabled_checks")
         if "wiring_ignore" in review:
             cfg.review_wiring_ignore = _as_list(review["wiring_ignore"], "review.wiring_ignore")
+        coverage = review.get("coverage")
+        if coverage is not None:
+            if not isinstance(coverage, dict):
+                raise ConfigError("'review.coverage' must be a table")
+            for key, value in coverage.items():
+                if key == "enabled":
+                    cfg.review_coverage_enabled = bool(value)
+                elif key == "paths":
+                    cfg.review_coverage_paths = _as_list(value, "review.coverage.paths")
+                elif key in ("min_uncovered", "max_mb"):
+                    conv = int if key == "min_uncovered" else float
+                    try:
+                        number = conv(value)
+                    except (TypeError, ValueError):
+                        raise ConfigError(f"review.coverage.{key} must be a number") from None
+                    if isinstance(value, bool) or number <= 0:
+                        raise ConfigError(f"review.coverage.{key} must be positive")
+                    setattr(cfg, f"review_coverage_{key}", number)
+                else:
+                    unknown_nested.append(f"review.coverage.{key}")
         risk = review.get("risk")
         if risk is not None:
             if not isinstance(risk, dict):

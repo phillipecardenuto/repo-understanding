@@ -360,7 +360,9 @@ Credential-like values are always redacted in excerpts and diffs.
 | `lockfile-without-manifest` | medium | dependencies | a lock file resolves other versions but no manifest it belongs to changed: an upgrade run or a manual edit |
 | `manifest-without-lockfile` | low | dependencies | a manifest's dependencies changed but its lock file (same directory, or the nearest parent for workspaces) did not |
 | `new-runtime-dependency` | low | architecture | code now starts a container built by this repository, or calls one of its services (`app.search now talks to the cbir-service service (http:8000)`), found without imports (see [data-model.md](data-model.md#runtime-coupling-from-code)) |
-| `untested-change` | medium | tests | changed code that no test imports, even indirectly |
+| `untested-change` | medium | tests | changed code that no test imports, even indirectly. Not raised for a file whose changed lines a fresh coverage report measured |
+| `changed-lines-uncovered` | medium | tests | a fresh coverage report shows changed executable lines no test ran (at least `[review.coverage] min_uncovered`, default 1). Example: `Changed lines no test runs — 1 of 4 changed executable line(s) are not run by any test, according to coverage.xml (line(s) 7)` at `app/calc.py:7`. See [Coverage reports](#coverage-reports) |
+| `coverage-stale` | info | tests | a coverage report is older than some changed files, so it cannot tell whether their new lines run: "re-run your test suite with coverage to refresh it" |
 | `tests-not-updated` | low | tests | new public code while the tests covering the module were not touched |
 | `test-disabled` | high | tests | `skip`/`xfail`/`.only`/`@Disabled` added |
 | `assertions-removed` | medium | tests | more assertions removed than added in a test |
@@ -382,6 +384,29 @@ Credential-like values are always redacted in excerpts and diffs.
 | `overlap-symbol` | high | coordination | another worktree changes the same function, method or class (Python, JavaScript, TypeScript). Example: `Same code changed in another worktree — search is also changed by worktree wt-a (branch agent/a)` at `app/search.py:1`. See [Parallel agents](#parallel-agents-worktrees) |
 | `overlap-contract` | high | coordination | one worktree changes a function's signature while another one's new code calls it; reported on both sides. Example: `Calls a function another worktree is changing — worktree wt-a (branch agent/a) changes the signature of search (app/search.py) from (q, limit=10) to (q, *, limit=10, offset=0), and this wave calls it here` at `app/api.py:5` |
 | `overlap-file` | medium | coordination | another worktree changes the same file, but not the same definition (or in a language repoviz does not parse for definitions) |
+
+### Coverage reports
+
+When a coverage report already exists (from CI, or `pytest --cov
+--cov-report=xml`, `jest --coverage`, `go test -coverprofile=cover.out`…), the
+review uses it for the lines the agent changed. repoviz only reads the report;
+it never runs the tests.
+
+- **Patch coverage.** Each changed file's card says how many of its changed
+  executable lines a test ran: "3 of 4 changed executable line(s) run by a
+  test · not run: line(s) 7". The diff marks those lines ● (run) or ○ (not
+  run), each with a tooltip. The review header shows the wave's patch coverage
+  ("75% · 3/4"), and so do the text, Markdown and pull-request outputs.
+- **Signals.** `changed-lines-uncovered` flags files with changed lines no test
+  ran. A file the report measured no longer gets the static `untested-change`
+  guess. Its risk factor becomes the share of changed lines not run.
+- **Only a fresh report counts.** A report older than a changed file describes
+  the old code, so that file's changed lines are "unknown": the card says so,
+  and one `coverage-stale` note asks you to re-run your tests with coverage.
+  For a commit or a past wave, the file on disk must also be the reviewed
+  content.
+- **Setup.** See [configuration.md](configuration.md#coverage-reports) for the
+  paths, formats and path mapping, and for `min_uncovered`.
 
 ### Values: constants and settings
 

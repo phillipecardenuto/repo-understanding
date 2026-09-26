@@ -1599,6 +1599,18 @@
     const i = h("input", { type: "number", value, min, max, onchange: () => onchange(Math.max(min, Math.min(max, parseInt(i.value, 10) || min))) });
     return i;
   }
+  /* "3, 7-9, 12": line numbers as ranges (coverage.ranges). */
+  function lineRanges(nums, limit) {
+    const out = [], sorted = nums.slice().sort((a, b) => a - b);
+    let start = null, prev = null;
+    for (const n of sorted) {
+      if (start === null) { start = prev = n; continue; }
+      if (n === prev + 1) { prev = n; continue; }
+      out.push(start === prev ? `${start}` : `${start}-${prev}`); start = prev = n;
+    }
+    if (start !== null) out.push(start === prev ? `${start}` : `${start}-${prev}`);
+    return out.slice(0, limit || 8).join(", ") + (out.length > (limit || 8) ? ", …" : "");
+  }
   function stat(value, label, cls) { return h("div", { class: "stat " + (cls || "") }, h("div", { class: "value", text: value }), h("div", { class: "label", text: label })); }
   function pill(text, cls) { return h("span", { class: "pill " + (cls || "") }, text); }
   /* Counts of changed third-party dependencies, as depchanges.summary: one per package, manifests before lock files. */
@@ -3729,7 +3741,10 @@
           s.dependencies.downgraded || s.dependencies.other ? "modified" : "") : null,
         stat(prot, "protected files touched", prot ? "removed" : ""), stat(out, "files outside scope", out ? "modified" : ""),
         stat(counts.high, "high-severity signals", counts.high ? "removed" : ""), stat(counts.medium, "medium signals", counts.medium ? "modified" : ""),
-        stat(s.tests_changed, "test files changed"), stat(this.notes.length, "review notes"),
+        stat(s.tests_changed, "test files changed"),
+        r.coverage && r.coverage.executable ? stat(`${r.coverage.percent}% · ${r.coverage.covered}/${r.coverage.executable}`, "patch coverage: changed lines run by a test", r.coverage.covered < r.coverage.executable ? "modified" : "")
+          : r.coverage && r.coverage.stale_count ? stat("unknown", "patch coverage: the report is older than the changes") : null,
+        stat(this.notes.length, "review notes"),
         this.reviewedStat = stat("", "files reviewed"));
     }
     /* Everything except the map (which does not depend on notes), so triage does not re-layout the diagram. */
@@ -4105,6 +4120,18 @@
           h("span", { class: "faint", text: ` — together in ${p.shared} of this file's last ${p.revs} commits · ` }),
           h("b", { text: p.changed ? "changed in this review" : "not changed" })))));
       }
+      const cov = f.coverage;
+      if (cov) {  // an existing coverage report, read: which changed lines a test ran (coverage.py)
+        const missing = cov.fresh ? cov.executable - cov.covered : 0;
+        this.fileEl.appendChild(h("h4", null, "Coverage ", h("span", { class: "faint", text: `— from ${cov.report} (${fmtTime(cov.report_time * 1000)}); repoviz reads it, never runs tests` })));
+        this.fileEl.appendChild(!cov.fresh
+          ? h("div", { class: "notice warn" }, iconEl("alert"), " The report is older than this file's last change, so it cannot tell whether the new lines run. Re-run your test suite with coverage to refresh it.")
+          : !cov.executable ? h("div", { class: "muted", text: "No changed line is executable code according to the report." })
+          : h("div", { class: "coverage-line" }, iconEl(missing ? "alert" : "check"), ` ${cov.covered} of ${cov.executable} changed executable line(s) run by a test`,
+            missing ? h("span", null, " · ", h("b", { text: "not run" }), `: line(s) ${lineRanges(cov.uncovered_lines)}`) : null,
+            h("span", { class: "faint", text: " · in the diff: ● run, ○ not run" })));
+      }
+      const covered = new Set(cov && cov.fresh ? cov.covered_lines : []), uncovered = new Set(cov && cov.fresh ? cov.uncovered_lines : []);
       this.fileEl.appendChild(h("h4", null, "Diff ", h("span", { class: "faint", text: "— click a line to leave a note for the agent" })));
       if (!f.hunks || !f.hunks.length) { this.fileEl.appendChild(h("div", { class: "empty", text: f.diff_omitted ? `Diff not shown: ${f.diff_omitted}.` : "No textual diff." })); return; }
       const lineSymbol = (line) => { const k = f.symbols.find((s) => s.line && s.end_line && s.line <= line && line <= s.end_line); return k ? k.qualified_name : null; };
@@ -4114,6 +4141,10 @@
         const lineNotes = t !== "-" ? notesByLine.get(newNo) || [] : [];
         tr.dataset.line = t === "-" ? "" : String(newNo);
         tr.title = "Click to add a note on this line";
+        if (t === "+" && (covered.has(newNo) || uncovered.has(newNo))) {  // a symbol and a tooltip, not colour alone
+          const run = covered.has(newNo);
+          tr.querySelector(".mk").appendChild(h("span", { class: "cov " + (run ? "run" : "not-run"), title: run ? `run by a test (${cov.report})` : `not run by any test (${cov.report})` }, run ? "●" : "○"));
+        }
         if (lineNotes.length) tr.classList.add("has-note");
         tr.addEventListener("click", () => this.noteForm(tr, { path: f.path, line: anchorLine, side: t === "-" ? "old" : "new", symbol: lineSymbol(anchorLine), excerpt: text.trim() }, "logic-error", true));
         return lineNotes.map((nn) => h("tr", { class: "note-row" }, h("td", { colspan: 2 }), h("td", { class: "mk" }, iconEl("comment")),
@@ -4328,6 +4359,7 @@
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
           "A manifest's or lock file's card lists its **dependencies**: added, removed, **↑ upgraded**, **↓ downgraded**, **source changed** (now from a Git repository, a URL, a path outside the repository, an npm alias or another registry) or loosened (**unpinned**), with the version the lock file resolves. Indirect packages are counted. The header shows `+added −removed ↑ ↓` for the wave.",
           "Key changes also list **values**: constants, settings-class defaults and configuration keys, before → after (`MAX_IMAGES: 20 → 200`). A safety setting switched the risky way (debug on, TLS verification off, a timeout removed, CORS `*`) carries a **⚠** pill and a *Safety setting weakened* signal. Secret-looking names show `•••`.",
+          "**Coverage.** When a coverage report already exists (coverage.xml, lcov.info, coverage-final.json, cover.out, jacoco.xml…), the card says how many changed executable lines a test ran, and the diff marks them **●** (run) or **○** (not run). The header shows the wave's **patch coverage**. A report older than a file's last change cannot say, and the card asks you to re-run the tests with coverage (repoviz never runs them).",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
           "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file."] },
         { h: "Commit by commit" },

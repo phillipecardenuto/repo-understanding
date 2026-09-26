@@ -95,12 +95,21 @@ wiring_ignore = []                # new files that need no importer (loaded by a
 signals = 30                      # most severe signal on the file
 fan_in = 20                       # places calling (or importing) the changed code
 entry_points = 15                 # entry points reaching the changed code
-tests = 10                        # no test reaches it, or none was updated
+tests = 10                        # no test reaches it, or none was updated (a fresh coverage report: the share of
+                                  # changed lines no test runs)
 sensitive = 10                    # protected, sensitive, security-related or out-of-scope path
 churn = 5                         # churn hotspot (top 20% of modules by recent commits, at least 2)
 size = 10                         # lines added and removed
 high = 40                         # score from which a file is "high" risk
 medium = 20                       # score from which it is "medium"
+
+[review.coverage]                 # existing coverage reports: read, never produced (see "Coverage reports" below)
+enabled = true
+paths = []                        # default: coverage.xml, .coverage.xml, coverage/cobertura-coverage.xml,
+                                  # coverage/lcov.info, lcov.info, coverage/coverage-final.json, cover.out,
+                                  # coverage.out, jacoco.xml
+min_uncovered = 1                 # changed lines not run before a file gets `changed-lines-uncovered`
+max_mb = 50                       # larger reports are ignored, with a note
 
 [[review.rules]]                  # forbidden dependencies (a "forbidden" contract over path globs; see below)
 from = ["src/ui/**"]
@@ -147,6 +156,31 @@ code is never run.
   [review.md](review.md#submodules)).
 
 `analyze = false` restores the previous behaviour: one box per submodule.
+
+## Coverage reports
+
+A review reads coverage reports that already exist, from CI or a local test run,
+to tell which changed lines a test executed. repoviz never runs the tests and
+never produces a report.
+
+- **Which reports.** `[review.coverage] paths`, relative to the repository
+  (they must stay inside it) or absolute. By default the usual names are tried.
+  Symbolic links and other non-regular files are skipped. Reports over `max_mb`
+  are ignored, and the review says so.
+- **Formats.** Cobertura XML (coverage.py `coverage xml`, Jest's `cobertura`,
+  many others), JaCoCo XML, LCOV (`lcov.info`), Istanbul
+  `coverage-final.json` and Go `cover.out`. The format is recognised from the
+  content. XML with entity declarations is refused.
+- **Paths.** A report's file names are matched to the repository as they are,
+  then under Cobertura's `<source>` directories, then by the longest path
+  suffix that names exactly one file. So `/home/ci/build/app/calc.py` from
+  another machine maps to `app/calc.py`. A suffix that fits several files is
+  skipped and listed as ambiguous.
+- **Freshness.** A report describes the code as it was when it was written
+  (its own timestamp, else its modification time). It is used for a changed
+  file only when the file has not changed on disk since, and the reviewed
+  content is what is on disk. Otherwise the changed lines are "unknown", and the
+  review adds one `coverage-stale` note: re-run your test suite with coverage.
 
 ## Parse cache
 
