@@ -90,6 +90,9 @@ class ScopePolicy:
     rules: list[DependencyRule] = field(default_factory=list)
     sensitive: bool = True
     origin: list[str] = field(default_factory=list)
+    # what the plan says will change (plan.py): checked, not a restriction
+    expected: list[str] = field(default_factory=list)
+    plan: dict[str, Any] = field(default_factory=dict)
 
     def classify(self, path: str) -> str:
         """``protected`` | ``allowed`` | ``out-of-scope`` | ``unscoped``."""
@@ -101,7 +104,7 @@ class ScopePolicy:
 
     def to_dict(self) -> dict[str, Any]:
         return {"allowed": self.allowed, "protected": self.protected, "sensitive": self.sensitive,
-                "rules": [asdict(r) for r in self.rules], "origin": self.origin}
+                "rules": [asdict(r) for r in self.rules], "origin": self.origin, "expected": self.expected}
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -308,7 +311,9 @@ def resolve_target(repo: "Repository", target_id: str | None = None, base: str |
 
 
 def scope_for(repo: "Repository", target: ReviewTarget, allowed: list[str] | None = None,
-              protected: list[str] | None = None) -> ScopePolicy:
+              protected: list[str] | None = None, expected: list[str] | None = None) -> ScopePolicy:
+    """The scope of a review: configuration, then the session's, then the command line (or the page).
+    ``expected`` given here replaces the session's expectations (the page's editor, ``--expect``)."""
     cfg = repo.config
     policy = ScopePolicy(list(cfg.review_allowed), list(cfg.review_protected), list(cfg.review_rules),
                          cfg.review_sensitive)
@@ -316,9 +321,10 @@ def scope_for(repo: "Repository", target: ReviewTarget, allowed: list[str] | Non
         policy.origin.append("configuration")
     if target.session_id:
         s = repo.state.load_session(target.session_id)
-        if s is not None and (s.allowed or s.protected):
+        if s is not None and (s.allowed or s.protected or s.expected):
             policy.allowed = _dedupe(policy.allowed + s.allowed)
             policy.protected = _dedupe(policy.protected + s.protected)
+            policy.expected, policy.plan = list(s.expected), dict(s.plan)
             policy.origin.append(f"session {s.label or s.id}")
     if allowed:
         policy.allowed = _dedupe(policy.allowed + allowed)
@@ -327,6 +333,10 @@ def scope_for(repo: "Repository", target: ReviewTarget, allowed: list[str] | Non
         policy.protected = _dedupe(policy.protected + protected)
         if "command line" not in policy.origin:
             policy.origin.append("command line")
+    if expected is not None:
+        from .plan import normalize
+
+        policy.expected, policy.plan = normalize(expected), {}
     return policy
 
 
@@ -598,7 +608,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         scope_status = scope.classify(path)
         if old_path and scope.classify(old_path) == "protected":
             scope_status = "protected"  # moving a protected file away is touching it
-        entry: dict[str, Any] = {"path": path, "status": status, "language": lang, "component_id": cid,
+        entry: dict[str, Any] = {"path": path, "status": status, "language": lang, "code": _kind == "programming",
+                                 "component_id": cid,
                                  "component": cname, "module_id": node.id if node else None, "is_test": is_test,
                                  "scope": scope_status, "binary": b_bin or a_bin, "config_kind": classify.config_kind(path),
                                  # identifies this state of the file, so "reviewed" marks expire when it changes again
@@ -734,6 +745,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
                            component_of)
     _rename_findings(add, diff, target_snap, target_src, component_of)
     declared_added = _dependency_findings(add, files, base_src, target_src, base_snap, changed_set)
+    plan_report = _plan_findings(add, scope, files)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
         # One commit alone: the companion may be in another commit of the wave, so only mark partners as changed.
@@ -800,6 +812,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "components": components,
         "component_edges": comp_edges,
         "files": files,
+        "plan": plan_report,
         "findings": [f.to_dict() for f in findings],
         "flow": flow.to_dict(),
         "new_dependencies": diff.new_dependencies,
@@ -1221,6 +1234,23 @@ def _dependency_findings(add: Any, files: list[dict[str, Any]], base_src: TreeSo
                             component=f["component"], suggestion="A downgrade can bring back fixed bugs and "
                             "vulnerabilities; confirm it is intended."), key=p["name"])
     return declared_added
+
+
+def _plan_findings(add: Any, scope: ScopePolicy, files: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Plan vs actual (plan.py): each expectation done or missing, and ``expected-not-changed`` for the missing."""
+    if not scope.expected:
+        return None
+    from .plan import check
+
+    result = check(scope.expected, files)
+    for e in result["expected"]:
+        if e["status"] == "missing":
+            add(Finding("expected-not-changed", "plan", "medium", f"Expected change missing: {e['raw']}",
+                        f"The plan listed {e['raw']}, but it was not changed.",
+                        suggestion="Do this part of the plan, or explain why it is no longer needed."), key=e["raw"])
+    result["source"] = scope.plan.get("source")
+    result["unresolved"] = scope.plan.get("unresolved") or []
+    return result
 
 
 def _link_dependency_findings(findings: list[Finding], declared_added: dict[str, tuple[str, int | None]]) -> None:
@@ -1868,6 +1898,12 @@ def feedback_markdown(report: dict[str, Any], notes: list[dict[str, Any]], *, in
             lines.append("Allowed scope: " + ", ".join(f"`{p}`" for p in scope["allowed"]))
         if scope.get("protected"):
             lines.append("Do not modify: " + ", ".join(f"`{p}`" for p in scope["protected"]))
+    plan = report.get("plan") or {}
+    missing = [e for e in plan.get("expected") or [] if e.get("status") == "missing"]
+    if missing:  # the plan's own words first: this is what the agent was asked to do
+        triaged |= {f["id"] for f in report.get("findings", []) if f.get("kind") == "expected-not-changed"}
+        lines += ["", "## Plan items not done", ""]
+        lines += [f"- The plan listed `{e['raw']}`, but it was not changed." for e in missing]
     sections = [("should-not-touch", "Revert: changes that should not have been made"),
                 ("logic-error", "Fix: logic errors"), ("missed", "Complete: missed or incomplete work"),
                 ("improve", "Improve"), ("question", "Answer these questions")]
@@ -1899,7 +1935,7 @@ def feedback_markdown(report: dict[str, Any], notes: list[dict[str, Any]], *, in
     if include_findings and risky:
         lines += ["", "## Riskiest files (double-check them)", ""]
         lines += [f"- `{t['path']}`: {t['level']} risk ({t['score']}/100): {'; '.join(t['factors'])}" for t in risky]
-    if n == 0:
+    if n == 0 and not missing:
         lines += ["", "No issues to report."]
     lines += ["", "Please address every numbered item, stay within the allowed scope, and reply with one line per "
               "item describing what you changed (or why no change was needed)."]
@@ -1943,6 +1979,23 @@ def dependency_summary(summary: dict[str, Any]) -> str:
         return ""
     text = f"+{d.get('added', 0)} −{d.get('removed', 0)} ↑{d.get('upgraded', 0)} ↓{d.get('downgraded', 0)}"
     return text + (f", {d['other']} other change(s)" if d.get("other") else "")
+
+
+def plan_lines(report: dict[str, Any]) -> list[str]:
+    """``✔ app/routes/x.py — app/routes/x.py`` / ``✖ test — not changed``, then unplanned large files."""
+    plan = report.get("plan") or {}
+    out = []
+    for e in plan.get("expected") or []:
+        if e["status"] == "done":
+            more = f" (+{e['more']} more)" if e.get("more") else ""
+            out.append(f"✔ {e['raw']} — {', '.join(e['matches'][:5])}{more}")
+        else:
+            out.append(f"✖ {e['raw']} — not changed")
+    for u in plan.get("unplanned") or []:
+        out.append(f"? {u['path']} — {u['lines']} lines changed, not in the plan")
+    for u in plan.get("unresolved") or []:
+        out.append(f"  (plan line {u['line']}: `{u['text']}` not resolved: {u['reason']})")
+    return out
 
 
 def package_lines(report: dict[str, Any]) -> list[str]:
@@ -2044,6 +2097,10 @@ def format_review_text(report: dict[str, Any], by_commit: bool = False) -> str:
                         out.append(f"          [{x['severity']:<6}] {x['title']}")
     if commits.get("note"):
         out.append(f"\nnote: {commits['note']}")
+    plan = plan_lines(report)
+    if plan:
+        out.append(f"\nPlan vs actual ({report['plan']['done']} of {len(report['plan']['expected'])} done):")
+        out += [f"  {x}" for x in plan]
     packages = package_lines(report)
     if packages:
         out.append(f"\nDependencies changed ({dependency_summary(s) or len(packages)}):")

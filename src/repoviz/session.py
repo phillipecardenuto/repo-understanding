@@ -105,6 +105,10 @@ class Session:
     # Scope agreed for the session: globs the agent may change / must not change.
     allowed: list[str] = field(default_factory=list)
     protected: list[str] = field(default_factory=list)
+    # What the plan says will change (plan.py): path globs, symbol:<name>, test / migration / docs / changelog;
+    # and where they came from ({"source": "PLAN.md", "unresolved": [...]} after a plan import).
+    expected: list[str] = field(default_factory=list)
+    plan: dict[str, Any] = field(default_factory=dict)
     # End state (recorded when the session ends) so past waves can be reviewed later.
     end_head: str | None = None
     end_branch: str | None = None
@@ -228,7 +232,8 @@ class StateStore:
         return worktree.submodule_commits(), overrides
 
     def start_session(self, git: Git | None, root: Path, label: str = "", allowed: list[str] | None = None,
-                      protected: list[str] | None = None) -> Session:
+                      protected: list[str] | None = None, expected: list[str] | None = None,
+                      plan: dict[str, Any] | None = None) -> Session:
         with self.lock:
             previous = self.current_session()
             if previous is not None and previous.active:
@@ -238,7 +243,8 @@ class StateStore:
             session = Session(id=sid, started_at=now.isoformat(timespec="seconds"),
                               baseline_head=git.head() if git else None,
                               baseline_branch=git.branch() if git else None, label=label,
-                              allowed=list(allowed or []), protected=list(protected or []))
+                              allowed=list(allowed or []), protected=list(protected or []),
+                              expected=list(expected or []), plan=dict(plan or {}))
             _mkdir_private(self._session_dir(sid))
             if git is not None:
                 session.overrides, session.skipped = self._capture_dirty(git, root, sid)
@@ -270,12 +276,16 @@ class StateStore:
                 pass
             return session
 
-    def update_scope(self, session: Session, allowed: list[str] | None, protected: list[str] | None) -> Session:
+    def update_scope(self, session: Session, allowed: list[str] | None, protected: list[str] | None,
+                     expected: list[str] | None = None, plan: dict[str, Any] | None = None) -> Session:
         with self.lock:
             if allowed is not None:
                 session.allowed = list(allowed)
             if protected is not None:
                 session.protected = list(protected)
+            if expected is not None:
+                session.expected = list(expected)
+                session.plan = dict(plan or {})
             self.save_session(session)
             return session
 

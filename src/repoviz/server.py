@@ -259,11 +259,14 @@ class AppState:
         try:
             target = resolve_target(self.repo, query.get("id") or None, query.get("base") or None,
                                     query.get("target") or None, query.get("mode") or None)
-            scope = scope_for(self.repo, target)
+            # the page's "Expected to change" editor, before it is saved to the session (one per line)
+            expected = query["expected"].split("\n") if "expected" in query else None
+            scope = scope_for(self.repo, target, expected=expected)
             commit = (query.get("commit") or "").strip() or None  # one step of the range, reviewed on its own
             sources = (self.repo.open_source(target.base), self.repo.open_source(target.target))
             key = (target.key, target.base, target.target, sources[0].revision_id, sources[1].revision_id,
-                   tuple(scope.allowed), tuple(scope.protected), self.repo.config.fingerprint(), commit,
+                   tuple(scope.allowed), tuple(scope.protected), tuple(scope.expected), self.repo.config.fingerprint(),
+                   commit,
                    self.repo.git.head() if self.repo.git else None)  # commits and uncommitted work depend on HEAD
             with self.cache_lock:
                 body = self._reviews.get(key)
@@ -333,13 +336,29 @@ class AppState:
                 raise ApiError(400, "scope patterns must be lists of strings")
             return [v.strip()[:500] for v in value if v.strip()][:200]
 
+        expected = globs_of(body.get("expected"))
+        plan = body.get("plan") if isinstance(body.get("plan"), dict) else {}
+        plan = {"source": str(plan.get("source") or "")[:200],
+                "unresolved": [u for u in plan.get("unresolved") or [] if isinstance(u, dict)][:100]} if plan else {}
         with self.write_lock:
             session = self.repo.state.load_session(str(body.get("session_id") or ""))
             if session is None:
                 raise ApiError(400, "unknown session")
             session = self.repo.state.update_scope(session, globs_of(body.get("allowed")),
-                                                   globs_of(body.get("protected")))
+                                                   globs_of(body.get("protected")), expected, plan)
         return session.to_dict()
+
+    def parse_plan(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Expectations extracted from a Markdown plan, for the page to confirm before saving (nothing is saved)."""
+        from .plan import parse_plan_in
+
+        text = body.get("text")
+        if not isinstance(text, str):
+            raise ApiError(400, "expected {text: markdown}")
+        try:
+            return parse_plan_in(self.repo, text[:1_000_000])
+        except (RepositoryError, GitError) as exc:
+            raise ApiError(400, str(exc)) from exc
 
 
 SECURITY_HEADERS = {
@@ -509,6 +528,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.save_notes(body))
                 elif path == "/api/session/scope":
                     self._json(200, state.save_scope(body))
+                elif path == "/api/plan/parse":
+                    self._json(200, state.parse_plan(body))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:

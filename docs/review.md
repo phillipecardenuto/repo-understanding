@@ -39,6 +39,61 @@ keep working. Without sessions you can review:
 - the last commit (`last-commit`);
 - any range (`main...HEAD`, `v1..v2`, or `--base/--head`).
 
+### Plan vs actual: expected changes
+
+Scope catches an agent that goes where it should not. The opposite failure is
+work it did **not** do: the plan said "update the client, add a test", and the
+client was never touched. List what the plan says will change:
+
+```bash
+repoviz session start --expect app/routes/reports.py --expect symbol:app.main.create_app --expect test
+repoviz session scope --expect migration        # replaces the active session's list
+repoviz session start --plan PLAN.md            # extract them from a Markdown plan (asks first; --yes saves)
+repoviz review --expect docs                    # one review only (replaces the session's list)
+```
+
+An expectation is one of:
+
+- **A path glob:** `app/client.py`, `src/billing/**`, `docs/` (a directory
+  means everything under it). It is done when a changed file matches (added,
+  modified, removed or moved).
+- **A symbol:** `symbol:app.services.images.list_images`. It is done only when
+  that function or class is in the wave's key changes, added or modified.
+- **A kind:** `test` (a test file with code added or modified), `migration`
+  (`migrations/`, `alembic/versions/`, `db/migrate/`…), `docs` (`docs/`,
+  Markdown, reStructuredText), `changelog` (`CHANGELOG`, `CHANGES`, `NEWS`,
+  `changelog.d/`).
+
+The review then shows:
+
+- a **Plan vs actual** card, with each expectation **done** (with the files or
+  symbols that matched) or **not changed**;
+- the `expected-not-changed` signal (medium, category `plan`) for each missing
+  one. The feedback prompt starts with "The plan listed X, but it was not
+  changed.";
+- **not in the plan**: when the plan names files or symbols (not only kinds),
+  files with more than 50 changed lines that no expectation covers.
+
+**Importing a plan.** `--plan PLAN.md` (or *Import plan…* in the live app)
+reads the Markdown as text. Nothing is executed.
+
+- **Backticked paths** that exist become expectations. So do new ones on a
+  line that says *create*, *new* or *add*.
+- **Backticked dotted names** that resolve to a function, class or module
+  become expectations. A unique suffix is enough, for example
+  `routes.reports.export`.
+- **List items** that mention tests, migrations, docs or the changelog add
+  those kinds.
+- **Code blocks are skipped.** What cannot be resolved (a missing file, an
+  unknown or ambiguous name) is listed as *unresolved*, with its line, rather
+  than dropped.
+- **Confirmation first.** The CLI prints the list and asks (or needs `--yes`);
+  the page shows it before *Use these*.
+
+Expectations and the plan's unresolved lines are stored with the session, so
+past waves keep their plan. The static report shows the card; its list can be
+edited on the page, but importing and saving need `repoviz serve`.
+
 ### Checkpoints: one step at a time
 
 Agents often work for a long time without committing. A **checkpoint** records
@@ -227,6 +282,7 @@ Credential-like values are always redacted in excerpts and diffs.
 | `renamed-symbol-stale-references` | high / medium | correctness | a function or class was renamed, but code still uses the old name, with each location. *High* when a call the analyzer resolved to the old symbol still uses the old name; *medium* when the old name only appears as a word (an import, a use as a value) |
 | `renamed-symbol` | low | architecture | a function or class was renamed and no reference to the old name is left |
 | `submodule-moved` | medium | architecture | a submodule now lives at another path (same URL or commit, or a similar name in the same folder) |
+| `expected-not-changed` | medium | plan | something the plan listed was not changed: a path, a symbol, or a kind (test, migration, docs, changelog). Example: `Expected change missing: test — The plan listed test, but it was not changed.` See [Plan vs actual](#plan-vs-actual-expected-changes) |
 | `new-external-dependency` | low | architecture | code imports a third-party package it did not use before (a package a manifest declares is `dependency-added`; the two point at each other) |
 | `dependency-added` | low / medium | dependencies | a manifest declares a new direct dependency. *Medium* when it is a runtime dependency new to the repository. A new manifest gives one signal for all its packages. Example: `Dependency added: requests — requests >=2.31,<3 (runtime), resolved to 2.32.3; new to the repository. First imported by app/client.py:2.` See [Dependencies](#dependencies-declared-and-resolved) |
 | `dependency-downgraded` | medium | dependencies | a declared or resolved version went down: `rich: ==13.7.0 → ==13.6.0` |

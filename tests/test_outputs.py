@@ -686,3 +686,39 @@ def test_checkpoint_endpoint_and_automatic_checkpoints(make_repo, monkeypatch) -
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_expectations_through_the_server(make_repo) -> None:
+    from test_review import PLAN_APP, PLAN_MD
+
+    repo = make_repo(PLAN_APP)
+    r = Repository(repo.path)
+    s = r.state.start_session(r.git, r.root, "wave")
+    repo.write({"app/client.py": "def fetch():\n    return 1\n"})
+    srv = create_server(r, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, body = request(srv, "POST", "/api/plan/parse", {"text": PLAN_MD},
+                                  headers={"Content-Type": "application/json"})
+        assert status == 403  # guarded like every API call
+        status, _, body = request(srv, "POST", "/api/plan/parse", {"text": PLAN_MD})
+        parsed = json.loads(body)
+        assert status == 200 and "app/client.py" in parsed["expected"] and parsed["unresolved"]
+        assert r.state.load_session(s.id).expected == []  # parsing saves nothing
+        # The editor's list, before saving: one review.
+        status, _, body = request(srv, "GET", "/api/review?id=session&expected=app%2Fclient.py%0Atest")
+        plan = json.loads(body)["plan"]
+        assert [(e["raw"], e["status"]) for e in plan["expected"]] == [("app/client.py", "done"), ("test", "missing")]
+        # Saved with the session (with the plan's unresolved lines), it applies to every later review.
+        status, _, body = request(srv, "POST", "/api/session/scope",
+                                  {"session_id": s.id, "expected": ["test", "docs"],
+                                   "plan": {"source": "PLAN.md", "unresolved": parsed["unresolved"]}})
+        assert status == 200 and json.loads(body)["expected"] == ["test", "docs"]
+        status, _, body = request(srv, "GET", "/api/review?id=session")
+        report = json.loads(body)
+        assert [e["raw"] for e in report["plan"]["expected"]] == ["test", "docs"]
+        assert report["plan"]["source"] == "PLAN.md" and report["plan"]["unresolved"]
+        assert {f["kind"] for f in report["findings"]} >= {"expected-not-changed"}
+    finally:
+        srv.shutdown()
+        srv.server_close()

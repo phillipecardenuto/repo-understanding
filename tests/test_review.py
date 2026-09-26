@@ -1511,3 +1511,119 @@ def test_new_manifest_is_one_signal_and_dependency_signals_can_be_disabled(make_
     assert len(new) == 1 and new[0]["title"] == "New manifest declares 3 dependencies"
     assert "express, pino, zod" in new[0]["detail"]
     assert "dependency-downgraded" not in kinds and "lockfile-without-manifest" not in kinds
+
+
+# --------------------------------------------------------------------------- expected changes (#8)
+
+PLAN_APP = {
+    "app/__init__.py": "",
+    "app/main.py": "def create_app():\n    return 1\n",
+    "app/routes/__init__.py": "",
+    "app/routes/reports.py": "def list_reports():\n    return []\n",
+    "app/client.py": "def fetch():\n    return None\n",
+    "tests/test_reports.py": "def test_reports():\n    assert True\n",
+    "docs/api.md": "# API\n",
+}
+
+
+def _plan_review(repo, expected=None):
+    r = Repository(repo.path)
+    target = resolve_target(r, "all")
+    from repoviz.review import scope_for
+
+    return build_review(r, target, scope=scope_for(r, target, expected=expected))
+
+
+def test_expected_paths_symbols_and_kinds(make_repo) -> None:
+    repo = make_repo(PLAN_APP)
+    repo.write({"app/routes/reports.py": "def list_reports():\n    return [1]\n\n\ndef export():\n    return 2\n",
+                "app/big.py": "".join(f"X{i} = {i}\n" for i in range(60))})
+    report = _plan_review(repo, ["app/routes/reports.py", "app/client.py", "symbol:app.routes.reports.export",
+                                 "symbol:app.main.create_app", "test", "migration", "docs/"])
+    plan = {e["raw"]: e for e in report["plan"]["expected"]}
+    assert plan["app/routes/reports.py"]["status"] == "done" and plan["app/routes/reports.py"]["matches"] == ["app/routes/reports.py"]
+    assert plan["app/client.py"]["status"] == "missing"
+    assert plan["symbol:app.routes.reports.export"]["status"] == "done"  # added
+    assert plan["symbol:app.main.create_app"]["status"] == "missing"  # not in the key changes
+    assert plan["test"]["status"] == plan["migration"]["status"] == plan["docs/"]["status"] == "missing"
+    assert report["plan"]["unplanned"] == [{"path": "app/big.py", "lines": 60, "status": "added"}]
+    missing = {f["title"] for f in by_kind(report)["expected-not-changed"]}
+    assert missing == {"Expected change missing: app/client.py", "Expected change missing: symbol:app.main.create_app",
+                       "Expected change missing: test", "Expected change missing: migration",
+                       "Expected change missing: docs/"}
+    f = by_kind(report)["expected-not-changed"][0]
+    assert (f["severity"], f["category"]) == ("medium", "plan")
+    # The signal clears once a test file changes; a symbol counts when it is modified too.
+    repo.write({"tests/test_reports.py": "def test_reports():\n    assert 1\n", "app/main.py": "def create_app():\n    return 2\n",
+                "db/migrations/0002_reports.sql": "CREATE TABLE r (id int);\n", "docs/api.md": "# API\n\nexport\n"})
+    report = _plan_review(repo, ["test", "migration", "docs", "symbol:create_app"])
+    assert all(e["status"] == "done" for e in report["plan"]["expected"])
+    assert "expected-not-changed" not in by_kind(report)
+    assert [u["path"] for u in report["plan"]["unplanned"]] == ["app/big.py"]  # the plan names a symbol
+    assert _plan_review(repo, ["test"])["plan"]["unplanned"] == []  # kinds alone are not a file-level plan
+    # No expectations: no plan section at all.
+    assert _plan_review(repo)["plan"] is None
+
+
+def test_expectations_in_the_session_prompt_and_cli(make_repo, capsys) -> None:
+    repo = make_repo(PLAN_APP)
+    assert main(["session", "-C", repo.path, "start", "--expect", "app/client.py", "--expect", "test"]) == 0
+    repo.write({"app/client.py": "def fetch():\n    return 1\n"})
+    capsys.readouterr()
+    assert main(["review", "-C", repo.path]) == 0  # the session
+    out = capsys.readouterr().out
+    assert "Plan vs actual (1 of 2 done):" in out and "✔ app/client.py — app/client.py" in out and "✖ test — not changed" in out
+    assert main(["review", "-C", repo.path, "--format", "prompt"]) == 0
+    prompt = capsys.readouterr().out
+    assert "## Plan items not done" in prompt and "The plan listed `test`, but it was not changed." in prompt
+    assert "Expected change missing" not in prompt  # said once, in the plan's words
+    assert main(["session", "-C", repo.path, "scope", "--expect", "docs"]) == 0
+    assert "expected docs" in capsys.readouterr().out
+    assert main(["review", "-C", repo.path, "--expect", "app/client.py"]) == 0  # --expect replaces for one review
+    assert "Plan vs actual (1 of 1 done)" in capsys.readouterr().out
+    r = Repository(repo.path)
+    assert r.current_session().expected == ["docs"]  # the session keeps its own
+
+
+PLAN_MD = """# Plan: reports export
+
+1. Add `export()` to `app/routes/reports.py` and call it from `app.main.create_app`.
+2. Update the client (`app/client.py`) to use `fetch`.
+3. Create `app/services/exporter.py` for the CSV writer.
+4. Touch `app/nowhere.py` and `app.does.not_exist`.
+
+- [ ] Add a unit test for the export
+- [ ] Write the database migration
+- [ ] Update the docs and the CHANGELOG
+
+```python
+# `app/in_code_block.py` is ignored
+```
+"""
+
+
+def test_plan_import_extracts_and_reports_what_it_cannot_resolve(make_repo, tmp_path, capsys) -> None:
+    from repoviz.plan import parse_plan_in
+
+    repo = make_repo(PLAN_APP)
+    parsed = parse_plan_in(Repository(repo.path), PLAN_MD)
+    # a bare name (`export()`, `fetch`) is too vague to resolve; a new file counts when the line says "create"
+    assert parsed["expected"] == ["app/routes/reports.py", "symbol:app.main.create_app", "app/client.py",
+                                  "app/services/exporter.py", "test", "migration", "changelog", "docs"]
+    assert [(u["line"], u["text"]) for u in parsed["unresolved"]] == [(6, "app/nowhere.py"), (6, "app.does.not_exist")]
+    plan = tmp_path / "PLAN.md"
+    plan.write_text(PLAN_MD)
+    assert main(["session", "-C", repo.path, "start", "--plan", str(plan)]) == 1  # not confirmed: nothing saved
+    assert "not saved" in capsys.readouterr().out and Repository(repo.path).current_session() is None
+    assert main(["session", "-C", repo.path, "start", "--plan", str(plan), "--yes"]) == 0
+    s = Repository(repo.path).current_session()
+    assert s.expected == parsed["expected"] and s.plan["source"] == "PLAN.md" and len(s.plan["unresolved"]) == 2
+    capsys.readouterr()
+    assert main(["review", "-C", repo.path]) == 0
+    assert "(plan line 6: `app/nowhere.py` not resolved: no such file (and not marked new))" in capsys.readouterr().out
+
+
+def test_a_test_expectation_needs_test_code(make_repo) -> None:
+    repo = make_repo(PLAN_APP)
+    repo.write({"tests/README.md": "# how to run\n", "tests/test.env": "X=1\n"})
+    assert _plan_review(repo, ["test"])["plan"]["expected"][0]["status"] == "missing"

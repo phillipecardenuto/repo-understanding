@@ -2876,11 +2876,62 @@
     if (scope.allowed.length) return matchAny(path, scope.allowed) ? "allowed" : "out-of-scope";
     return "unscoped";
   }
+  /* Plan vs actual (mirror of plan.py): each expectation done or missing, and large files the plan did not name. */
+  const PLAN_KINDS = { test: "test", tests: "test", migration: "migration", migrations: "migration", docs: "docs", doc: "docs",
+    documentation: "docs", changelog: "changelog" };
+  const PLAN_MIGRATION = /(^|\/)(migrations?|migrate|alembic\/versions|db\/migrate|schema_migrations)(\/|$)/i;
+  const PLAN_DOCS = /((^|\/)docs?\/|\.(md|rst|adoc|txt)$)/i;
+  const PLAN_CHANGELOG = /(^|\/)(changelog|changes|history|news|release[-_]?notes)(\.[a-z]+)?$|(^|\/)changelog\.d\//i;
+  function parseExpectation(text) {
+    const raw = String(text || "").split(/\s+/).filter(Boolean).join(" ");
+    if (!raw) return null;
+    const low = raw.toLowerCase();
+    if (PLAN_KINDS[low]) return { raw, kind: PLAN_KINDS[low], value: PLAN_KINDS[low] };
+    if (low.startsWith("kind:") && PLAN_KINDS[low.slice(5)]) return { raw, kind: PLAN_KINDS[low.slice(5)], value: PLAN_KINDS[low.slice(5)] };
+    if (low.startsWith("symbol:")) return { raw, kind: "symbol", value: raw.slice(7).trim().replace(/\(\)$/, "") };
+    let value = raw.replace(/^\.\//, "");
+    if (value.endsWith("/")) value += "**";
+    return { raw, kind: "path", value };
+  }
+  function planKinds(path, isTest) {
+    const k = new Set();
+    if (isTest) k.add("test");
+    if (PLAN_MIGRATION.test(path)) k.add("migration");
+    if (PLAN_CHANGELOG.test(path)) k.add("changelog"); else if (PLAN_DOCS.test(path)) k.add("docs");
+    return k;
+  }
+  const UNPLANNED_LINES = 50;
+  function planCheck(expected, files) {
+    const items = (expected || []).map(parseExpectation).filter(Boolean);
+    const covered = new Set(), out = [];
+    for (const e of items) {
+      const matches = [];
+      for (const f of files) {
+        if (e.kind === "path") {
+          if ([f.path, f.previous_path].filter(Boolean).some((p) => p === e.value || globMatch(p, e.value))) matches.push(f.path);
+        } else if (e.kind === "symbol") {
+          for (const s of f.symbols || []) {
+            const qn = s.qualified_name || "";
+            if (["added", "modified", "renamed"].includes(s.status) && (qn === e.value || qn.endsWith("." + e.value))) { matches.push(`${qn} (${f.path})`); covered.add(f.path); }
+          }
+        } else if (f.status !== "removed" && planKinds(f.path, !!(f.is_test && (f.code !== undefined ? f.code : f.language))).has(e.kind)) matches.push(f.path);
+      }
+      if (e.kind !== "symbol") for (const m of matches) covered.add(m);
+      out.push(Object.assign({}, e, { status: matches.length ? "done" : "missing", matches: matches.slice(0, 20), more: Math.max(0, matches.length - 20) }));
+    }
+    const unplanned = !items.some((e) => e.kind === "path" || e.kind === "symbol") ? [] : files
+      .map((f) => ({ path: f.path, lines: (f.lines_added || 0) + (f.lines_removed || 0), status: f.status }))
+      .filter((u) => !covered.has(u.path) && u.lines > UNPLANNED_LINES).sort((a, b) => b.lines - a.lines).slice(0, 50);
+    return { expected: out, done: out.filter((e) => e.status === "done").length, missing: out.filter((e) => e.status === "missing").length,
+      unplanned, unplanned_lines: UNPLANNED_LINES };
+  }
   const SEV = { high: 0, medium: 1, low: 2, info: 3 };
+  /* Signals the page recomputes when the scope or the plan is edited (the others come from the server). */
+  const LOCAL_KINDS = new Set(["protected-touched", "out-of-scope", "expected-not-changed"]);
   const VERDICT_LABELS = { "should-not-touch": "Should not have been modified", "logic-error": "Logic error", missed: "Missed / incomplete",
     improve: "Should be improved", question: "Question", ok: "Looks good / not an issue" };
   const VERDICT_FOR_CATEGORY = { scope: "should-not-touch", correctness: "logic-error", tests: "missed", security: "logic-error",
-    architecture: "improve", hygiene: "improve" };
+    architecture: "improve", hygiene: "improve", plan: "missed", dependencies: "improve" };
   const splitGlobs = (text) => (text || "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
   function scopePill(scope) {
     return { protected: pill([iconEl("lock", true), " protected"], "high"), "out-of-scope": pill([iconEl("alert", true), " out of scope"], "medium"),
@@ -2923,6 +2974,11 @@
       if ((scope.allowed || []).length) L.push("Allowed scope: " + scope.allowed.map((p) => "`" + p + "`").join(", "));
       if ((scope.protected || []).length) L.push("Do not modify: " + scope.protected.map((p) => "`" + p + "`").join(", "));
     }
+    const missing = ((report.plan || {}).expected || []).filter((e) => e.status === "missing");
+    if (missing.length) {  // the plan's own words first: this is what the agent was asked to do
+      for (const f of report.findings) if (f.kind === "expected-not-changed") triaged.add(f.id);
+      L.push("", "## Plan items not done", "", ...missing.map((e) => `- The plan listed \`${e.raw}\`, but it was not changed.`));
+    }
     const sections = [["should-not-touch", "Revert: changes that should not have been made"], ["logic-error", "Fix: logic errors"],
       ["missed", "Complete: missed or incomplete work"], ["improve", "Improve"], ["question", "Answer these questions"]];
     let n = 0;
@@ -2958,7 +3014,7 @@
       L.push("", "## Riskiest files (double-check them)", "");
       for (const t of risky) L.push(`- \`${t.path}\`: ${t.level} risk (${t.score}/100): ${t.factors.join("; ")}`);
     }
-    if (!n) L.push("", "No issues to report.");
+    if (!n && !missing.length) L.push("", "No issues to report.");
     L.push("", "Please address every numbered item, stay within the allowed scope, and reply with one line per item describing what you changed (or why no change was needed).");
     return L.join("\n") + "\n";
   }
@@ -3038,7 +3094,9 @@
         this.syncTargetSelect(); this.load(); } });
       this.allowedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/billing/**, tests/billing/**", "aria-label": "Allowed paths" });
       this.protectedInput = h("textarea", { rows: 2, cols: 28, placeholder: "e.g. src/auth/**, migrations/**", "aria-label": "Protected paths" });
-      for (const input of [this.allowedInput, this.protectedInput]) {
+      this.expectedInput = h("textarea", { rows: 2, cols: 30, placeholder: "e.g. app/client.py, symbol:app.main.create_app, test", "aria-label": "Expected to change",
+        title: "What the plan says will change: path globs, symbol:<qualified name>, or test / migration / docs / changelog. Each is checked: done or not changed." });
+      for (const input of [this.allowedInput, this.protectedInput, this.expectedInput]) {
         input.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); this.applyScopeFromInputs(); } });
       }
       this.statusEl = h("span", { class: "muted", role: "status" });
@@ -3071,9 +3129,13 @@
       }
       this.saveScopeBtn = h("button", { class: "btn small", hidden: true, title: "Store this scope with the work session (used by the CLI too)", onclick: () => this.saveScopeToSession() }, "Save to session");
       this.resetScopeBtn = h("button", { class: "btn small", title: "Discard your edits and use the scope from the configuration / session", onclick: () => this.resetScope() }, "Reset");
+      this.planForm = h("div", { class: "card plan-import", hidden: true });
       put(bar, 
         field("Allowed to change (globs)", this.allowedInput),
         field("Must not touch (globs)", this.protectedInput),
+        h("div", { class: "field" }, h("span", { text: "Expected to change (plan)" }), h("div", { class: "group" }, this.expectedInput,
+          app.api.live ? h("button", { class: "btn small", title: "Extract expectations from a Markdown plan (paths, functions, tests, migrations…) and confirm them before use",
+            onclick: () => this.togglePlanImport() }, "Import plan…") : null)),
         h("div", { class: "field" }, h("span", { text: "Scope" }), h("div", { class: "group" },
           h("button", { class: "btn small primary", title: "Re-evaluate every file against these patterns (Ctrl+Enter)", onclick: () => this.applyScopeFromInputs() }, "Apply scope"),
           this.resetScopeBtn, this.saveScopeBtn)),
@@ -3096,7 +3158,9 @@
         h("h2", { class: "section-title" }, "Changed modules ", h("span", { class: "faint small", text: "keys: j / k next / previous file · m mark reviewed · [ / ] previous / next commit" })),
         h("div", { class: "split files-split" }, this.filesEl, this.fileEl),
         h("h2", { class: "section-title", text: "Feedback for the agent" }), this.feedbackEl);
-      put(this.root, bar, this.emptyEl, this.bodyEl);
+      this.planEl = h("div", { class: "card plan-card", hidden: true });
+      this.bodyEl.insertBefore(this.planEl, this.statsEl.nextSibling);
+      put(this.root, bar, this.planForm, this.emptyEl, this.bodyEl);
       document.addEventListener("keydown", (ev) => this.onKey(ev));
       await this.loadTargets();
       await this.load();
@@ -3201,14 +3265,16 @@
       this.commit = null;
       this.signature = sig;
       this.key = r.target.key;
-      this.serverScope = { allowed: r.scope.allowed || [], protected: r.scope.protected || [] };
-      this.serverFindings = r.findings.filter((f) => f.kind !== "protected-touched" && f.kind !== "out-of-scope");
+      this.serverScope = { allowed: r.scope.allowed || [], protected: r.scope.protected || [], expected: r.scope.expected || [] };
+      this.serverPlan = r.plan || null;
+      this.serverFindings = r.findings.filter((f) => !LOCAL_KINDS.has(f.kind));
       const local = storage.get(`rv.notes.${this.repoKey}.${this.key}`, null);
       this.notes = app.api.live ? (r.notes || []) : (local || r.notes || []);
       this.reviewed = storage.get(`rv.reviewed.${this.repoKey}.${this.key}`, {}) || {};
-      const scope = storage.get(`rv.scope.${this.repoKey}.${this.key}`, null) || this.serverScope;
+      const scope = Object.assign({ expected: this.serverScope.expected }, storage.get(`rv.scope.${this.repoKey}.${this.key}`, null) || this.serverScope);
       this.allowedInput.value = scope.allowed.join(", ");
       this.protectedInput.value = scope.protected.join(", ");
+      this.expectedInput.value = (scope.expected || []).join(", ");
       this.saveScopeBtn.hidden = !(app.api.live && r.target.session_id);
       if (app.api.live && this.opts.custom && !prev) { this.customLabel = r.target.label; this.previousCustom = this.opts.custom; this.syncTargetSelect(); }
       this.statusEl.textContent = `${r.base.label} → ${r.head.label}` + (prev ? " · updated" : "");
@@ -3259,7 +3325,7 @@
     }
     useReport(r) {
       this.report = r;
-      this.serverFindings = r.findings.filter((f) => f.kind !== "protected-touched" && f.kind !== "out-of-scope");
+      this.serverFindings = r.findings.filter((f) => !LOCAL_KINDS.has(f.kind));
       if (!r.files.some((f) => f.path === this.selectedFile)) this.selectedFile = null;
       this.selectedComponent = null; this.selectedDir = null; this.fileOrder = null;
       this.findingsShown = 200;
@@ -3321,7 +3387,7 @@
         this.app.api.live ? h("button", { class: "btn", onclick: () => this.app.show("activity") }, "Open the Activity tab") : null);
     }
     applyScopeFromInputs() {
-      const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value) };
+      const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value), expected: splitGlobs(this.expectedInput.value) };
       storage.set(`rv.scope.${this.repoKey}.${this.key}`, scope);
       this.applyScope(scope, true);
       this.statusEl.textContent = `Scope applied: ${this.report.files.filter((f) => f.scope === "protected").length} protected, ${this.report.files.filter((f) => f.scope === "out-of-scope").length} out of scope.`;
@@ -3331,23 +3397,38 @@
       try { localStorage.removeItem(`rv.scope.${this.repoKey}.${this.key}`); } catch (e) { /* ignore */ }
       this.allowedInput.value = this.serverScope.allowed.join(", ");
       this.protectedInput.value = this.serverScope.protected.join(", ");
+      this.expectedInput.value = this.serverScope.expected.join(", ");
+      this.pendingPlan = null;
       this.applyScope(this.serverScope, true);
       this.statusEl.textContent = "Scope reset to the configured / session scope.";
     }
     async saveScopeToSession() {
-      const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value) };
+      const scope = { allowed: splitGlobs(this.allowedInput.value), protected: splitGlobs(this.protectedInput.value), expected: splitGlobs(this.expectedInput.value) };
+      const plan = this.pendingPlan || (this.serverPlan && this.serverPlan.source ? { source: this.serverPlan.source, unresolved: this.serverPlan.unresolved || [] } : null);
       try {
-        await this.app.api.post("/api/session/scope", Object.assign({ session_id: this.report.target.session_id }, scope));
+        await this.app.api.post("/api/session/scope", Object.assign({ session_id: this.report.target.session_id, plan }, scope));
         this.serverScope = scope;
-        this.statusEl.textContent = "Scope saved to the session.";
+        if (this.pendingPlan) this.serverPlan = Object.assign({}, this.serverPlan || {}, this.pendingPlan);
+        this.pendingPlan = null;
+        this.applyScope(scope, true);
+        this.statusEl.textContent = "Scope and expectations saved to the session.";
       } catch (err) { this.statusEl.textContent = "Could not save scope: " + err.message; }
     }
     /* Re-evaluate scope for every file and regenerate the scope findings (the rest come from the server). */
     applyScope(scope, redraw) {
       const r = this.report;
       this.scope = scope;
-      r.scope = Object.assign({}, r.scope, { allowed: scope.allowed, protected: scope.protected });
+      const expected = scope.expected || [];
+      r.scope = Object.assign({}, r.scope, { allowed: scope.allowed, protected: scope.protected, expected });
       const findings = this.serverFindings.slice();
+      // Plan vs actual, from the editor's list (the server's plan keeps its source and unresolved lines).
+      const meta = this.pendingPlan || this.serverPlan || {};
+      r.plan = expected.length ? Object.assign(planCheck(expected, r.files), { source: meta.source || null, unresolved: meta.unresolved || [] }) : null;
+      for (const e of r.plan ? r.plan.expected : []) {
+        if (e.status === "missing") findings.push({ id: "f_plan_" + e.raw, kind: "expected-not-changed", category: "plan", severity: "medium",
+          title: `Expected change missing: ${e.raw}`, detail: `The plan listed ${e.raw}, but it was not changed.`,
+          suggestion: "Do this part of the plan, or explain why it is no longer needed." });
+      }
       for (const f of r.files) {
         f.scope = scopeOf(f.path, scope);
         // A submodule whose changed files are listed: those files are flagged, not their container (as on the server).
@@ -3439,8 +3520,62 @@
     draw() {
       this.drawCommits();
       this.drawStats();
+      this.drawPlan();
       this.drawMap();
       this.drawPanels();
+    }
+    /* Plan vs actual: each expectation done (with what matched) or not changed; large changes the plan did not name. */
+    drawPlan() {
+      const plan = this.report.plan, el = this.planEl;
+      el.innerHTML = "";
+      el.hidden = !plan;
+      if (!plan) return;
+      const fileLink = (path) => this.report.files.some((f) => f.path === path)
+        ? h("a", { href: "#", class: "mono", onclick: (ev) => { ev.preventDefault(); this.selectFile(path); } }, path) : h("span", { class: "mono", text: path });
+      const row = (e) => h("li", { class: "plan-" + e.status },
+        e.status === "done" ? pill([iconEl("check", true), " done"], "added") : pill([iconEl("alert-circle", true), " not changed"], "high"), " ",
+        h("b", { class: "mono", text: e.raw }), " ", h("span", { class: "faint", text: e.kind === "path" ? "" : `(${e.kind})` }), " ",
+        e.matches.length ? h("span", { class: "plan-matches" }, "— ", e.matches.slice(0, 6).map((m, i) => [i ? ", " : "", e.kind === "symbol" ? h("span", { class: "mono", text: m }) : fileLink(m)]),
+          e.more || e.matches.length > 6 ? h("span", { class: "faint", text: ` … ${e.more + Math.max(0, e.matches.length - 6)} more` }) : null) : null);
+      put(el, h("h3", null, "Plan vs actual ", h("span", { class: "faint small", text: `${plan.done} of ${plan.expected.length} done` + (plan.source ? ` · from ${plan.source}` : "") })),
+        h("ul", { class: "plain plan-list" }, plan.expected.map(row)),
+        (plan.unplanned || []).length ? [h("h4", { text: `Not in the plan (over ${plan.unplanned_lines} changed lines)` }),
+          h("ul", { class: "plain" }, plan.unplanned.map((u) => h("li", null, pill([iconEl("alert", true), " not in the plan"], "medium"), " ", fileLink(u.path),
+            h("span", { class: "faint", text: ` ${u.lines} lines` }))))] : null,
+        (plan.unresolved || []).length ? h("details", null, h("summary", null, `${plural(plan.unresolved.length, "line")} of the plan could not be resolved`),
+          h("ul", { class: "plain" }, plan.unresolved.map((u) => h("li", { class: "faint" }, `line ${u.line}: `, h("code", { text: u.text }), ` — ${u.reason}`)))) : null,
+        this.app.api.live ? null : h("div", { class: "faint small", text: "Editing and saving the plan needs the live app (repoviz serve); here the list above can be changed for this page only." }));
+    }
+    /* Import a Markdown plan: the server extracts expectations; nothing is used until you confirm. */
+    togglePlanImport() {
+      const form = this.planForm;
+      if (!form.hidden) { form.hidden = true; return; }
+      form.innerHTML = "";
+      const text = h("textarea", { rows: 8, cols: 80, placeholder: "Paste the agent's plan (Markdown)", "aria-label": "Plan (Markdown)" });
+      const result = h("div", { class: "plan-extracted" });
+      const extract = async () => {
+        result.innerHTML = "";
+        try {
+          const r = await this.app.api.post("/api/plan/parse", { text: text.value });
+          put(result, h("h4", { text: `Extracted ${plural(r.expected.length, "expectation")}` }),
+            r.expected.length ? h("ul", { class: "plain" }, r.expected.map((e) => h("li", null, h("span", { class: "faint", text: "+ " }), h("code", { text: e })))) : h("div", { class: "empty", text: "Nothing recognised: name files and functions in backticks." }),
+            (r.unresolved || []).length ? [h("h4", { text: `Not resolved (${r.unresolved.length})` }),
+              h("ul", { class: "plain" }, r.unresolved.map((u) => h("li", { class: "faint" }, iconEl("alert"), ` line ${u.line}: `, h("code", { text: u.text }), ` — ${u.reason}`)))] : null,
+            h("div", { class: "group" }, h("button", { class: "btn small primary", disabled: !r.expected.length, onclick: () => {
+              const merged = [...new Set([...splitGlobs(this.expectedInput.value), ...r.expected])];
+              this.expectedInput.value = merged.join(", ");
+              this.pendingPlan = { source: "pasted plan", unresolved: r.unresolved || [] };
+              form.hidden = true;
+              this.applyScopeFromInputs();
+              this.statusEl.textContent = `Plan applied: ${plural(r.expected.length, "expectation")}. “Save to session” keeps them with the wave.`;
+            } }, "Use these"), h("button", { class: "btn small", onclick: () => { form.hidden = true; } }, "Cancel")));
+        } catch (err) { result.textContent = "Could not read the plan: " + err.message; }
+      };
+      put(form, h("h3", { text: "Import a plan" }),
+        h("div", { class: "muted small", text: "Backticked paths and dotted names (`app/client.py`, `app.main.create_app`) and list items about tests, migrations, docs or the changelog become expectations. Nothing is saved until you choose." }),
+        text, h("div", { class: "group" }, h("button", { class: "btn small", onclick: extract }, "Extract"), h("button", { class: "btn small", onclick: () => { form.hidden = true; } }, "Close")), result);
+      form.hidden = false;
+      text.focus();
     }
     drawStats() {
       const r = this.report, s = r.summary;
@@ -3994,6 +4129,7 @@
         { h: "Commit by commit" },
         { ul: ["When the wave has commits, the **Commits** panel lists them oldest first, followed by any uncommitted work, with files, lines and signals per commit.",
           "Click a commit (or press `[` / `]`) to review that step alone: in the live app its own diff, key changes and signals; in a report, the files it touched. **Show all** returns to the whole wave.",
+          "**Plan vs actual.** List what the plan says will change under *Expected to change*: path globs, `symbol:app.main.create_app`, or `test`, `migration`, `docs`, `changelog`. The card marks each **done** (with what matched) or **not changed** (a *Expected change missing* signal, and a line in the feedback prompt), and, when the plan names files or symbols, lists large changes **not in the plan**. **Import plan…** (live app) extracts them from a pasted Markdown plan for you to confirm; **Save to session** keeps them with the wave.",
           "Without commits, **checkpoints** mark the steps: the target list offers *Since checkpoint N* and *Last step: checkpoint N-1 → N*, and a checkpoint in the Activity tab's timeline opens its step here. **Mark checkpoint** records one now (live app).",
           "Notes you take while looking at one commit still go to the wave's feedback prompt. *Changed, then changed back* flags files a commit changed and a later one restored."] },
         { h: "6. Send feedback" },

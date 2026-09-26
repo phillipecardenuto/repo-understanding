@@ -124,6 +124,10 @@ or as the *exact difference* between the two trees.
     files changed inside it.
   - **Paths** start at the component's folder (`…/cbir/src/search.py`) and are
     shortened in the middle; hover for the full path, or use **Copy path**.
+  - **Plan vs actual:** list what the plan says will change (paths,
+    `symbol:…`, `test`, `migration`…), or import a Markdown plan. Each item
+    shows as done or *not changed*, and large changes the plan did not name
+    are listed.
   - **Search** (`/`) and **component chips** narrow the table, together. The
     search, chips and groups are remembered.
   - **Change card.** Each file opens one with:
@@ -344,6 +348,7 @@ repoviz review --format prompt          # numbered file:line feedback to paste b
 repoviz review --by-commit              # the same, step by step (the UI's Commits panel)
 repoviz session checkpoint --label "step 2"   # mark a moment (or let an agent hook do it after each edit)
 repoviz review checkpoint:2-3           # just what happened between two checkpoints
+repoviz session scope --expect app/client.py --expect test   # the plan: each item done or not changed
 repoviz review main...claude/feature    # any branch against any other, since it left main
 repoviz review --fail-on protected --fail-on high   # guardrail for scripted loops (exit 3)
 repoviz review --fail-on risk:high      # exit 3 when the wave risk is high

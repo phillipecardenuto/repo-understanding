@@ -1335,3 +1335,52 @@ def test_activity_timeline_opens_a_step_in_review(page, make_repo, tmp_path: Pat
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_plan_vs_actual_card_editor_and_import(page, make_repo, tmp_path: Path) -> None:
+    from test_review import PLAN_APP, PLAN_MD
+
+    repo = make_repo(PLAN_APP)
+    r = Repository(repo.path)
+    s = r.state.start_session(r.git, r.root, "wave", expected=["app/client.py", "test"],
+                             plan={"source": "PLAN.md", "unresolved": [{"line": 6, "text": "app/nowhere.py", "reason": "no such file"}]})
+    repo.write({"app/client.py": "def fetch():\n    return 1\n"})
+    report = tmp_path / "review.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    card = page.locator("#tab-review .plan-card")
+    assert "1 of 2 done · from PLAN.md" in card.inner_text()
+    assert "done" in card.locator("li.plan-done").inner_text() and "not changed" in card.locator("li.plan-missing").inner_text()
+    assert card.locator("li.plan-missing i.rvi-alert-circle").count() == 1  # icon and word, not colour alone
+    assert "Expected change missing: test" in page.inner_text("#tab-review .findings-card")
+    assert "The plan listed `test`, but it was not changed." in page.inner_text("#tab-review pre.prompt")
+    # The list can be edited on the page; the check and the signals follow.
+    page.fill("#tab-review textarea[aria-label='Expected to change']", "app/client.py, docs")
+    page.click("#tab-review >> text=Apply scope")
+    assert "1 of 2 done" in card.inner_text() and "Expected change missing: docs" in page.inner_text("#tab-review .findings-card")
+    assert page.locator("#tab-review button:has-text('Import plan')").count() == 0  # needs the live app
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.evaluate("localStorage.clear()")
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=review")
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        page.click("#tab-review button:has-text('Import plan')")
+        page.fill("#tab-review .plan-import textarea", PLAN_MD)
+        page.click("#tab-review .plan-import >> text=Extract")
+        page.wait_for_selector("#tab-review .plan-extracted h4", timeout=30_000)
+        extracted = page.inner_text("#tab-review .plan-extracted")
+        assert "symbol:app.main.create_app" in extracted and "Not resolved (2)" in extracted
+        assert Repository(repo.path).current_session().expected == ["app/client.py", "test"]  # nothing saved yet
+        page.click("#tab-review .plan-extracted >> text=Use these")
+        assert "from pasted plan" in page.inner_text("#tab-review .plan-card")
+        page.click("#tab-review >> text=Save to session")
+        page.wait_for_function("() => document.querySelector('#tab-review [role=status]').textContent.includes('saved')", timeout=30_000)
+        saved = Repository(repo.path).current_session()
+        assert "symbol:app.main.create_app" in saved.expected and saved.plan["source"] == "pasted plan"
+        assert len(saved.plan["unresolved"]) == 2 and s.id == saved.id
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()

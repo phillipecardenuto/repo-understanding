@@ -617,6 +617,38 @@ def cmd_coupling(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _expectations(repo: Repository, args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
+    """``--expect`` entries plus what ``--plan FILE`` extracts; ``(None, {})`` when neither is given, ``(False, {})``
+    on an error.  A plan's expectations are saved only after confirmation (``--yes``, or a yes on a terminal)."""
+    from .plan import normalize, parse_plan_in
+
+    if args.action not in ("start", "scope") or not (args.expect or args.plan):
+        return None, {}
+    expected = normalize(args.expect)
+    info: dict[str, Any] = {}
+    if args.plan:
+        try:
+            text = Path(args.plan).read_text(encoding="utf-8", errors="replace")[:1_000_000]
+        except OSError as exc:
+            print(f"repoviz: cannot read the plan {args.plan}: {exc}", file=sys.stderr)
+            return False, {}
+        parsed = parse_plan_in(repo, text)
+        print(f"From {args.plan}: {len(parsed['expected'])} expectation(s)")
+        for e in parsed["expected"]:
+            print(f"  + {e}")
+        for u in parsed["unresolved"]:
+            print(f"  ? line {u['line']}: `{u['text']}` not resolved ({u['reason']})")
+        confirmed = args.yes
+        if not confirmed and sys.stdin.isatty():
+            confirmed = input("Save these expectations? [y/N] ").strip().lower() in ("y", "yes")
+        if not confirmed:
+            print("not saved: review the list, then run again with --yes (or edit it in the AI Review tab)")
+            return False, {}
+        expected = normalize(expected + parsed["expected"])
+        info = {"source": Path(args.plan).name, "unresolved": parsed["unresolved"]}
+    return expected, info
+
+
 def cmd_session(args: argparse.Namespace) -> int:
     if args.action in ("checkpoint", "note"):
         from .checkpoint_cli import run
@@ -658,23 +690,29 @@ def cmd_session(args: argparse.Namespace) -> int:
         print(f"removed {out['checkpoints']} checkpoint(s) and {out['files']} file copies from {out['sessions']} "
               f"session(s) that ended more than {args.days:g} days ago")
         return EXIT_OK
+    expected, plan = _expectations(repo, args)
+    if expected is False:
+        return EXIT_ERROR
     if args.action == "start":
         if not repo.is_git:
             print("repoviz: sessions need a Git repository", file=sys.stderr)
             return EXIT_ERROR
         s = repo.state.start_session(repo.git, repo.root, label=args.label or "", allowed=args.allow,
-                                     protected=args.protect)
+                                     protected=args.protect, expected=expected or [], plan=plan)
         print(f"session {s.id} started at {s.started_at} (baseline {(s.baseline_head or 'empty')[:12]}, "
               f"{len(s.overrides)} dirty file(s) captured)")
         if s.allowed or s.protected:
             print(f"  scope: allowed {s.allowed or '(any)'}; protected {s.protected or '(none)'}")
+        if s.expected:
+            print(f"  expected to change: {', '.join(s.expected)}")
     elif args.action == "scope":
         s = repo.current_session()
         if s is None:
             print("no active session", file=sys.stderr)
             return EXIT_ERROR
-        s = repo.state.update_scope(s, args.allow or None, args.protect or None)
-        print(f"session {s.id} scope: allowed {s.allowed or '(any)'}; protected {s.protected or '(none)'}")
+        s = repo.state.update_scope(s, args.allow or None, args.protect or None, expected, plan)
+        print(f"session {s.id} scope: allowed {s.allowed or '(any)'}; protected {s.protected or '(none)'}"
+              + (f"; expected {', '.join(s.expected)}" if s.expected else ""))
     elif args.action == "end":
         s = repo.state.end_session(repo.git, repo.root)
         print(f"session {s.id} ended; review it later with: repoviz review session:{s.id}" if s else "no active session")
@@ -722,7 +760,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             print(f"repoviz: {exc}", file=sys.stderr)
             return EXIT_ERROR
         try:
-            report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect),
+            report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect,
+                                                                args.expect or None),
                                   commit=args.commit)
         except ValueError as exc:
             print(f"repoviz: {exc}", file=sys.stderr)
@@ -791,8 +830,12 @@ def format_review_markdown(report: dict[str, Any]) -> str:
         scope = ", ".join(f"{v} {k}" for k, v in c["scope"].items())
         found = ", ".join(f"{v} {k}" for k, v in c["findings"].items() if v) or "–"
         lines.append(f"| {c['name']} | {c['files']} | +{c['lines_added']} −{c['lines_removed']} | {scope} | {found} |")
-    from .review import dependency_summary, package_lines, value_lines
+    from .review import dependency_summary, package_lines, plan_lines, value_lines
 
+    plan = plan_lines(report)
+    if plan:
+        lines += ["", f"**Plan vs actual** ({report['plan']['done']} of {len(report['plan']['expected'])} done)", ""]
+        lines += [f"- {x}" for x in plan[:40]]
     packages = package_lines(report)
     if packages:
         lines += ["", f"**Dependencies changed** ({dependency_summary(report['summary']) or len(packages)})", ""]
@@ -993,6 +1036,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="paths the agent may change in this session (repeatable)")
     p.add_argument("--protect", action="append", default=[], metavar="GLOB",
                    help="paths the agent must not change in this session (repeatable)")
+    p.add_argument("--expect", action="append", default=[], metavar="ENTRY",
+                   help="what the plan says will change (repeatable): a path glob, symbol:<qualified name>, or test / "
+                   "migration / docs / changelog; the review lists each as done or not changed")
+    p.add_argument("--plan", metavar="FILE", help="extract expectations from a Markdown plan (backticked paths and "
+                   "names, list items about tests or migrations); shown for confirmation")
+    p.add_argument("--yes", action="store_true", help="save what --plan extracts without asking")
     p.set_defaults(func=cmd_session)
 
     p = sub.add_parser("review", parents=[common], help="review what an AI agent changed (scope, findings, feedback)")
@@ -1005,6 +1054,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow", action="append", default=[], metavar="GLOB", help="additional allowed path (repeatable)")
     p.add_argument("--protect", action="append", default=[], metavar="GLOB",
                    help="additional protected path (repeatable)")
+    p.add_argument("--expect", action="append", default=[], metavar="ENTRY",
+                   help="expected change for this review (repeatable; replaces the session's): a path glob, "
+                   "symbol:<name>, test, migration, docs or changelog")
     p.add_argument("--format", choices=("text", "json", "markdown", "prompt", "sarif", "github", "pr-comment"),
                    default="text", help="prompt = feedback for the agent (reviewer notes + automated signals); "
                    "sarif = code scanning; github = workflow commands (inline annotations in GitHub Actions); "

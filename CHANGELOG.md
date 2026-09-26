@@ -6,6 +6,21 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Expected changes: plan vs actual** ([#8](https://github.com/phillipecardenuto/repo-understanding/issues/8)).
+  - A session (or one review) can list what the plan says will change: path
+    globs, `symbol:<qualified name>`, or `test` / `migration` / `docs` /
+    `changelog` (`--expect`, `repoviz session scope --expect`, or the AI
+    Review tab's *Expected to change* list).
+  - The review shows a **Plan vs actual** card: each item done (with the files
+    or symbols that matched) or not changed. When the plan names files or
+    symbols, it also lists large changes not in the plan.
+  - New signal `expected-not-changed` (medium). The feedback prompt starts
+    with "The plan listed X, but it was not changed."
+  - `--plan PLAN.md` and *Import plan…* extract expectations from a Markdown
+    plan: backticked paths and names, and list items about tests,
+    migrations, docs or the changelog. Unresolved lines are listed, and
+    nothing is saved until you confirm. Expectations are stored with the
+    session.
 - **Checkpoints and an edit timeline inside a wave** ([#7](https://github.com/phillipecardenuto/repo-understanding/issues/7)).
   - `repoviz session checkpoint [--label]` records the working tree as a step
     of the session. It stores the commit checked out plus private,
