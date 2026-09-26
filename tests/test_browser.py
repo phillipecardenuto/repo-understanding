@@ -6,6 +6,7 @@ taken from ``REPOVIZ_CHROMIUM`` or Playwright's default installation.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from pathlib import Path
@@ -1384,3 +1385,73 @@ def test_plan_vs_actual_card_editor_and_import(page, make_repo, tmp_path: Path) 
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_verdict_bar_banner_staleness_and_static_json(page, make_repo, tmp_path: Path) -> None:
+    import time
+
+    from repoviz import verdict
+    from repoviz.review import resolve_target
+    from test_review import VERDICT_APP
+
+    repo = make_repo(VERDICT_APP)
+    r = Repository(repo.path)
+    s = r.state.start_session(r.git, r.root, "wave")
+    key = f"session:{s.id}"
+    repo.write({"app/a.py": "def f():\n    return 2\n"})
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    banner = "#tab-review .verdict-banner"
+    try:
+        # the link `repoviz review --wait` prints opens that review
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=review&review=session")
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        assert page.evaluate("repoviz.app.tabs.review.report.target.id") == "session"
+        assert page.locator(banner).is_hidden()
+        page.evaluate("repoviz.app.tabs.review.setReviewed('app/a.py', true)")
+        page.fill("#tab-review textarea[aria-label='Verdict summary']", "f must keep returning 1")
+        page.fill("#tab-review input[aria-label='Reviewer']", "Ana")
+        page.click("#tab-review .verdict-btn.request-changes")
+        page.wait_for_selector(f"{banner}.request-changes", timeout=30_000)
+        text = page.inner_text(banner)
+        assert "Changes requested by Ana" in text and "f must keep returning 1" in text
+        assert page.locator(f"{banner} i.rvi-comment").count() == 1  # an icon and words, not colour alone
+        v = r.state.load_verdict(key)
+        assert v["verdict"] == "request-changes" and v["prompt"].startswith("# Review feedback")
+        for _ in range(50):  # reviewed marks are saved on the server (debounced)
+            if r.state.load_reviewed(key):
+                break
+            time.sleep(0.1)
+        assert list(r.state.load_reviewed(key)) == ["app/a.py"]
+        # a change after the verdict: the page says it is stale
+        repo.write({"app/b.py": "X = 2\n"})
+        page.evaluate("repoviz.app.tabs.review.refresh(true)")
+        page.wait_for_selector(f"{banner}.stale", timeout=30_000)
+        assert "Stale: files changed since this verdict" in page.inner_text(banner)
+        assert page.locator(f"{banner} i.rvi-alert").count() == 1
+        page.click("#tab-review .verdict-btn.approve")
+        page.wait_for_selector(f"{banner}.approve:not(.stale)", timeout=30_000)
+        assert verdict.gate(r, resolve_target(r, None))["ok"]
+        assert "before: Changes requested" in page.inner_text("#tab-review .verdict-card")
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    # The static report shows the verdict, cannot record one, and copies one as JSON instead.
+    report = tmp_path / "review.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri())
+    page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+    assert "Approved by Ana" in page.inner_text(banner) and "Stale" not in page.inner_text(banner)
+    assert "cannot record a verdict" in page.inner_text("#tab-review .verdict-card")
+    copy = page.locator("#tab-review button:has-text('Copy verdict as JSON')")
+    assert copy.is_disabled()
+    page.click("#tab-review .verdict-btn.reject")
+    assert page.locator("#tab-review .verdict-btn.reject").get_attribute("aria-pressed") == "true"
+    page.evaluate("Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: (t) => "
+                  "{ window.copied = t; return Promise.resolve(); } } })")
+    copy.click()
+    data = json.loads(page.evaluate("window.copied"))
+    assert data["verdict"] == "reject" and data["recorded"] is False and data["target"]["key"] == key
+    assert data["fingerprint"] == r.state.load_verdict(key)["fingerprint"] and data["prompt"].startswith("# Review feedback")
+    assert page.errors == []  # type: ignore[attr-defined]

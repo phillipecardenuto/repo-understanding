@@ -14,6 +14,10 @@ coding agents across features or implementation *waves*:
 4. **Tell the agent.** Leave notes on signals, files or individual diff lines,
    each with a verdict, and export them as a numbered, `file:line`-referenced
    prompt to paste back to the agent.
+5. **Close the loop.** End with a verdict on the wave (approve, request changes
+   or reject). An agent waiting with `repoviz review --wait` gets it at once, and
+   `repoviz gate` keeps it from pushing until a fresh approval exists
+   ([details](#the-verdict-and-the-gate)).
 
 ## Waves (sessions)
 
@@ -666,7 +670,9 @@ in the configuration line of `repoviz discover` and the Structure tab.
 - **Progress:** reviewed files get a ✓ and count towards "N / M reviewed".
   A mark belongs to the file's content: if the agent changes the file again,
   it shows ↻ ("changed since you reviewed it") and must be reviewed again.
-  Marks are kept in the browser.
+  Marks are kept in the browser and, in the live app, in the state directory,
+  so they survive a change of browser and count towards
+  `repoviz gate --require-all-reviewed`.
 - **Scope edits** apply instantly. *Reset* returns to the configured / session
   scope. *Save to session* (live app) stores your edits with the wave.
   Ctrl+Enter in a scope box applies it.
@@ -736,6 +742,153 @@ Either way, **Copy prompt** or **Download .md** exports them.
 
 The prompt lists your notes first, then, optionally, untriaged signals at or
 above a chosen severity, and restates the allowed and protected scope.
+
+## The verdict and the gate
+
+A review ends with a **verdict** on the whole wave: *Approve*, *Request
+changes* or *Reject*, with an optional summary. The **Verdict** bar is at the end
+of the AI Review tab in the live app. Once given, the verdict shows as a banner
+at the top of the tab, with the reviewer and the time, and the bar lists the
+earlier verdicts on the same review. Each verdict has its own icon and word.
+
+A verdict is tied to the exact state you reviewed: a fingerprint of the
+reviewed changes (every changed path with its content on both sides).
+
+- **Stale.** If the files change afterwards, the verdict is stale. The banner
+  says so (dashed border, alert icon, "Stale:"), and the gate refuses it.
+- **Still fresh.** Committing the reviewed work inside a session, or ending the
+  session, does not change what was reviewed, so the verdict stays fresh.
+- **Submitted on an old page.** A verdict submitted from a page loaded before
+  the agent changed something is recorded for what the page showed, so it is
+  stale at once.
+
+Verdicts, notes and "reviewed" marks live in the state directory
+(`reviews/<key-hash>.verdict.json` and `.reviewed.json`, private files), never
+in the repository.
+
+### An agent waits for the verdict: `repoviz review --wait`
+
+```bash
+repoviz review --wait --format json            # blocks until you submit a verdict
+repoviz review --wait --open --timeout 30m     # and opens the review in a browser
+```
+
+- **Server.** It reuses the running `repoviz serve` for this repository (the
+  server registers itself in the state directory). Otherwise it starts one on
+  `--port` (default 8765, or another free port) for as long as it waits.
+- **Waiting.** It prints the link to the review on stderr
+  (`http://127.0.0.1:8765/#tab=review&review=session`), then polls the state
+  file. It opens no new network listener besides the local server.
+- **Result.** When you submit a verdict, it prints it and exits:
+
+  | Exit | Verdict |
+  |---|---|
+  | 0 | approve |
+  | 2 | request changes |
+  | 3 | reject |
+  | 4 | none before `--timeout` (default `30m`; `0` waits forever) |
+
+- **Asking again.** A verdict already given on exactly this state is returned at
+  once, so asking again without changing anything gives the same answer.
+
+```json
+{
+ "target": {"id": "session", "label": "Current session: wave 9: image limits", "key": "session:20260926T143459Z-6df4df"},
+ "waited": true, "url": "http://127.0.0.1:8791/#tab=review&review=session",
+ "verdict": "request-changes", "label": "Changes requested", "exit_code": 2,
+ "summary": "Revert the settings change; the new helper is fine but needs a test.",
+ "reviewer": "Phillipe", "at": "2026-09-26T14:35:46+00:00", "stale": false,
+ "notes": [{"path": "app/config/settings.py", "line": 31, "verdict": "should-not-touch",
+            "text": "Do not rename the extraction directory: existing documents point to it."}],
+ "prompt": "# Review feedback: Current session: wave 9: image limits\n\n..."
+}
+```
+
+- `prompt` is the feedback prompt the page showed when you submitted: the text
+  *Copy prompt* copies.
+- `--format text` prints the verdict, the summary and, unless the work is
+  approved, the prompt.
+
+Coding agents' shell tools often stop a command after a few minutes. If the
+agent can, run the command in the background (Claude Code's Bash tool can, and
+tells the agent when it exits). Otherwise use a short `--timeout` and call it
+again on exit 4.
+
+### Before a push: `repoviz gate`
+
+```bash
+repoviz gate                           # exit 0 when a fresh verdict approves the work, else 3
+repoviz gate --require any             # any fresh verdict will do (the human looked)
+repoviz gate --require-all-reviewed    # and every changed file is marked reviewed
+repoviz gate --max-open high           # and no high signal is left without a note
+repoviz gate --json                    # the result, machine-readable, on stdout
+```
+
+The gate is closed, with one line per reason, when:
+
+- there is no verdict ("no verdict on “…”: ask the human to review it");
+- the files changed since ("verdict is stale: files changed since review");
+- the verdict is not an approval (with `--require approve`, the default);
+- with `--require-all-reviewed`, a changed file is not marked reviewed at its
+  current version;
+- with `--max-open SEVERITY`, a signal at or above it has no note. *Send to
+  agent*, a comment and *Not an issue* all count as a note.
+
+Like `review`, it takes a target (default: the current session, else
+uncommitted changes). Without a session, gate the branch (`repoviz gate branch`)
+or review before committing: a verdict on "uncommitted changes" goes stale once
+they are committed. On a Django-sized working tree the gate takes under a
+second.
+
+repoviz never installs hooks. Pick the ones you want:
+
+- **Agent instructions** (`AGENTS.md`, `CLAUDE.md`):
+
+  ```markdown
+  ## Review before pushing
+  - When a task is done, run `repoviz review --wait --format json` and wait for the verdict.
+    Exit 0: approved. Exit 2: address `summary` and every item in `prompt`, then run it again.
+    Exit 3: stop and ask the human. Exit 4: nobody answered yet; run it again.
+  - Before `git push`, run `repoviz gate`. If it fails, do not push: ask the human to review.
+  ```
+
+- **Claude Code hook.** A `PreToolUse` hook blocks `git push` while the gate is
+  closed, and the reasons go back to the agent. In `.claude/settings.json`:
+
+  ```json
+  {
+    "hooks": {
+      "PreToolUse": [
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": "repoviz gate --hook-input"}]}
+      ]
+    }
+  }
+  ```
+
+  `--hook-input` reads the hook's JSON from stdin. Only commands that run
+  `git push` are gated (also `git -C dir push`). A closed gate exits 2, which
+  blocks the command and shows the reasons to the agent. Otherwise the hook
+  prints nothing.
+
+- **Git pre-push hook** (`.git/hooks/pre-push`, executable):
+
+  ```sh
+  #!/bin/sh
+  exec repoviz gate --quiet
+  ```
+
+The gate is a workflow guard, not a security boundary: anything that runs as
+you can write the state directory. Only the page records verdicts (there is no
+command that approves), and each verdict records who gave it and when.
+
+### In a static report
+
+A static report shows the verdict read-only, and whether it is stale, but
+cannot record one: it writes no state. Its bar becomes **Copy verdict as
+JSON**. Pick a verdict and copy it, with the summary, your notes, the prompt and
+the state's fingerprint, to paste to the agent or attach to a pull request. The
+page says that recording a verdict for `review --wait` and `gate` needs
+`repoviz serve`.
 
 ### Architecture contracts
 

@@ -238,6 +238,7 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
     targets = []
     if include_reviews:
         from ..review import build_review, resolve_target, review_targets
+        from ..verdict import view as verdict_view
 
         for spec in extra_reviews or []:
             try:
@@ -255,6 +256,9 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
             try:
                 report = build_review(repo, t, max_total_diff_lines=20000 if mode == "static" else 40000)
                 report["notes"] = repo.state.load_notes(t.key)
+                report["reviewed"] = repo.state.load_reviewed(t.key)
+                # the verdict given in the live app (read-only here), stale when the files changed since
+                report["verdict"] = verdict_view(repo.state.load_verdict(t.key), report.get("fingerprint"))
                 reviews.append(report)
             except Exception as exc:  # a broken target must not prevent the report
                 errors.append({"severity": "error", "code": "review-failed", "message": f"{t.label}: {exc}",

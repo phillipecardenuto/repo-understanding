@@ -17,6 +17,8 @@ the analyzed repository):
             sessions/<id>/observations.json
             sessions/<id>/timeline.json, checkpoints/<n>.json, statcache.json   (checkpoints.py)
             observations.json      (used when no session is active)
+            reviews/<key-hash>.json, .verdict.json, .reviewed.json   notes, verdict and "reviewed" marks per review
+            server.json            the running `repoviz serve` (url, pid), for `review --wait`
 """
 
 from __future__ import annotations
@@ -343,6 +345,55 @@ class StateStore:
 
     def save_notes(self, key: str, notes: list[dict[str, Any]]) -> None:
         _atomic_write(self._notes_path(key), json.dumps({"key": key, "updated_at": utcnow(), "notes": notes}, indent=1))
+
+    # -- verdicts and "reviewed" marks (verdict.py) ------------------------------------
+
+    def _review_file(self, key: str, suffix: str) -> Path:
+        return self.dir / "reviews" / f"{stable_hash('review', key, length=20)}{suffix}"
+
+    def load_verdict(self, key: str) -> dict[str, Any] | None:
+        try:
+            data = json.loads(self._review_file(key, ".verdict.json").read_text())
+        except (OSError, ValueError):
+            return None
+        ok = isinstance(data, dict) and data.get("key") == key and data.get("verdict") in ("approve", "request-changes",
+                                                                                          "reject")  # verdict.VERDICTS
+        return data if ok else None
+
+    def save_verdict(self, key: str, verdict: dict[str, Any]) -> None:
+        _atomic_write(self._review_file(key, ".verdict.json"), json.dumps(verdict, indent=1))
+
+    def load_reviewed(self, key: str) -> dict[str, str]:
+        """Files marked reviewed: path → the file's version when it was marked (a newer change unmarks it)."""
+        try:
+            data = json.loads(self._review_file(key, ".reviewed.json").read_text())
+        except (OSError, ValueError):
+            return {}
+        files = data.get("files") if isinstance(data, dict) else None
+        return {str(k): str(v) for k, v in files.items()} if isinstance(files, dict) else {}
+
+    def save_reviewed(self, key: str, files: dict[str, str]) -> None:
+        _atomic_write(self._review_file(key, ".reviewed.json"),
+                      json.dumps({"key": key, "updated_at": utcnow(), "files": files}, indent=1))
+
+    # -- the running live server (so `review --wait` can reuse it) --------------------
+
+    def load_server(self) -> dict[str, Any] | None:
+        try:
+            data = json.loads((self.dir / "server.json").read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_server(self, info: dict[str, Any] | None) -> None:
+        path = self.dir / "server.json"
+        try:
+            if info is None:
+                path.unlink()
+            else:
+                _atomic_write(path, json.dumps(info))
+        except OSError:
+            pass  # best effort: `review --wait` starts its own server when it finds none
 
     # -- observations ----------------------------------------------------------------
 

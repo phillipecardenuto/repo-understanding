@@ -6,6 +6,29 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Close the loop with the agent: verdict, `review --wait` and `repoviz gate`** ([#9](https://github.com/phillipecardenuto/repo-understanding/issues/9)).
+  - A **Verdict** bar at the end of the AI Review tab records *Approve*,
+    *Request changes* or *Reject*, with a summary and the reviewer. A banner
+    at the top of the tab shows the verdict and the earlier ones.
+  - A verdict is tied to a fingerprint of the reviewed changes, so it goes
+    **stale** when the files change afterwards. Committing the same changes
+    inside a session keeps it fresh.
+  - `repoviz review --wait [--open] [--timeout 30m] [--format json]` blocks
+    until the verdict arrives. It reuses the running `repoviz serve`, which
+    now registers itself in the state directory, or starts a server. It prints
+    the verdict with the notes and the feedback prompt, and exits 0 approve,
+    2 request changes, 3 reject or 4 timeout.
+  - `repoviz gate [--require approve|any] [--require-all-reviewed]
+    [--max-open SEVERITY] [--json]` exits 3 unless a fresh verdict meets the
+    requirement. `--hook-input` turns it into a Claude Code `PreToolUse` hook
+    that blocks `git push` (exit 2, with the reasons for the agent).
+  - "Reviewed" marks are also saved on the server in the live app.
+  - `POST /api/review/verdict` and `/api/review/reviewed` go through the
+    usual guard and write lock, into private state files.
+  - The static report shows the verdict read-only and offers *Copy verdict as
+    JSON* instead of recording one.
+  - A note made in the page on a scope or plan signal now counts as triaging
+    the server's signal too, in the feedback prompt and in the gate.
 - **Expected changes: plan vs actual** ([#8](https://github.com/phillipecardenuto/repo-understanding/issues/8)).
   - A session (or one review) can list what the plan says will change: path
     globs, `symbol:<qualified name>`, or `test` / `migration` / `docs` /

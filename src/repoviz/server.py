@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -279,7 +280,51 @@ class AppState:
                     self._reviews.put(key, body)
         except (RepositoryError, GitError, ValueError) as exc:
             raise ApiError(400, str(exc)) from exc
-        return _splice({"notes": self.repo.state.load_notes(target.key)}, body)
+        return _splice({"notes": self.repo.state.load_notes(target.key), "reviewed": self.repo.state.load_reviewed(target.key),
+                        "verdict": self._verdict_view(target, sources)}, body)
+
+    def _verdict_view(self, target: Any, sources: tuple[Any, Any]) -> dict[str, Any] | None:
+        from .verdict import fingerprint, view
+
+        v = self.repo.state.load_verdict(target.key)
+        return view(v, fingerprint(*sources)) if v else None
+
+    def save_verdict(self, body: dict[str, Any]) -> dict[str, Any]:
+        """The reviewer's verdict (approve, request changes or reject) for the state the page showed."""
+        from .review import resolve_target
+        from .verdict import VERDICTS, current, record, view
+
+        verdict = body.get("verdict")
+        if verdict not in VERDICTS:
+            raise ApiError(400, f"verdict must be one of {', '.join(VERDICTS)}")
+        texts = {k: body.get(k) if isinstance(body.get(k), str) else "" for k in
+                 ("target_id", "base", "target", "mode", "summary", "reviewer", "prompt", "fingerprint",
+                  "base_revision_id", "head_revision_id")}
+        if any(len(texts[k]) > 200 for k in ("target_id", "base", "target", "mode", "reviewer", "fingerprint",
+                                              "base_revision_id", "head_revision_id")):
+            raise ApiError(400, "field too long")
+        try:
+            target = resolve_target(self.repo, texts["target_id"] or None, texts["base"] or None,
+                                    texts["target"] or None, texts["mode"] or None)
+            now = current(self.repo, target)
+        except (RepositoryError, GitError, ValueError) as exc:
+            raise ApiError(400, str(exc)) from exc
+        # tied to what the reviewer saw; files that changed since then make it stale at once
+        seen = {k: texts[k] for k in ("fingerprint", "base_revision_id", "head_revision_id")} if texts["fingerprint"] else now
+        with self.write_lock:
+            v = record(self.repo, target, verdict, summary=texts["summary"], reviewer=texts["reviewer"], state=seen,
+                       prompt=texts["prompt"])
+        return {"verdict": view(v, now["fingerprint"])}
+
+    def save_reviewed(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Files marked reviewed on the page (path → the file's version), so they count towards `repoviz gate`."""
+        key, files = body.get("key"), body.get("reviewed")
+        if not isinstance(key, str) or not key or len(key) > 200 or not isinstance(files, dict) or len(files) > 20000:
+            raise ApiError(400, "expected {key, reviewed: {path: version}}")
+        clean = {k[:1000]: v[:64] for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
+        with self.write_lock:
+            self.repo.state.save_reviewed(key, clean)
+        return {"key": key, "saved": len(clean)}
 
     def file_changes(self, query: dict[str, str]) -> dict[str, Any]:
         """One file's recent commits and the diff of one of them (the Structure tab's code changes drawer)."""
@@ -526,6 +571,10 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, state.checkpoint(body))
                 elif path == "/api/review/notes":
                     self._json(200, state.save_notes(body))
+                elif path == "/api/review/verdict":
+                    self._json(200, state.save_verdict(body))
+                elif path == "/api/review/reviewed":
+                    self._json(200, state.save_reviewed(body))
                 elif path == "/api/session/scope":
                     self._json(200, state.save_scope(body))
                 elif path == "/api/plan/parse":
@@ -566,6 +615,39 @@ def create_server(repo: Repository, host: str = "127.0.0.1", port: int = 8765, *
     return server
 
 
+def register(repo: Repository, url: str) -> dict[str, Any]:
+    """Record the running server in the state directory, so `repoviz review --wait` reuses it."""
+    info = {"url": url, "pid": os.getpid(), "root": str(repo.root), "version": __version__, "started_at": time.time()}
+    repo.state.save_server(info)
+    return info
+
+
+def unregister(repo: Repository, info: dict[str, Any]) -> None:
+    current = repo.state.load_server()
+    if current and current.get("pid") == info["pid"] and current.get("url") == info["url"]:
+        repo.state.save_server(None)
+
+
+def find_running(repo: Repository, timeout: float = 2.0) -> str | None:
+    """The URL of a live server for this repository (registered by `repoviz serve`), or ``None``."""
+    import urllib.request
+
+    info = repo.state.load_server()
+    url = info.get("url") if info else None
+    if not isinstance(url, str) or not url.startswith("http://") or info.get("root") != str(repo.root):
+        return None
+    # Ask it (a server killed without cleaning up leaves its file behind): a request to our own server, never
+    # through a proxy, that must name this repository.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        req = urllib.request.Request(url + "api/health", headers={"X-Repoviz": "1", "Accept": "application/json"})
+        with opener.open(req, timeout=timeout) as r:
+            health = json.loads(r.read(100_000) or b"{}")
+    except (OSError, ValueError):
+        return None
+    return url if isinstance(health, dict) and health.get("repository") == str(repo.root) else None
+
+
 def serve(repo: Repository, host: str = "127.0.0.1", port: int = 8765, *, open_browser: bool = False,
           auto_session: bool = False, allowed_hosts: list[str] | None = None) -> None:
     server = create_server(repo, host, port, auto_session=auto_session, allowed_hosts=allowed_hosts)
@@ -576,10 +658,12 @@ def serve(repo: Repository, host: str = "127.0.0.1", port: int = 8765, *, open_b
               flush=True)
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    info = register(repo, url)
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         print("\nstopped", flush=True)
     finally:
+        unregister(repo, info)
         server.server_close()
         repo.close()

@@ -359,3 +359,20 @@ ol.timeline > li.clickable:focus-visible { box-shadow: 0 0 0 2px var(--accent); 
 .plan-card h3 { margin-bottom: 6px; }
 .plan-list li { padding: 3px 0; }
 .plan-import textarea { width: 100%; max-width: 760px; font-family: var(--mono, monospace); }
+
+/* Verdict (#9): banner at the top of AI Review and the bar at its end. Each verdict has an icon and words; a stale
+   one adds the alert icon, "Stale:" and a dashed border (never colour alone). */
+.verdict-banner { border-left-width: 4px; }
+.verdict-banner.approve { border-color: var(--added); }
+.verdict-banner.request-changes { border-color: var(--modified); }
+.verdict-banner.reject { border-color: var(--removed); }
+.verdict-banner.stale { border-style: dashed; border-left-style: dashed; }
+.verdict-banner .verdict-summary { white-space: pre-wrap; margin-top: 4px; }
+.verdict-banner .verdict-stale { margin-top: 4px; }
+.verdict-card textarea { width: 100%; box-sizing: border-box; margin: 6px 0; }
+.verdict-current { margin: 6px 0; }
+.verdict-bar { margin-top: 8px; }
+.verdict-btn.approve { border-color: var(--added); }
+.verdict-btn.request-changes { border-color: var(--modified); }
+.verdict-btn.reject { border-color: var(--removed); }
+.verdict-btn[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 1px; font-weight: 600; }

@@ -58,6 +58,7 @@ from .risk import RiskContext
 from .sources import TreeSource, is_binary
 from .submodules import WithSubmoduleFiles, submodule_changes
 from .values import value_changes
+from .verdict import fingerprint
 from .wiring import unwired_code
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -533,6 +534,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
 
     changed_paths = sorted(p for p in set(base_src.files()) | set(target_src.files())
                            if p not in exclude and base_src.content_hash(p) != target_src.content_hash(p))
+    # the reviewed changes' identity: a verdict given on this report goes stale when it changes (verdict.py)
+    reviewed_state = None if commit else fingerprint(base_src, target_src, changed_paths)
     # Work inside submodules: pointer moves, and files changed inside them (committed or not).
     sub_changes = (submodule_changes(repo.root, base_src, target_src)
                    if base_src.submodules or target_src.submodules else [])
@@ -803,6 +806,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     }
     return {
         "target": target.to_dict(),
+        "fingerprint": reviewed_state,
         "session": session.to_dict() if session else None,
         "base": diff.base.to_dict(), "head": diff.target.to_dict(),
         "generated_at": utcnow(),
@@ -1880,11 +1884,28 @@ def _component_edges(diff: RepositoryDiff, touched: set[str]) -> list[dict[str, 
 # --------------------------------------------------------------------------- feedback
 
 
+def finding_aliases(f: dict[str, Any]) -> set[str]:
+    """The ids a note may use for a finding: the server's, and the page's for the scope and plan signals it
+    recomputes when the reviewer edits the scope (``f_scope_p_<path>``, ``f_scope_o_<path>``, ``f_plan_<entry>``)."""
+    ids = {f["id"]}
+    if f.get("kind") == "protected-touched" and f.get("path"):
+        ids.add("f_scope_p_" + f["path"])
+    elif f.get("kind") == "out-of-scope" and f.get("path"):
+        ids.add("f_scope_o_" + f["path"])
+    elif f.get("kind") == "expected-not-changed":
+        ids.add("f_plan_" + str(f.get("title") or "").partition(": ")[2])
+    return ids
+
+
 def feedback_markdown(report: dict[str, Any], notes: list[dict[str, Any]], *, include_findings: bool = True,
                       min_severity: str = "medium") -> str:
     """Turn reviewer notes (and optionally untriaged findings) into a prompt for the coding agent."""
-    findings = {f["id"]: f for f in report.get("findings", [])}
-    triaged = {n.get("finding_id") for n in notes if n.get("finding_id")}
+    findings: dict[str, dict[str, Any]] = {}
+    for f in report.get("findings", []):
+        for alias in finding_aliases(f):
+            findings.setdefault(alias, f)
+    noted = {n.get("finding_id") for n in notes if n.get("finding_id")}
+    triaged = {f["id"] for f in report.get("findings", []) if finding_aliases(f) & noted}
     # A "should not touch" note on a file covers that file's automated scope signals.
     reverted = {n.get("path") for n in notes if n.get("verdict") == "should-not-touch" and n.get("path")}
     triaged |= {f["id"] for f in report.get("findings", []) if f.get("category") == "scope" and f.get("path") in reverted}
@@ -1921,7 +1942,7 @@ def feedback_markdown(report: dict[str, Any], notes: list[dict[str, Any]], *, in
         rest = [f for f in report.get("findings", []) if f["id"] not in triaged
                 and SEVERITY_ORDER.get(f["severity"], 9) <= limit]
         dismissed = {x.get("finding_id") for x in notes if x.get("verdict") == "ok"}
-        rest = [f for f in rest if f["id"] not in dismissed]
+        rest = [f for f in rest if not finding_aliases(f) & dismissed]
         if rest:
             lines += ["", "## Automated review signals (verify each; fix or explain)", ""]
             for f in rest:

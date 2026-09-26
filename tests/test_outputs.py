@@ -722,3 +722,128 @@ def test_expectations_through_the_server(make_repo) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# --------------------------------------------------------------------------- verdicts, review --wait and gate (#9)
+
+
+def test_verdict_api_review_wait_and_gate(make_repo, monkeypatch, tmp_path, capsys) -> None:
+    import io
+    import stat
+
+    import repoviz.verdict as V
+    from repoviz.server import find_running, register, unregister
+    from test_review import VERDICT_APP
+
+    repo = make_repo(VERDICT_APP)
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave")
+    repo.write({"app/a.py": "def f():\n    return 2\n"})
+    waiting = threading.Event()
+    real_wait = V.wait
+    monkeypatch.setattr(V, "wait", lambda *a, **k: (waiting.set(), real_wait(*a, **k))[1])
+    out = tmp_path / "verdict.json"
+
+    # Nothing running: --wait starts its own server, and gives up at the timeout (exit 4).
+    assert main(["review", "-C", repo.path, "--wait", "--format", "json", "--timeout", "0.2s", "--port", "0",
+                 "-o", str(out)]) == 4
+    res = json.loads(out.read_text())
+    assert res["verdict"] is None and res["timeout"] and res["url"].endswith("#tab=review&review=session")
+    assert "waiting for a verdict on “Current session: wave”" in capsys.readouterr().err
+
+    srv = create_server(r, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    info = register(r, srv.repoviz_url)
+    try:
+        assert find_running(r) == srv.repoviz_url
+        status, _, _ = request(srv, "POST", "/api/review/verdict", {"verdict": "approve"},
+                               headers={"Content-Type": "application/json"})
+        assert status == 403  # the X-Repoviz header is required
+        status, _, body = request(srv, "POST", "/api/review/verdict", {"target_id": "session", "verdict": "maybe"})
+        assert status == 400 and b"verdict must be one of" in body
+        status, _, body = request(srv, "POST", "/api/review/verdict",
+                                  {"target_id": "session", "verdict": "approve", "reviewer": "x" * 500})
+        assert status == 400 and b"field too long" in body
+        status, _, _ = request(srv, "POST", "/api/review/reviewed", {"key": "k", "reviewed": ["app/a.py"]})
+        assert status == 400
+        assert r.state.load_verdict(f"session:{r.current_session().id}") is None  # nothing was recorded
+        status, _, body = request(srv, "GET", "/api/review?id=session")
+        rep = json.loads(body)
+        assert rep["verdict"] is None and rep["reviewed"] == {} and rep["fingerprint"]
+        seen = {"fingerprint": rep["fingerprint"], "base_revision_id": rep["base"]["revision_id"],
+                "head_revision_id": rep["head"]["revision_id"]}
+        status, _, body = request(srv, "POST", "/api/review/reviewed",
+                                  {"key": rep["target"]["key"], "reviewed": {"app/a.py": rep["files"][0]["version"]}})
+        assert status == 200 and json.loads(body)["saved"] == 1
+
+        for verdict, code in (("request-changes", 2), ("reject", 3), ("approve", 0)):
+            if verdict != "request-changes":  # a new state, so --wait does not return the previous verdict at once
+                repo.write({"app/b.py": f"X = '{verdict}'\n"})
+                rep = json.loads(request(srv, "GET", "/api/review?id=session")[2])
+                seen = {"fingerprint": rep["fingerprint"], "base_revision_id": rep["base"]["revision_id"],
+                        "head_revision_id": rep["head"]["revision_id"]}
+            waiting.clear()
+            result: dict = {}
+            t = threading.Thread(target=lambda: result.setdefault("code", main(
+                ["review", "-C", repo.path, "--wait", "--format", "json", "--timeout", "30s", "-o", str(out)])))
+            t.start()
+            assert waiting.wait(30)
+            status, _, body = request(srv, "POST", "/api/review/verdict",
+                                      {"target_id": "session", "verdict": verdict, "summary": f"{verdict}!",
+                                       "reviewer": "Ana", "prompt": "# Review feedback\n\n1. fix f\n", **seen})
+            assert status == 200 and json.loads(body)["verdict"]["stale"] is False
+            t.join(30)
+            assert result["code"] == code
+            res = json.loads(out.read_text())
+            assert (res["verdict"], res["exit_code"], res["summary"], res["reviewer"], res["waited"]) == \
+                (verdict, code, f"{verdict}!", "Ana", True)
+            assert res["prompt"].startswith("# Review feedback") and res["stale"] is False
+        # the review carries the verdict and the server-side reviewed marks
+        rep = json.loads(request(srv, "GET", "/api/review?id=session")[2])
+        assert rep["verdict"]["verdict"] == "approve" and not rep["verdict"]["stale"] and "prompt" not in rep["verdict"]
+        assert rep["reviewed"] == {"app/a.py": rep["files"][0]["version"]}
+        assert [h["verdict"] for h in rep["verdict"]["history"]] == ["request-changes", "reject"]
+        for suffix in (".verdict.json", ".reviewed.json"):
+            f = r.state._review_file(rep["target"]["key"], suffix)
+            assert stat.S_IMODE(f.stat().st_mode) == 0o600
+        # A verdict for this exact state already exists: --wait returns it at once.
+        waiting.clear()
+        assert main(["review", "-C", repo.path, "--wait"]) == 0 and not waiting.is_set()
+        assert "Verdict: Approved by Ana" in capsys.readouterr().out
+
+        # gate: open while the verdict is fresh; closed (exit 3) once a file changes
+        assert main(["gate", "-C", repo.path]) == 0
+        assert "open" in capsys.readouterr().out
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": repo.path})))
+        assert main(["gate", "--hook-input"]) == 0
+        assert capsys.readouterr() == ("", "")  # a hook speaks only to block
+        repo.write({"app/a.py": "def f():\n    return 3\n"})
+        assert json.loads(request(srv, "GET", "/api/review?id=session")[2])["verdict"]["stale"] is True
+        assert main(["gate", "-C", repo.path]) == 3
+        assert "verdict is stale: files changed since review" in capsys.readouterr().out
+        assert main(["gate", "-C", repo.path, "--json"]) == 3
+        g = json.loads(capsys.readouterr().out)
+        assert g["ok"] is False and g["stale"] and g["reasons"] == ["verdict is stale: files changed since review"]
+        assert main(["gate", "-C", repo.path, "--quiet"]) == 3
+        cap = capsys.readouterr()
+        assert cap.out == "" and "stale" in cap.err
+
+        # a Claude Code PreToolUse hook: only `git push` is gated, and exit 2 blocks it
+        def hook(command: str) -> int:
+            payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": repo.path}
+            monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+            return main(["gate", "--hook-input"])
+
+        assert hook("git status") == 0
+        assert hook("git add -A && git -C . push origin main") == 2
+        assert "verdict is stale" in capsys.readouterr().err
+    finally:
+        unregister(r, info)
+        srv.shutdown()
+        srv.server_close()
+    assert r.state.load_server() is None and find_running(r) is None
+    # a registration left behind by a server that died is ignored
+    r.state.save_server({"url": "http://127.0.0.1:9/", "pid": 2 ** 22 + 12345, "root": str(r.root)})
+    assert find_running(r) is None
+    assert main(["review", "-C", repo.path, "--wait", "--format", "markdown"]) == 1

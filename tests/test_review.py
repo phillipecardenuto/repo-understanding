@@ -1627,3 +1627,119 @@ def test_a_test_expectation_needs_test_code(make_repo) -> None:
     repo = make_repo(PLAN_APP)
     repo.write({"tests/README.md": "# how to run\n", "tests/test.env": "X=1\n"})
     assert _plan_review(repo, ["test"])["plan"]["expected"][0]["status"] == "missing"
+
+
+# --------------------------------------------------------------------------- verdicts and the gate (#9)
+
+VERDICT_APP = {"app/__init__.py": "", "app/a.py": "def f():\n    return 1\n", "app/b.py": "X = 1\n"}
+
+
+def _verdict_wave(make_repo, **scope):
+    repo = make_repo(VERDICT_APP)
+    r = Repository(repo.path)
+    r.state.start_session(r.git, r.root, "wave", **scope)
+    repo.write({"app/a.py": "def f():\n    return 2\n"})
+    return repo, r, resolve_target(r, None)
+
+
+def test_verdict_is_private_tied_to_the_state_reviewed_and_goes_stale(make_repo) -> None:
+    import stat
+
+    from repoviz import verdict
+
+    repo, r, target = _verdict_wave(make_repo)
+    report = build_review(r, target)
+    now = verdict.current(r, target)
+    assert report["fingerprint"] == now["fingerprint"]
+    r.state.save_notes(target.key, [{"id": "n1", "path": "app/a.py", "line": 2, "verdict": "logic-error",
+                                     "comment": "keep 1; token ghp_" + "a" * 36, "created_at": "x"}])
+    v = verdict.record(r, target, "request-changes", summary="f must still return 1", reviewer="Ana", state=now)
+    path = r.state._review_file(target.key, ".verdict.json")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    loaded = r.state.load_verdict(target.key)
+    assert loaded == v and loaded["label"] == "Changes requested" and loaded["reviewer"] == "Ana"
+    assert loaded["notes"] == [{"path": "app/a.py", "line": 2, "verdict": "logic-error", "text": loaded["notes"][0]["text"]}]
+    assert "ghp_" + "a" * 36 not in loaded["notes"][0]["text"]  # redacted
+    g = verdict.gate(r, target)
+    assert not g["ok"] and not g["stale"] and "approval is required" in g["reasons"][0]
+    assert verdict.gate(r, target, require="any")["ok"]  # the human looked
+    # committing the reviewed work inside the session does not change what was reviewed
+    repo.commit("the agent commits")
+    assert not verdict.gate(r, target)["stale"]
+    v2 = verdict.record(r, target, "approve", reviewer="Ana")
+    assert [h["verdict"] for h in v2["history"]] == ["request-changes"]
+    g = verdict.gate(r, target)
+    assert g["ok"] and g["reasons"] == [] and g["verdict"]["verdict"] == "approve" and "approved by Ana" in verdict.format_gate(g)
+    # a file changed after the review: stale
+    repo.write({"app/b.py": "X = 2\n"})
+    g = verdict.gate(r, target)
+    assert not g["ok"] and g["stale"] and g["reasons"] == ["verdict is stale: files changed since review"]
+    assert verdict.view(r.state.load_verdict(target.key), g["fingerprint"])["stale"]
+    # changed back: fresh again, and it stays valid for the wave once the session ends
+    repo.write({"app/b.py": "X = 1\n"})
+    assert verdict.gate(r, target)["ok"]
+    r.state.end_session(r.git, r.root)
+    ended = resolve_target(r, f"session:{target.session_id}")
+    assert ended.key == target.key and verdict.gate(r, ended)["ok"]
+
+
+def test_no_verdict_closes_the_gate(make_repo) -> None:
+    from repoviz import verdict
+
+    _repo, r, target = _verdict_wave(make_repo)
+    g = verdict.gate(r, target)
+    assert not g["ok"] and g["verdict"] is None and "no verdict" in g["reasons"][0]
+    assert "closed" in verdict.format_gate(g) and "repoviz review --wait" in verdict.format_gate(g)
+
+
+def test_gate_requires_reviewed_files_and_triaged_signals(make_repo) -> None:
+    from repoviz import verdict
+
+    repo, r, target = _verdict_wave(make_repo, protected=["app/b.py"])
+    repo.write({"app/b.py": "X = 2\n"})
+    verdict.record(r, target, "approve")
+    g = verdict.gate(r, target, all_reviewed=True, max_open="high")
+    assert not g["ok"] and g["unreviewed_count"] == 2 and g["open_count"] == 1
+    assert g["open"][0]["kind"] == "protected-touched" and len(g["reasons"]) == 2
+    report = build_review(r, target)
+    r.state.save_reviewed(target.key, {f["path"]: f["version"] for f in report["files"]})
+    # the page recomputes scope signals under its own ids; a note there triages the server's signal too
+    notes = [{"id": "n1", "finding_id": "f_scope_p_app/b.py", "verdict": "ok", "path": "app/b.py"}]
+    r.state.save_notes(target.key, notes)
+    assert verdict.gate(r, target, all_reviewed=True, max_open="high")["ok"]
+    assert "[high] Protected area modified" not in feedback_markdown(report, notes, min_severity="info")
+    assert "[high] Protected area modified" in feedback_markdown(report, [], min_severity="info")
+    # a reviewed mark is for one version of the file (and the verdict goes stale too)
+    repo.write({"app/a.py": "def f():\n    return 3\n"})
+    g = verdict.gate(r, target, all_reviewed=True)
+    assert g["unreviewed"] == ["app/a.py"] and g["stale"]
+
+
+def test_wait_polls_for_a_newer_verdict_and_times_out(make_repo) -> None:
+    import time
+
+    import pytest
+
+    from repoviz import verdict
+
+    _repo, r, target = _verdict_wave(make_repo)
+    verdict.record(r, target, "reject")
+    since = time.time()
+    calls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        calls.append(seconds)
+        if len(calls) == 3:
+            verdict.record(r, target, "approve")
+
+    v = verdict.wait(r.state, target.key, since, 60, poll=0.01, sleep=sleep)
+    assert v["verdict"] == "approve" and len(calls) == 3  # the older verdict did not count
+    assert verdict.wait(r.state, target.key, time.time() + 5, 0.05, poll=0.01) is None
+    assert [verdict.parse_duration(x) for x in ("90", "90s", "30m", "2h", "0")] == [90, 90, 1800, 7200, 0]
+    with pytest.raises(ValueError):
+        verdict.parse_duration("soon")
+    res = verdict.result(v, target, fingerprint_now=v["fingerprint"], waited=True, prompt="1. fix it")
+    assert res["exit_code"] == 0 and not res["stale"] and "Approved" in verdict.format_result(res)
+    assert verdict.result(None, target, fingerprint_now=None, waited=True)["exit_code"] == 4
+    with pytest.raises(ValueError):
+        verdict.record(r, target, "maybe")

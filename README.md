@@ -22,6 +22,7 @@ implementation waves, and for understanding any codebase. It answers questions l
 | Which modules did the agent touch? Did it touch anything it should not have? | **AI Review** tab, `repoviz review` |
 | What are the key changes in a module, and do they look right? | **AI Review** → change cards (symbols, signatures, values, diff) |
 | What should I tell the agent to fix, complete or revert? | **AI Review** → notes → feedback prompt, `repoviz review --format prompt` |
+| Has a human approved this wave? May the agent push? | **AI Review** → verdict, `repoviz review --wait`, `repoviz gate` |
 | What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
 | What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
 | Why does A depend on B? Which import chain, in which files? | **Dependencies** → right-click a link (or `w`), `repoviz why A B` |
@@ -62,6 +63,8 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | Command | Purpose |
 |---|---|
 | `repoviz review [TARGET] [--format text\|markdown\|prompt\|json\|sarif\|github\|pr-comment] [--fail-on …] [--commit SHA] [--by-commit] [--from-report FILE]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. `sarif`, `github` (inline annotations) and `pr-comment` are for CI; `--from-report` re-renders a saved JSON report without analysing again. |
+| `repoviz review --wait [--open] [--timeout 30m] [--format json]` | For agents: block until the reviewer submits a verdict in the live app, then print it with the notes and the feedback prompt. Exit 0 approve, 2 request changes, 3 reject, 4 timeout. |
+| `repoviz gate [TARGET] [--require approve\|any] [--require-all-reviewed] [--max-open SEVERITY] [--json] [--hook-input]` | Before a push: exit 3 unless a fresh verdict approves the work (and, optionally, every file is marked reviewed and no signal is left without a note). `--hook-input` makes it a Claude Code `PreToolUse` hook that blocks `git push`. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). History presets: `last-commit`, `last-merge`, `branch` (since it left the default branch) and `since:<tag or date>` (`since:v0.1.0`, `since:2024-06-01`). |
@@ -352,8 +355,22 @@ repoviz session scope --expect app/client.py --expect test   # the plan: each it
 repoviz review main...claude/feature    # any branch against any other, since it left main
 repoviz review --fail-on protected --fail-on high   # guardrail for scripted loops (exit 3)
 repoviz review --fail-on risk:high      # exit 3 when the wave risk is high
+repoviz review --wait --format json     # the agent waits for your verdict (exit 0 / 2 / 3, 4 timeout)
+repoviz gate                            # before a push: exit 3 unless a fresh verdict approves the work
 repoviz session end                     # freezes the wave; later: repoviz review session:<id>
 ```
+
+**Close the loop.** End a review with a verdict at the bottom of the AI Review
+tab: *Approve*, *Request changes* or *Reject*, with a summary.
+
+- An agent that ran `repoviz review --wait` gets the verdict at once, with your
+  notes and the feedback prompt, and goes on by itself.
+- The verdict is tied to the state you reviewed. When the files change
+  afterwards it goes **stale**, and `repoviz gate` refuses it: "verdict is
+  stale: files changed since review".
+- Call `repoviz gate` from the agent's instructions, a Claude Code hook or a Git
+  pre-push hook (repoviz never installs hooks). See
+  [docs/review.md](docs/review.md#the-verdict-and-the-gate).
 
 Review signals flag likely problems for a human to check:
 
@@ -423,14 +440,20 @@ The prompts `plan_check` and `self_review` wrap the usual before-and-after
 checks. See [docs/mcp.md](docs/mcp.md) for the tools, the safety rules and a
 sample transcript.
 
-With Claude Code, you can record activity while the agent edits by adding a hook
-in `.claude/settings.json`:
+With Claude Code, hooks in `.claude/settings.json` can:
+
+- record a checkpoint after every edit;
+- block `git push` until you approve the wave.
 
 ```json
 {
   "hooks": {
     "PostToolUse": [
-      {"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": "repoviz activity > /dev/null"}]}
+      {"matcher": "Edit|MultiEdit|Write|NotebookEdit",
+       "hooks": [{"type": "command", "command": "repoviz session checkpoint --hook-input --quiet"}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "repoviz gate --hook-input"}]}
     ]
   }
 }

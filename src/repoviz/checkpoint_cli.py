@@ -19,7 +19,7 @@ from .gitutil import Git, probe_repository
 from .session import StateStore
 
 
-def _hook_payload() -> dict[str, Any]:
+def hook_payload() -> dict[str, Any]:
     try:
         data = json.loads(sys.stdin.read(1_000_000) or "{}")
     except (ValueError, OSError):
@@ -57,7 +57,7 @@ def run(args: argparse.Namespace) -> int:
         if not args.quiet:
             print(text, file=sys.stderr if error else sys.stdout)
 
-    hook = _hook_payload() if args.hook_input else {}
+    hook = hook_payload() if args.hook_input else {}
     where = args.repo
     if where == "." and isinstance(hook.get("cwd"), str) and hook["cwd"]:
         where = hook["cwd"]

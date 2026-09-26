@@ -13,6 +13,8 @@ Examples::
     repoviz session start --label "wave 3" --allow "src/billing/**" --protect "src/auth/**"
     repoviz review                        # what did the agent touch? what looks wrong?
     repoviz review --format prompt        # feedback to paste back to the agent
+    repoviz review --wait --format json   # an agent waits for the reviewer's verdict (exit 0 / 2 / 3, 4 timeout)
+    repoviz gate                          # before a push: exit 3 unless a fresh verdict approves the work
     repoviz activity
     repoviz why app.routes app.db         # which imports make the routes depend on the database?
     repoviz impact app.services.images.list_images   # what may break if it changes
@@ -23,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -759,6 +762,8 @@ def cmd_review(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"repoviz: {exc}", file=sys.stderr)
             return EXIT_ERROR
+        if args.wait:
+            return _review_wait(args, repo, target)
         try:
             report = build_review(repo, target, scope=scope_for(repo, target, args.allow, args.protect,
                                                                 args.expect or None),
@@ -809,6 +814,116 @@ def cmd_review(args: argparse.Namespace) -> int:
         print("repoviz: review gate failed: " + "; ".join(failed), file=sys.stderr)
         return EXIT_GATE
     return EXIT_OK
+
+
+def _start_server(repo: Repository, port: int) -> Any:
+    """A live server in a background thread, for as long as `review --wait` waits (the usual port if free)."""
+    import threading
+
+    from .server import create_server
+
+    server, error = None, None
+    for p in dict.fromkeys((port, 0)):
+        try:
+            server = create_server(repo, "127.0.0.1", p)
+            break
+        except OSError as exc:
+            error = exc
+    if server is None:
+        raise RepositoryError(f"cannot start the live server: {error}")
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True).start()
+    return server
+
+
+def _review_wait(args: argparse.Namespace, repo: Repository, target: Any) -> int:
+    """Block until the reviewer submits a verdict in the live app; exit 0 approve, 2 request changes, 3 reject,
+    4 timeout.  A verdict already given on exactly this state is returned at once."""
+    import time
+    import webbrowser
+    from urllib.parse import quote
+
+    from . import verdict as V
+    from .render.html import dumps
+    from .review import build_review, feedback_markdown, scope_for
+    from .server import find_running
+
+    if args.format not in ("text", "json"):
+        print("repoviz: --wait prints --format text or json", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        timeout = V.parse_duration(args.timeout)
+    except ValueError as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    since = time.time()
+    v = repo.state.load_verdict(target.key)
+    url, waited = "", False
+    if v is None or v.get("fingerprint") != V.current(repo, target)["fingerprint"]:
+        v, waited = None, True
+        server = None
+        base_url = find_running(repo)
+        if base_url is None:
+            server = _start_server(repo, args.port)
+            base_url = server.repoviz_url
+        url = f"{base_url}#tab=review&review={quote(target.id, safe='')}"
+        limit = f" (up to {args.timeout})" if timeout else ""
+        print(f"repoviz: waiting for a verdict on “{target.label}”{limit}; review it at {url}", file=sys.stderr,
+              flush=True)
+        if args.open:
+            webbrowser.open(url)
+        try:
+            v = V.wait(repo.state, target.key, since, timeout)
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+    prompt = ""
+    if v is not None and not v.get("prompt") and v["verdict"] != "approve":  # recorded without the page's prompt
+        report = build_review(repo, target, scope=scope_for(repo, target))
+        prompt = feedback_markdown(report, repo.state.load_notes(target.key), min_severity=args.min_severity)
+    now = V.current(repo, target)["fingerprint"] if v is not None else None
+    res = V.result(v, target, fingerprint_now=now, waited=waited, prompt=prompt, url=url)
+    _write(dumps(res) if args.format == "json" else V.format_result(res), args.output)
+    if v is None:
+        print(f"repoviz: no verdict within {args.timeout}", file=sys.stderr)
+    return res["exit_code"]
+
+
+#: ``git push`` in a shell command, also with options before the subcommand (``git -C dir push``).
+_GIT_PUSH = re.compile(r"\bgit\b(?:\s+-{1,2}[\w-]+(?:[= ]\S+)?)*\s+push\b")
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    from .render.html import dumps
+    from .review import resolve_target
+    from .verdict import format_gate, gate
+
+    if args.hook_input:  # a Claude Code PreToolUse hook: only `git push` is gated; exit 2 blocks the command
+        from .checkpoint_cli import hook_payload
+
+        hook = hook_payload()
+        tool_input = hook.get("tool_input") if isinstance(hook.get("tool_input"), dict) else {}
+        if hook.get("tool_name") != "Bash" or not _GIT_PUSH.search(str(tool_input.get("command") or "")):
+            return EXIT_OK
+        if args.repo == "." and isinstance(hook.get("cwd"), str) and hook["cwd"]:
+            args.repo = hook["cwd"]
+    repo = _open(args)
+    try:
+        target = resolve_target(repo, args.target)
+        res = gate(repo, target, require=args.require, all_reviewed=args.require_all_reviewed,
+                   max_open=args.max_open)
+    except ValueError as exc:
+        print(f"repoviz: gate: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if args.json:
+        _write(dumps(res), args.output)
+    elif not res["ok"] and (args.quiet or args.hook_input):
+        sys.stderr.write(format_gate(res))
+    elif not args.quiet and not args.hook_input:  # a hook speaks only to block
+        _write(format_gate(res), args.output)
+    if res["ok"]:
+        return EXIT_OK
+    return 2 if args.hook_input else EXIT_GATE
 
 
 def format_review_markdown(report: dict[str, Any]) -> str:
@@ -1075,7 +1190,34 @@ def build_parser() -> argparse.ArgumentParser:
                    help="exit 3 when: high | medium | low (findings at or above), protected, out-of-scope, "
                    "risk:high | risk:medium (wave risk at or above), or a finding kind such as new-cycle; "
                    "repeatable")
+    p.add_argument("--wait", action="store_true",
+                   help="for agents: block until the reviewer submits a verdict in the live app (reusing `repoviz "
+                   "serve` or starting one), then print it with the notes and the feedback prompt; exit 0 approve, "
+                   "2 request changes, 3 reject, 4 timeout")
+    p.add_argument("--open", action="store_true", help="--wait: open the review in a browser")
+    p.add_argument("--timeout", default="30m", help="--wait: give up after this long (e.g. 90s, 30m, 2h; 0 = never)")
+    p.add_argument("--port", type=int, default=8765, help="--wait: port of the server it starts when none is running "
+                   "(another free port when taken)")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("gate", parents=[common],
+                       help="exit 3 unless a fresh verdict approves the review (run it before a push: pre-push hook, "
+                       "agent instructions or a Claude Code hook)")
+    p.add_argument("target", nargs="?", help="what the verdict must be on (as for review; default: the current "
+                   "session, else uncommitted changes)")
+    p.add_argument("--require", choices=("approve", "any"), default="approve",
+                   help="approve (default), or any verdict (the human looked)")
+    p.add_argument("--require-all-reviewed", action="store_true",
+                   help="also require every changed file to be marked reviewed at its current version")
+    p.add_argument("--max-open", choices=("high", "medium", "low", "info"), metavar="SEVERITY",
+                   help="also require every signal at or above this severity to have a note (sent to the agent, "
+                   "commented or marked not an issue)")
+    p.add_argument("--json", action="store_true", help="machine-readable result on stdout")
+    p.add_argument("--quiet", action="store_true", help="print only when the gate is closed (to stderr)")
+    p.add_argument("--hook-input", action="store_true",
+                   help="read a Claude Code PreToolUse hook's JSON from stdin: only `git push` commands are gated, "
+                   "and a closed gate exits 2 (the command is blocked and the reasons go to the agent)")
+    p.set_defaults(func=cmd_gate)
     return parser
 
 

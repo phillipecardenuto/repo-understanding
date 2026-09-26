@@ -126,6 +126,8 @@
     sessionStart(label) { return this.post("/api/session/start", { label }); }
     sessionEnd() { return this.post("/api/session/end", {}); }
     checkpoint(label) { return this.post("/api/session/checkpoint", { label: label || "" }); }
+    verdict(payload) { return this.post("/api/review/verdict", payload); }
+    saveReviewed(key, reviewed) { return this.post("/api/review/reviewed", { key, reviewed }); }
   }
 
   // ---------------------------------------------------------------- indexes
@@ -188,6 +190,7 @@
     alert: ["#ea580c", "#fdba74", "M10.3 4.2 2.6 17.5a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z", "M12 9.5v4", "M12 17h.01"],
     "alert-circle": ["#dc2626", "#fca5a5", CIRCLE, "M12 8v4.5", "M12 16h.01"],
     check: ["#16a34a", "#86efac", CIRCLE, "m8.5 12.2 2.4 2.4 4.6-4.8"],
+    "x-circle": ["#dc2626", "#fca5a5", CIRCLE, "m9 9 6 6", "m15 9-6 6"],
     comment: ["#6366f1", "#a5b4fc", "M20 15.5a2 2 0 0 1-2 2H8l-4 3.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2Z"],
     // interface icons (drawn in the text colour)
     review: ["#4f46e5", "#a5b4fc", "M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z", "m20.5 20.5-4.5-4.5", "m8 11 2 2 4-4"],
@@ -2928,6 +2931,12 @@
   const SEV = { high: 0, medium: 1, low: 2, info: 3 };
   /* Signals the page recomputes when the scope or the plan is edited (the others come from the server). */
   const LOCAL_KINDS = new Set(["protected-touched", "out-of-scope", "expected-not-changed"]);
+  /* The reviewer's verdict on a wave (verdict.py); each also shows as an icon and words, never colour alone. */
+  const VERDICT_KINDS = {
+    approve: { label: "Approved", button: "Approve", icon: "check", hint: "The work is fine: the agent may go on, and repoviz gate lets a push through while nothing changes." },
+    "request-changes": { label: "Changes requested", button: "Request changes", icon: "comment", hint: "The agent gets your summary, notes and the prompt above, and should fix them." },
+    reject: { label: "Rejected", button: "Reject", icon: "x-circle", hint: "Stop: the work should be discarded or redone differently." },
+  };
   const VERDICT_LABELS = { "should-not-touch": "Should not have been modified", "logic-error": "Logic error", missed: "Missed / incomplete",
     improve: "Should be improved", question: "Question", ok: "Looks good / not an issue" };
   const VERDICT_FOR_CATEGORY = { scope: "should-not-touch", correctness: "logic-error", tests: "missed", security: "logic-error",
@@ -3146,23 +3155,30 @@
       this.filesEl = h("div", { class: "card" });
       this.fileEl = h("div", { class: "card file-card" }, h("div", { class: "details-empty", text: "Select a file to see its key changes and diff." }));
       this.feedbackEl = h("div", { class: "card" });
+      this.verdictBanner = h("div", { class: "notice verdict-banner", role: "status", hidden: true });
+      this.verdictEl = h("div", { class: "card verdict-card" });
       this.emptyEl = h("div", { class: "card empty-state", hidden: true });
       this.commitsEl = h("div", { class: "card commits-card", hidden: true });
       this.commitBanner = h("div", { class: "notice commit-banner", role: "status", hidden: true });
       this.mapToggle = h("label", { class: "check" }, "Map by ", select([["auto", "auto"], ["components", "components"], ["packages", "packages / directories"], ["files", "files"]],
         this.opts.mapLevel, (v) => { this.opts.mapLevel = v; this.save(); this.drawMap(); }));
-      this.bodyEl = h("div", null, this.commitBanner, this.statsEl,
+      this.bodyEl = h("div", null, this.commitBanner, this.verdictBanner, this.statsEl,
         h("div", { class: "split review-split" }, h("div", null, this.map.el, h("div", { class: "group", style: { margin: "6px 2px 12px" } }, this.mapToggle,
           h("span", { class: "muted", text: "Click a component to list its files; click a file to open its change card." }))), this.findingsEl),
         this.commitsEl,
         h("h2", { class: "section-title" }, "Changed modules ", h("span", { class: "faint small", text: "keys: j / k next / previous file · m mark reviewed · [ / ] previous / next commit" })),
         h("div", { class: "split files-split" }, this.filesEl, this.fileEl),
-        h("h2", { class: "section-title", text: "Feedback for the agent" }), this.feedbackEl);
+        h("h2", { class: "section-title", text: "Feedback for the agent" }), this.feedbackEl,
+        h("h2", { class: "section-title", text: "Verdict" }), this.verdictEl);
       this.planEl = h("div", { class: "card plan-card", hidden: true });
       this.bodyEl.insertBefore(this.planEl, this.statsEl.nextSibling);
       put(this.root, bar, this.planForm, this.emptyEl, this.bodyEl);
       document.addEventListener("keydown", (ev) => this.onKey(ev));
+      const link = app.reviewLink;  // a link to one review (repoviz review --wait)
+      app.reviewLink = null;
+      if (link) { this.opts.targetId = link; this.opts.targetPinned = true; this.opts.custom = null; }
       await this.loadTargets();
+      if (link && this.opts.targetId !== link) { this.pickTarget(link, link); await this.loadTargets(); }
       await this.load();
     }
     async markCheckpoint() {
@@ -3259,7 +3275,11 @@
       this.loadedAt = Date.now();
       if (!r) { this.statusEl.textContent = ""; this.showEmpty("No review in this report", "There were no changes to review when this report was generated."); return; }
       const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope), (r.commits || {}).head || ""].join("|");
-      if (prev && prev.sig === sig) { if (announce) this.statusEl.textContent = `${r.base.label} → ${r.head.label} · up to date`; return; }
+      if (prev && prev.sig === sig) {
+        if (JSON.stringify(r.verdict || null) !== JSON.stringify(this.verdict || null)) { this.verdict = r.verdict || null; this.drawVerdict(); }
+        if (announce) this.statusEl.textContent = `${r.base.label} → ${r.head.label} · up to date`;
+        return;
+      }
       this.report = r;
       this.waveReport = r;
       this.commit = null;
@@ -3270,7 +3290,12 @@
       this.serverFindings = r.findings.filter((f) => !LOCAL_KINDS.has(f.kind));
       const local = storage.get(`rv.notes.${this.repoKey}.${this.key}`, null);
       this.notes = app.api.live ? (r.notes || []) : (local || r.notes || []);
-      this.reviewed = storage.get(`rv.reviewed.${this.repoKey}.${this.key}`, {}) || {};
+      this.verdict = r.verdict || null;
+      // "Reviewed" marks: live, the server's (they count towards `repoviz gate`; this browser's are moved there
+      // once); static, the ones saved when the report was made plus this browser's.
+      const marks = storage.get(`rv.reviewed.${this.repoKey}.${this.key}`, {}) || {}, saved = r.reviewed || {};
+      this.reviewed = app.api.live ? (Object.keys(saved).length ? Object.assign({}, saved) : marks) : Object.assign({}, saved, marks);
+      if (app.api.live && !Object.keys(saved).length && Object.keys(marks).length) this.persistReviewed();
       const scope = Object.assign({ expected: this.serverScope.expected }, storage.get(`rv.scope.${this.repoKey}.${this.key}`, null) || this.serverScope);
       this.allowedInput.value = scope.allowed.join(", ");
       this.protectedInput.value = scope.protected.join(", ");
@@ -3468,13 +3493,21 @@
       const f = this.report.files.find((x) => x.path === path);
       if (!f) return;
       if (on) this.reviewed[path] = this.markVersion(f); else delete this.reviewed[path];
-      storage.set(`rv.reviewed.${this.repoKey}.${this.key}`, this.reviewed);
+      this.persistReviewed();
       if (advance) {
         const order = this.navOrder();
         const next = order.slice(order.indexOf(path) + 1).concat(order).find((p) => !this.isReviewed(fileByPathOf(this.report, p)));
         if (next && next !== path) { this.selectFile(next); this.drawProgress(); return; }
       }
       this.drawFiles(); this.drawFile(path); this.drawProgress();
+    }
+    persistReviewed() {
+      storage.set(`rv.reviewed.${this.repoKey}.${this.key}`, this.reviewed);
+      if (!this.app.api.live) return;
+      clearTimeout(this.reviewedTimer);
+      const key = this.key, marks = Object.assign({}, this.reviewed);
+      this.reviewedTimer = setTimeout(() => this.app.api.saveReviewed(key, marks)
+        .catch((err) => { this.statusEl.textContent = "Could not save the reviewed marks: " + err.message; }), 400);
     }
     navOrder() { return this.fileOrder && this.fileOrder.length ? this.fileOrder : this.report.files.slice().sort(byRisk).map((f) => f.path); }
     stepFile(delta) {
@@ -3519,6 +3552,7 @@
     }
     draw() {
       this.drawCommits();
+      this.drawVerdict();
       this.drawStats();
       this.drawPlan();
       this.drawMap();
@@ -4049,9 +4083,13 @@
           .then(() => { this.statusEl.textContent = `notes saved (${this.notes.length})`; }, (err) => { this.statusEl.textContent = "Could not save notes: " + err.message; }), 400);
       }
     }
+    /* The prompt for the agent; it always covers the whole wave. */
+    currentPrompt() {
+      const o = this.opts;
+      return feedbackMarkdown(this.waveReport || this.report, this.notes.filter((n) => n.verdict !== "ok"), o.minSeverity, o.includeFindings);
+    }
     drawFeedback() {
-      const o = this.opts, r = this.waveReport || this.report;  // the prompt always covers the whole wave
-      const prompt = feedbackMarkdown(r, this.notes.filter((n) => n.verdict !== "ok"), o.minSeverity, o.includeFindings);
+      const prompt = this.currentPrompt(), o = this.opts;
       const general = h("div", { class: "group" });
       const preview = h("pre", { class: "prompt", text: prompt });
       const copy = () => {
@@ -4078,6 +4116,72 @@
           this.notes.length ? h("button", { class: "btn", onclick: () => { if (confirm("Remove all notes for this review?")) { this.notes = []; this.persistNotes(); this.drawStats(); this.drawPanels(); } } }, "Clear notes") : null),
         h("details", { open: true }, h("summary", { class: "muted" }, "Prompt preview"), preview));
       general.appendChild(h("button", { class: "btn small", onclick: (ev) => this.noteForm(general, {}, "missed") }, "✎ General note (e.g. a missed requirement)…"));
+    }
+    /* The verdict: a banner at the top (saying when it went stale) and, at the end, the bar that records one
+       (live app) or copies it as JSON (a static report cannot write state). */
+    drawVerdict() {
+      if (!this.verdictEl) return;
+      const v = this.verdict, live = this.app.api.live;
+      this.verdictBanner.innerHTML = "";
+      this.verdictBanner.hidden = !v;
+      if (v) {
+        const k = VERDICT_KINDS[v.verdict] || { label: v.verdict, icon: "review" };
+        this.verdictBanner.className = `notice verdict-banner ${v.verdict}${v.stale ? " stale" : ""}`;
+        put(this.verdictBanner, h("div", null, iconEl(k.icon), " ", h("b", { text: k.label }), v.reviewer ? ` by ${v.reviewer}` : "", " · ",
+          h("span", { class: "faint", text: fmtTime(v.at) }), " · ",
+          h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); this.verdictEl.scrollIntoView({ behavior: "smooth", block: "start" }); } }, live ? "change the verdict" : "details")),
+          v.stale ? h("div", { class: "verdict-stale" }, iconEl("alert"), " ", h("b", { text: "Stale:" }), " files changed since this verdict. Review the new state and submit a verdict again.") : null,
+          v.summary ? h("div", { class: "verdict-summary", text: v.summary }) : null);
+      }
+      const d = this.verdictDraft || (this.verdictDraft = { kind: null, summary: "", reviewer: storage.get("rv.reviewer", "") || "" });
+      const summary = h("textarea", { rows: 3, placeholder: "Summary for the agent (optional): what to fix next, or why the work is fine", "aria-label": "Verdict summary", oninput: () => { d.summary = summary.value; } });
+      summary.value = d.summary;
+      const reviewer = h("input", { type: "text", size: 28, placeholder: live ? "default: your git user.name" : "your name", "aria-label": "Reviewer",
+        oninput: () => { d.reviewer = reviewer.value; storage.set("rv.reviewer", reviewer.value); } });
+      reviewer.value = d.reviewer;
+      const history = v ? (v.history || []).slice(-3).reverse() : [];
+      this.verdictEl.innerHTML = "";
+      put(this.verdictEl,
+        h("div", { class: "muted", text: live
+          ? "End the review with a verdict. An agent waiting with repoviz review --wait gets it at once, with your summary, your notes and the prompt above. repoviz gate lets a push through only while an approval is fresh: any later change to the files makes the verdict stale."
+          : "This static report cannot record a verdict: it writes no state. Pick one and copy it as JSON to paste to the agent or attach to the pull request. To record it for repoviz review --wait and repoviz gate, open the repository with repoviz serve." }),
+        v ? h("div", { class: "verdict-current" }, "Current: ", iconEl((VERDICT_KINDS[v.verdict] || {}).icon), " ", h("b", { text: (VERDICT_KINDS[v.verdict] || {}).label || v.verdict }),
+          v.reviewer ? ` by ${v.reviewer}` : "", ", ", fmtTime(v.at), v.stale ? [" · ", iconEl("alert"), " stale"] : " · fresh",
+          history.length ? h("span", { class: "faint", text: " · before: " + history.map((x) => `${(VERDICT_KINDS[x.verdict] || {}).label || x.verdict} (${fmtTime(x.at)})`).join(", ") }) : null) : null,
+        h("div", { class: "group verdict-bar", role: live ? null : "radiogroup", "aria-label": "Verdict" }, Object.entries(VERDICT_KINDS).map(([kind, k]) =>
+          h("button", { class: `btn verdict-btn ${kind}`, title: k.hint, "aria-pressed": live ? null : String(d.kind === kind),
+            onclick: () => { if (live) this.submitVerdict(kind); else { d.kind = kind; this.drawVerdict(); } } }, iconEl(k.icon), " " + k.button))),
+        summary,
+        h("div", { class: "group" }, h("label", { class: "muted" }, "Reviewer ", reviewer),
+          live ? null : h("button", { class: "btn primary", disabled: !d.kind, title: d.kind ? "" : "Pick a verdict first", onclick: () => this.copyVerdictJson() }, "Copy verdict as JSON")));
+    }
+    verdictPayload(kind) {
+      const wave = this.waveReport || this.report, d = this.verdictDraft || {};
+      return { verdict: kind, summary: (d.summary || "").trim(), reviewer: (d.reviewer || "").trim(), prompt: this.currentPrompt(),
+        fingerprint: wave.fingerprint || "", base_revision_id: wave.base.revision_id, head_revision_id: wave.head.revision_id };
+    }
+    async submitVerdict(kind) {
+      const params = this.lastParams || {};
+      this.statusEl.textContent = "recording the verdict…";
+      try {
+        clearTimeout(this.saveTimer);  // a note typed just now goes with the verdict
+        await this.app.api.post("/api/review/notes", { key: this.key, notes: this.notes });
+        const r = await this.app.api.verdict(Object.assign({ target_id: params.id || "", base: params.base || "", target: params.target || "", mode: params.mode || "" }, this.verdictPayload(kind)));
+        this.verdict = r.verdict;
+        this.verdictDraft.summary = "";
+        this.statusEl.textContent = `Verdict recorded: ${VERDICT_KINDS[kind].label}` + (r.verdict && r.verdict.stale ? " (files changed while you reviewed: it is already stale)." : ".");
+        this.drawVerdict();
+      } catch (err) { this.statusEl.textContent = "Could not record the verdict: " + err.message; }
+    }
+    copyVerdictJson() {
+      const d = this.verdictDraft || {}, wave = this.waveReport || this.report;
+      if (!d.kind) return;
+      const notes = this.notes.map((n) => { const o = { text: n.comment || "" }; for (const k of ["path", "line", "side", "symbol", "verdict", "finding_id"]) if (n[k] !== undefined && n[k] !== null && n[k] !== "") o[k] = n[k]; return o; });
+      const json = JSON.stringify(Object.assign({ target: { id: wave.target.id, key: wave.target.key, label: wave.target.label }, label: VERDICT_KINDS[d.kind].label, at: new Date().toISOString(),
+        recorded: false, note: "Given in a static report: not recorded for repoviz review --wait or repoviz gate." }, this.verdictPayload(d.kind), { notes }), null, 1);
+      const done = () => { this.statusEl.textContent = "Verdict copied as JSON."; };
+      if (navigator.clipboard) navigator.clipboard.writeText(json).then(done, () => download("review-verdict.json", json, "application/json"));
+      else download("review-verdict.json", json, "application/json");
     }
   }
 
@@ -4136,6 +4240,12 @@
         { ul: ["**Feedback for the agent** turns your notes into a numbered, `file:line`-referenced prompt grouped as Revert / Fix / Complete / Improve / Answer.",
           "Optionally include untriaged signals at or above a severity (the prompt then also lists the riskiest files, medium or high, to double-check), then **Copy prompt** or **Download .md**.",
           "In the live app, notes are saved in the state directory (shared with `repoviz review --format prompt`). In a static report they stay in your browser."] },
+        { h: "7. Give a verdict" },
+        { ul: ["The **Verdict** bar at the end of the tab closes the loop: **Approve**, **Request changes** or **Reject**, with an optional summary and your name. The verdict then shows as a banner at the top of the tab.",
+          "An agent that ran `repoviz review --wait` gets it at once, with your summary, notes and the prompt, and exits 0 (approve), 2 (request changes) or 3 (reject). The link it prints opens this review.",
+          "The verdict is tied to the state you reviewed. If the files change afterwards, the banner says **Stale** (alert icon, dashed border) and `repoviz gate`, which an agent or a pre-push hook runs before pushing, refuses it until you give a new verdict. Committing the same changes inside a session keeps it fresh.",
+          "**Reviewed** marks are saved on the server too, so `repoviz gate --require-all-reviewed` can count them.",
+          "A static report shows the verdict but cannot record one: pick a verdict and **Copy verdict as JSON** to paste to the agent or attach to a pull request."] },
       ] },
     { id: "changes", title: "Changes", icon: "diff", tab: "changes", intro: "Compare two states of the repository and see what changed architecturally: modules, dependencies and cycles.",
       blocks: [
@@ -4418,7 +4528,9 @@
       this.ctors = ctors;
       this.ready = true;
       const fromHash = (location.hash.match(/tab=(\w+)/) || [])[1];
-      const initial = [pendingTab, fromHash, storage.get("rv.tab", "review")].find((t) => t && ctors[t]) || "review";
+      const link = (location.hash.match(/[#&]review=([^&]+)/) || [])[1];  // printed by `repoviz review --wait`
+      if (link && this.api.live) { try { this.reviewLink = decodeURIComponent(link); } catch (e) { /* a malformed link */ } }
+      const initial = this.reviewLink ? "review" : [pendingTab, fromHash, storage.get("rv.tab", "review")].find((t) => t && ctors[t]) || "review";
       await this.show(initial);
     }
     async ensure(tab) {
