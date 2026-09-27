@@ -24,6 +24,7 @@ implementation waves, and for understanding any codebase. It answers questions l
 | What should I tell the agent to fix, complete or revert? | **AI Review** → notes → feedback prompt, `repoviz review --format prompt` |
 | Has a human approved this wave? May the agent push? | **AI Review** → verdict, `repoviz review --wait`, `repoviz gate` |
 | Several agents in parallel worktrees: what is each doing, and where do they clash? | **Activity & Flow** → Parallel agents, header **Worktree** picker, `repoviz fleet` |
+| Did a change break another service: a route still called, a task's callers, an unset environment variable? | **AI Review** → signals and the card's *API changes*, **Dependencies** → API lines |
 | What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
 | What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
 | Why does A depend on B? Which import chain, in which files? | **Dependencies** → right-click a link (or `w`), `repoviz why A B` |
@@ -395,6 +396,20 @@ repository builds (Docker SDK, `docker run`) or calls one of its services over
 HTTP gets **runs image** and **talks to** edges, so the Dependencies view shows,
 for example, "API → ML containers" even though nothing imports them. The
 `new-runtime-dependency` signal reports such a link added by a wave.
+
+**Cross-service contracts** are read from the code as well: HTTP routes
+(FastAPI, Flask, Express, with their router prefixes and mounts), Celery tasks
+and the environment variables that Compose, env files, Dockerfiles and
+Kubernetes manifests declare, with the code that calls, enqueues or reads them
+(`requests`, `httpx`, `fetch`, `axios`, `.delay()`, `os.environ`,
+`BaseSettings`, `process.env`). The Dependencies view draws **calls HTTP**,
+**enqueues** and **reads env** lines, and a review flags the changes that break
+another service: a route removed while the frontend still calls it
+(`route-removed-still-called`), a route that now takes another method or other
+parameters, a task whose callers pass the old arguments
+(`task-signature-changed`), and a variable nobody sets or that the deployment
+stopped declaring (`env-var-unset`, `env-var-renamed`). See
+[docs/review.md](docs/review.md#cross-service-contracts).
 
 **Architecture contracts** tell the agent to respect the architecture and check it
 on every wave. Declare layers (`routes → services → models`), independent

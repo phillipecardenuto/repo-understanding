@@ -491,3 +491,102 @@ def test_sys_path_order_script_directory_and_bounds(make_repo) -> None:
     assert "via" not in imports[("last", "schemas")].metadata and ("last", "app.schemas") not in imports
     assert imports[("svc.src.main", "svc.src.config")].metadata["via"] == "sys.path"
     assert ("gone", "nothing") in imports and imports[("gone", "nothing")].metadata.get("external")
+
+
+# --------------------------------------------------------------------------- cross-service contracts (#13)
+
+API_APP = {
+    "backend/app/__init__.py": "",
+    "backend/app/main.py": ("import os\n\nfrom fastapi import FastAPI\n\nfrom app.routes import images\n\napp = FastAPI()\n"
+                            "app.include_router(images.router, prefix=\"/api\")\nDB_URL = os.environ[\"DATABASE_URL\"]\n"
+                            "DEBUG = os.getenv(\"APP_DEBUG\", \"0\")\n"),
+    "backend/app/routes/__init__.py": "",
+    "backend/app/routes/images.py": ("from fastapi import APIRouter\n\nfrom app.tasks import process_image\n\n"
+                                     "router = APIRouter(prefix=\"/images\")\n\n\n@router.get(\"/{image_id}\")\n"
+                                     "def get_image(image_id: str):\n    process_image.delay(image_id)\n    return {}\n\n\n"
+                                     "@router.post(\"\")\ndef upload():\n    return {}\n"),
+    "backend/app/tasks.py": "from celery import shared_task\n\n\n@shared_task\ndef process_image(image_id):\n    return image_id\n",
+    "frontend/src/api.js": ("export async function getImage(id) {\n  const r = await fetch(`/api/images/${id}`);\n"
+                            "  return r.json();\n}\nexport const upload = (body) => fetch(\"/api/images\", { method: \"POST\", body });\n"
+                            "const base = process.env.API_BASE || \"\";\n"),
+    "docker-compose.yml": ("services:\n  api:\n    build: ./backend\n    environment:\n      DATABASE_URL: postgres://db/app\n"
+                           "  db:\n    image: postgres:16\n"),
+    ".env.example": "APP_DEBUG=0\n",
+}
+
+
+def test_routes_tasks_and_their_consumers_become_nodes_and_edges(make_repo) -> None:
+    snap = Repository(make_repo(API_APP).path).snapshot("WORKTREE")
+    idx = snap.node_index()
+    routes = {n.name: n for n in snap.symbols if n.component_type == "http-route"}
+    assert set(routes) == {"GET /api/images/{image_id}", "POST /api/images"}  # decorator + router + include prefixes
+    get = routes["GET /api/images/{image_id}"]
+    assert get.metadata["template"] == "/api/images/{}" and get.metadata["handler"] == "get_image"
+    assert get.metadata["mounted"] and get.path == "backend/app/routes/images.py" and "api" in get.tags
+    [task] = [n for n in snap.symbols if n.component_type == "task"]
+    assert task.name == "app.tasks.process_image" and task.metadata["required"] == ["image_id"]
+    edges = {(e.relationship, idx[e.source_id].path, idx[e.target_id].name): e for e in snap.dependency_edges
+             if e.relationship in ("calls-http", "enqueues", "reads-env")}
+    calls = edges[("calls-http", "frontend/src/api.js", "GET /api/images/{image_id}")]
+    assert calls.confidence == 0.6 and calls.evidence[0].start_line == 2 and calls.metadata["label"] == "GET /api/images/{}"
+    assert edges[("calls-http", "frontend/src/api.js", "POST /api/images")].confidence == 0.7
+    assert ("enqueues", "backend/app/routes/images.py", "app.tasks.process_image") in edges
+    assert edges[("reads-env", "backend/app/main.py", "api")].metadata["env_keys"] == ["DATABASE_URL"]
+    assert ("reads-env", "backend/app/main.py", ".env.example") in edges
+    root = next(n for n in snap.components if n.component_type == "repository")
+    assert root.metadata["env_declared"] == {"APP_DEBUG": [".env.example:1"],
+                                             "DATABASE_URL": ["docker-compose.yml (service api)"]}
+    api_js = idx[next(e.source_id for e in snap.dependency_edges if e.relationship == "calls-http")]
+    assert api_js.metadata["env_reads"] == [{"name": "API_BASE", "line": 6, "default": True}]
+
+
+def test_flask_express_urls_env_readers_and_declarations() -> None:
+    from repoviz import interfaces as itf
+
+    flask = ('from flask import Blueprint, Flask\nbp = Blueprint("docs", __name__, url_prefix="/docs")\n\n'
+             '@bp.route("/<int:doc_id>", methods=["GET", "DELETE"])\ndef doc(doc_id): ...\n\n'
+             'app = Flask(__name__)\napp.register_blueprint(bp, url_prefix="/api/v1/docs")\n'
+             'import requests, httpx, os\nBASE = os.getenv("API", "http://x")\n'
+             'requests.get(f"{BASE}/api/v1/docs/{7}")\nrequests.post(BASE + "/api/v1/docs/" + str(7))\n'
+             'client = httpx.Client(base_url="http://svc:8000/api")\nclient.get("/items/1")\nrequests.get(url)\n'
+             'class S(BaseSettings):\n    model_config = SettingsConfigDict(env_prefix="app_")\n    token: str\n'
+             '    level: int = 3\nos.environ["X_SET"] = "1"\n')
+    r = itf.python_interfaces(flask)
+    assert r["routes"] == [{"owner": "bp", "methods": ["GET", "DELETE"], "path": "/<int:doc_id>", "line": 4, "handler": "doc"}]
+    assert r["includes"] == [{"owner": "app", "router": "bp", "prefix": "/api/v1/docs", "line": 8}]
+    assert [(c["method"], c["template"]) for c in r["http_calls"]] == [
+        ("GET", "/api/v1/docs/{}"), ("POST", "/api/v1/docs/{}"), ("GET", "/api/items/1")]  # requests.get(url): unknown
+    assert [(e["name"], e["default"]) for e in r["env_reads"]] == [("API", True), ("APP_TOKEN", False), ("APP_LEVEL", True)]
+    js = ('const express = require("express");\nconst app = express();\nconst images = require("./routes/images");\n'
+          'app.use("/api/images", images);\napp.get("/health", (req, res) => res.send("ok"));\n'
+          'const api = axios.create({ baseURL: "/api" });\napi.get(`/images/${id}/thumb`);\n'
+          'fetch(API + "/api/x", { method: "PUT" });\nfetch(url);\nfetch(`${a}${b}`);\n'
+          'const k = process.env.SECRET_KEY;\nconst v = import.meta.env.VITE_API ?? "x";\n// fetch("/api/commented")\n')
+    j = itf.js_interfaces(js)
+    assert [(x["owner"], x["path"]) for x in j["routes"]] == [("app", "/health")]  # api is an axios instance
+    assert j["mounts"] == [{"owner": "app", "prefix": "/api/images", "router": "images", "line": 4}] and j["apps"] == ["app"]
+    assert [(c["method"], c["template"]) for c in j["http_calls"]] == [("PUT", "/api/x"), ("GET", "/api/images/{}/thumb")]
+    assert [(e["name"], e["default"]) for e in j["env_reads"]] == [("SECRET_KEY", False), ("VITE_API", True)]
+    assert itf.env_declarations("deploy/Dockerfile", "FROM x\nENV A=1 B=2\nARG C\nENV D 4\n") == \
+        [("A", 2), ("B", 2), ("C", 3), ("D", 4)]
+    assert itf.env_declarations("k8s/api.yaml", "spec:\n  env:\n    - name: TOKEN\n      value: x\n") == [("TOKEN", 3)]
+    assert itf.env_declarations(".env.example", "# c\nexport A=1\nB = 2\n") == [("A", 2), ("B", 3)]
+    assert itf.normalize_path("http://h:1/a/:id/<int:x>/{y}/?q=1") == "/a/{}/{}/{}" and itf.normalize_path("{}") is None
+    assert itf.match("/api/images/recent", "/api/images/{}") and not itf.match("/api/{}/x", "/api/images/x")
+    task = {"positional": ["a", "b"], "required": ["a", "b"], "kwonly": [], "var_positional": False, "var_keyword": False}
+    assert itf.call_fits({"positional": 1, "keywords": ["b"]}, task) and itf.call_fits({"positional": 1, "keywords": []}, task) is False
+    assert itf.call_fits({"positional": None, "keywords": None}, task) is None
+
+
+def test_express_router_mounted_from_another_file(make_repo) -> None:
+    repo = make_repo({"server/app.js": ('const express = require("express");\nconst app = express();\n'
+                                        'const images = require("./routes/images");\napp.use("/api/images", images);\n'),
+                      "server/routes/images.js": ('const express = require("express");\nconst router = express.Router();\n'
+                                                  'router.get("/:id", (req, res) => res.json({}));\nmodule.exports = router;\n'),
+                      "web/client.js": "export const one = (id) => fetch(`/api/images/${id}`);\n"})
+    snap = Repository(repo.path).snapshot("WORKTREE")
+    routes = [n for n in snap.symbols if n.component_type == "http-route"]
+    assert [(n.name, n.metadata["mounted"]) for n in routes] == [("GET /api/images/:id", True)]
+    idx = snap.node_index()
+    assert [(idx[e.source_id].path, idx[e.target_id].name) for e in snap.dependency_edges
+            if e.relationship == "calls-http"] == [("web/client.js", "GET /api/images/:id")]

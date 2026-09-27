@@ -700,6 +700,13 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         entry["dependencies"] = deps
         module_id = node.id if node is not None and node.category == CATEGORY_MODULE else None
         entry["tests_affected"] = [path] if is_test else _tests_affected(module_id, impact) if exists_after else []
+        env_now = {r["name"] for r in (t_idx.get(node.id).metadata.get("env_reads") or [])} \
+            if node is not None and node.id in t_idx else set()
+        old_node = b_idx.get(path_to_node[old_path].id) if old_path and old_path in path_to_node else \
+            b_idx.get(node.id) if node is not None else None
+        env_before = {r["name"] for r in (old_node.metadata.get("env_reads") or [])} if old_node is not None else set()
+        if env_now != env_before:
+            entry["env_reads"] = {"added": sorted(env_now - env_before), "removed": sorted(env_before - env_now)}
         if cov is not None and path in cov.lines and exists_after and after is not None and not is_test:
             fresh = _fresh_on_disk(repo.root, path, target_src, cov.lines[path][0].time)
             entry["coverage"] = file_coverage(cov, path, [n for n, _ in added_lines], fresh=fresh)
@@ -758,6 +765,8 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
     plan_report = _plan_findings(add, scope, files)
     if target.target == "WORKTREE" and not commit and repo.git is not None and not set(OVERLAP_KINDS) <= disabled:
         _overlap_findings(add, repo, changed_set, component_of)
+    if not set(API_KINDS) <= disabled:
+        _api_findings(add, base_snap, target_snap, changed_set, component_of)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
         # One commit alone: the companion may be in another commit of the wave, so only mark partners as changed.
@@ -1251,6 +1260,125 @@ def _dependency_findings(add: Any, files: list[dict[str, Any]], base_src: TreeSo
 
 
 OVERLAP_KINDS = ("overlap-file", "overlap-symbol", "overlap-contract")
+API_KINDS = ("route-removed-still-called", "route-params-changed", "task-signature-changed", "env-var-unset",
+             "env-var-renamed")
+API_SYMBOLS = ("http-route", "task")  # their references are URLs and task calls, checked by _api_findings
+
+
+def _root_meta(snap: RepositorySnapshot) -> dict[str, Any]:
+    root = next((n for n in snap.components if n.component_type == "repository"), None)
+    return root.metadata if root is not None else {}
+
+
+def _api_findings(add: Any, base: RepositorySnapshot, target: RepositorySnapshot, changed: set[str],
+                  component_of: Any) -> None:
+    """Contracts between services (interfaces.py): routes still called after they went away, routes whose
+    method or parameters changed, tasks whose callers no longer fit, and environment variables nobody sets."""
+    from . import interfaces as itf
+
+    def routes(snap: RepositorySnapshot) -> list[Any]:
+        return [n for n in snap.symbols if n.component_type == "http-route" and n.metadata.get("template")]
+
+    b_routes, t_routes = routes(base), routes(target)
+    consumers = [n for n in target.modules if n.metadata.get("http_calls")]
+    # 1. a route that went away while code in the target still calls it (one signal per route and calling file)
+    if b_routes:
+        stale: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        gone_by_id: dict[str, Any] = {}
+        for m in consumers:
+            for c in m.metadata["http_calls"]:
+                if any(itf.method_match(c["method"], r.metadata["method"]) and itf.match(c["template"], r.metadata["template"])
+                       for r in t_routes):
+                    continue
+                gone = [r for r in b_routes if itf.method_match(c["method"], r.metadata["method"])
+                        and itf.match(c["template"], r.metadata["template"])]
+                if gone:
+                    gone_by_id[gone[0].id] = gone[0]
+                    stale.setdefault((gone[0].id, m.path), []).append(c)
+        for (rid, path), calls in stale.items():
+            r = gone_by_id[rid]
+            now = [t for t in t_routes if t.path == r.path and t.metadata.get("handler") == r.metadata.get("handler")]
+            what = f"is now {now[0].name}" if now else "was removed"
+            lines = sorted({c.get("line") for c in calls if c.get("line")})
+            where = f"line {lines[0]}" if len(lines) == 1 else f"lines {', '.join(map(str, lines[:8]))}" + (" …" if len(lines) > 8 else "")
+            add(Finding("route-removed-still-called", "correctness", "high", "Route removed but still called",
+                        f"{r.name} ({r.path}) {what}, but this file still calls it ({where}; confidence "
+                        f"{max(c.get('confidence', 0.7) for c in calls)}).", path, line=lines[0] if lines else None,
+                        excerpt=_redact(str(calls[0].get("url"))), component=component_of(path)[1],
+                        suggestion="Call the new route, or keep the old path working until every client moved."),
+                key=f"{rid}:{path}")
+    # 2. the same handler now answers another method or other path parameters
+    def by_handler(rs: list[Any]) -> dict[tuple[str, str], dict[tuple[str, str], Any]]:
+        out: dict[tuple[str, str], dict[tuple[str, str], Any]] = {}
+        for r in rs:
+            out.setdefault((r.path, r.metadata.get("handler") or ""), {})[(r.metadata["method"], r.metadata["template"])] = r
+        return out
+
+    b_h, t_h = by_handler(b_routes), by_handler(t_routes)
+    for key in set(b_h) & set(t_h):
+        before = [b_h[key][k] for k in b_h[key] if k not in t_h[key]]
+        after = [t_h[key][k] for k in t_h[key] if k not in b_h[key]]
+        if not before or not after:
+            continue
+        if {r.metadata["method"] for r in before} != {r.metadata["method"] for r in after} or \
+                sorted(itf.params_of(r.metadata["template"]) for r in before) != \
+                sorted(itf.params_of(r.metadata["template"]) for r in after):
+            add(Finding("route-params-changed", "architecture", "medium", "Route method or parameters changed",
+                        f"{key[1]}: " + ", ".join(r.name for r in before) + " → " + ", ".join(r.name for r in after)
+                        + ". Clients outside this repository may still use the old form.", key[0],
+                        line=after[0].start_line, symbol=key[1], component=component_of(key[0])[1],
+                        suggestion="Check every client of this endpoint, or keep the old form as well."),
+                key=key[1])
+    # 3. a task whose callers no longer fit its parameters
+    b_tasks = {n.name: n for n in base.symbols if n.component_type == "task"}
+    for t in (n for n in target.symbols if n.component_type == "task"):
+        old = b_tasks.get(t.name)
+        if old is None:
+            continue
+        o, n = old.metadata, t.metadata
+        if set(o.get("required") or []) == set(n.get("required") or []) and \
+                set(o.get("positional") or []) <= set(n.get("positional") or []):
+            continue
+        broken = []
+        for m in target.modules:
+            for e in m.metadata.get("enqueues") or []:
+                if e.get("task") == t.name and itf.call_fits(e, n) is False:
+                    broken.append(f"{m.path}:{e['line']}" + ("" if m.path in changed else " (unchanged)"))
+        if broken:
+            add(Finding("task-signature-changed", "correctness", "high", "Task parameters changed; callers not updated",
+                        f"{t.name} changes from {o.get('signature')} to {n.get('signature')}, but "
+                        f"{len(broken)} call(s) still pass the old arguments: " + ", ".join(broken[:5])
+                        + (" …" if len(broken) > 5 else "") + ".", t.path, line=t.start_line, symbol=t.name,
+                        component=component_of(t.path)[1] if t.path else None,
+                        suggestion="Update every .delay() / apply_async() call, or give the new parameters defaults."),
+                key=t.name)
+    # 4, 5. environment variables: read by code, declared by nobody (only when the repository declares some)
+    declared_t = _root_meta(target).get("env_declared") or {}
+    declared_b = _root_meta(base).get("env_declared") or {}
+    if not declared_t and not declared_b:
+        return
+    reads_b = {r["name"] for n in base.modules for r in n.metadata.get("env_reads") or []}
+    seen: set[str] = set()
+    for m in target.modules:
+        for r in m.metadata.get("env_reads") or []:
+            name = r["name"]
+            if r.get("default") or name in itf.PLATFORM_ENV or name in declared_t or name in seen:
+                continue
+            if name in declared_b:
+                seen.add(name)
+                add(Finding("env-var-renamed", "correctness", "medium", "Environment variable no longer declared",
+                            f"{name} was declared in {', '.join(declared_b[name][:2])} but no longer is, and this code "
+                            "still reads it without a default.", m.path, line=r.get("line"),
+                            component=component_of(m.path)[1],
+                            suggestion="Declare it again (or its new name), or read the new name here."), key=name)
+            elif name not in reads_b and m.path in changed:
+                seen.add(name)
+                add(Finding("env-var-unset", "correctness", "medium", "New environment variable nobody sets",
+                            f"This code reads {name}" + (f" (through {r['via']})" if r.get("via") else "")
+                            + " without a default, and no Compose file, env file, Dockerfile or Kubernetes manifest "
+                            "in the repository declares it.", m.path, line=r.get("line"),
+                            component=component_of(m.path)[1],
+                            suggestion="Add it to the deployment (and .env.example), or give it a default."), key=name)
 
 
 def _changes(o: dict[str, Any]) -> str:
@@ -1674,7 +1802,8 @@ def _rename_findings(add: Any, diff: RepositoryDiff, target: RepositorySnapshot,
     the old name only appears as a word in the module or its importers (comments, strings, docstrings and
     ``obj.name`` attribute accesses are ignored).  Bounded: at most :data:`MAX_RENAME_CHECKS` renames are
     checked and :data:`MAX_STALE_FILES` files read, each once."""
-    renames = [r for r in diff.renames if r["kind"] == "symbol" and r["renamed"] and r["new_id"] in diff.nodes]
+    renames = [r for r in diff.renames if r["kind"] == "symbol" and r["renamed"] and r["new_id"] in diff.nodes
+               and diff.nodes[r["new_id"]].node.component_type not in API_SYMBOLS]  # URLs: see _api_findings
     if not renames:
         return
     t_idx = target.node_index()

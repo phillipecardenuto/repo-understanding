@@ -6,6 +6,29 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Cross-service contracts: HTTP routes, background tasks and environment variables** ([#13](https://github.com/phillipecardenuto/repo-understanding/issues/13)).
+  - A new `interfaces` analyzer reads (never runs) FastAPI / Starlette, Flask
+    and Express routes, with the prefixes of their routers and mounts
+    (`include_router`, `register_blueprint`, `app.use`, across files), and
+    Celery tasks with their parameters. They become `http-route` and `task`
+    nodes under their module.
+  - Consumers: HTTP calls (`requests`, `httpx`, `fetch`, `axios` and
+    `axios.create` instances) whose URL has a literal path, task calls
+    (`.delay`, `.apply_async`, `send_task`) and environment reads
+    (`os.environ`, `os.getenv`, pydantic `BaseSettings` with `env_prefix`,
+    `process.env`, `import.meta.env`). They give `calls-http`, `enqueues` and
+    `reads-env` edges, each with a confidence; a URL built at run time is
+    skipped rather than guessed.
+  - Declared variables: Compose `environment`, `.env.example`-style files,
+    Dockerfile `ENV` / `ARG`, Kubernetes `env: - name:`. Names only, never
+    values.
+  - New signals `route-removed-still-called` (high, per route and calling
+    file, with every line), `route-params-changed` (medium),
+    `task-signature-changed` (high, naming the callers, including unchanged
+    files), `env-var-unset` and `env-var-renamed` (medium).
+  - The Dependencies view draws the three relationships as labelled lines
+    (filter *API (HTTP routes, tasks, env)*, on by default); the change card
+    lists a file's **API changes**.
 - **Existing coverage reports for the changed lines** ([#12](https://github.com/phillipecardenuto/repo-understanding/issues/12)).
   - A review reads coverage reports that already exist (Cobertura, JaCoCo,
     LCOV, Istanbul `coverage-final.json`, Go `cover.out`); repoviz never runs

@@ -15,6 +15,7 @@ from .callflow import CallFlowAnalyzer
 from .filesystem import FilesystemAnalyzer
 from .git import GitAnalyzer
 from .golang import GoAnalyzer
+from .interfaces import InterfacesAnalyzer
 from .javascript import JavaScriptAnalyzer
 from .manifest import ManifestAnalyzer
 from .python import PythonAnalyzer
@@ -29,6 +30,7 @@ _REGISTRY: list[type[Analyzer]] = [
     JavaScriptAnalyzer,
     GoAnalyzer,
     RuntimeAnalyzer,
+    InterfacesAnalyzer,
     CallFlowAnalyzer,
 ]
 _PLUGINS_LOADED = False

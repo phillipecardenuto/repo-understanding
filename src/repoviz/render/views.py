@@ -37,7 +37,10 @@ LEVELS = ("component", "package", "module", "project")
 CONTAINER_TYPES = {"directory", "package", "namespace-package", "repository", "project", "workspace-member",
                    "workspace"}
 RUNTIME_RELATIONSHIPS = ("invokes-container", "talks-to")  # found in code: containers started, services called
-DEFAULT_RELATIONSHIPS = (REL_IMPORTS, REL_DEPENDS_ON, *RUNTIME_RELATIONSHIPS)
+# contracts between services (analyzers/interfaces.py): HTTP routes called, tasks queued, environment read
+API_RELATIONSHIPS = ("calls-http", "enqueues", "reads-env")
+LABELLED_RELATIONSHIPS = RUNTIME_RELATIONSHIPS + API_RELATIONSHIPS  # a labelled line of their own
+DEFAULT_RELATIONSHIPS = (REL_IMPORTS, REL_DEPENDS_ON, *RUNTIME_RELATIONSHIPS, *API_RELATIONSHIPS)
 
 
 @dataclass
@@ -413,7 +416,7 @@ def dependency_view(snapshot: RepositorySnapshot, *, level: str = "component",
             continue
         if not include_services and nodes[e.source_id].component_type == "service":
             continue  # a service's own links (images, builds, other services): the System view draws those
-        if e.relationship in RUNTIME_RELATIONSHIPS:  # as dependencyView in web/app.js
+        if e.relationship in LABELLED_RELATIONSHIPS:  # as dependencyView in web/app.js
             count, labels = run_pairs.get((s, t, e.relationship), (0, []))
             label = e.metadata.get("label")
             run_pairs[(s, t, e.relationship)] = (count + e.occurrences,

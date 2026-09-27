@@ -360,6 +360,11 @@ Credential-like values are always redacted in excerpts and diffs.
 | `lockfile-without-manifest` | medium | dependencies | a lock file resolves other versions but no manifest it belongs to changed: an upgrade run or a manual edit |
 | `manifest-without-lockfile` | low | dependencies | a manifest's dependencies changed but its lock file (same directory, or the nearest parent for workspaces) did not |
 | `new-runtime-dependency` | low | architecture | code now starts a container built by this repository, or calls one of its services (`app.search now talks to the cbir-service service (http:8000)`), found without imports (see [data-model.md](data-model.md#runtime-coupling-from-code)) |
+| `route-removed-still-called` | high | correctness | an HTTP route went away (or moved to another path) while code in the repository still calls it; one signal per route and calling file, with every line. Example: `Route removed but still called — GET /images/{job_id} (app/routes/images.py) is now GET /pictures/{job_id}, but this file still calls it (lines 101, 185; confidence 0.7)` at `frontend/src/api.js:101`. See [Cross-service contracts](#cross-service-contracts) |
+| `route-params-changed` | medium | architecture | the same handler now answers another HTTP method or takes another number of path parameters, so clients outside the repository may break: `get_image: GET /images/{id} → POST /images/{id}/{version}` |
+| `task-signature-changed` | high | correctness | a background task (Celery) changed its parameters and some `.delay()` / `apply_async()` / `send_task()` calls no longer fit; calls in files the wave did not touch say `(unchanged)`. Example: `Task parameters changed; callers not updated — index_image changes from (image_id) to (image_id, collection), but 2 call(s) still pass the old arguments: app/routes/cbir.py:127 (unchanged), app/routes/images.py:239.` |
+| `env-var-unset` | medium | correctness | changed code reads a new environment variable without a default, and no Compose file, env file, Dockerfile or Kubernetes manifest declares it. Only raised when the repository declares some variables. Example: `New environment variable nobody sets — This code reads SEARCH_TIMEOUT without a default, …` at `app/search.py:3` |
+| `env-var-renamed` | medium | correctness | a variable the deployment declared is no longer declared (often renamed there), while code still reads it without a default: `REDIS_URL was declared in docker-compose.yml (service api) but no longer is` |
 | `untested-change` | medium | tests | changed code that no test imports, even indirectly. Not raised for a file whose changed lines a fresh coverage report measured |
 | `changed-lines-uncovered` | medium | tests | a fresh coverage report shows changed executable lines no test ran (at least `[review.coverage] min_uncovered`, default 1). Example: `Changed lines no test runs — 1 of 4 changed executable line(s) are not run by any test, according to coverage.xml (line(s) 7)` at `app/calc.py:7`. See [Coverage reports](#coverage-reports) |
 | `coverage-stale` | info | tests | a coverage report is older than some changed files, so it cannot tell whether their new lines run: "re-run your test suite with coverage to refresh it" |
@@ -407,6 +412,36 @@ it never runs the tests.
   content.
 - **Setup.** See [configuration.md](configuration.md#coverage-reports) for the
   paths, formats and path mapping, and for `min_uncovered`.
+
+### Cross-service contracts
+
+In a system of several services, the change that breaks something often
+crosses a process boundary that imports do not show: the backend renames a
+route the frontend still calls, a task gains a parameter its `.delay()` callers
+do not pass, the code reads a variable the deployment never sets. repoviz reads
+these contracts from the source text (it never runs anything) and compares them
+between the base and the target:
+
+- **Providers.** HTTP routes (FastAPI / Starlette, Flask, Express, with the
+  prefixes of their routers and mounts), Celery tasks, and the environment
+  variables that Compose files, `.env.example`-style files, Dockerfiles
+  (`ENV` / `ARG`) and Kubernetes `env:` lists declare.
+- **Consumers.** HTTP calls (`requests`, `httpx`, `fetch`, `axios`) whose URL
+  has a literal path, task calls, and environment reads (`os.environ`,
+  `os.getenv`, pydantic `BaseSettings`, `process.env`, `import.meta.env`).
+- **Signals.** `route-removed-still-called`, `route-params-changed`,
+  `task-signature-changed`, `env-var-unset` and `env-var-renamed` (table above).
+  A URL built at run time with no literal path is skipped rather than guessed,
+  and a dynamic part of a URL only matches a route parameter, so a match is
+  likely but not certain: each signal gives the confidence of the call it
+  found.
+- **In the app.** The Dependencies tab draws `calls-http`, `enqueues` and
+  `reads-env` lines with their labels (filter *API (HTTP routes, tasks, env)*;
+  click a line for its evidence and confidence). A changed file's card lists
+  its **API changes**: routes and tasks added or removed, and environment
+  variables it now reads or no longer reads.
+- **Turning them off.** Add the kinds to `review.disabled_checks`. The graph
+  itself is in [data-model.md](data-model.md#cross-service-contracts-routes-tasks-environment).
 
 ### Values: constants and settings
 

@@ -149,6 +149,61 @@ view draws these; the Dependencies view leaves them out.
 makes no edge. The module keeps it in `metadata.external_runtime_references`
 (`kind`, a redacted `value`, `line`, `via`), with at most 10 per module.
 
+## Cross-service contracts (routes, tasks, environment)
+
+The `interfaces` analyzer (`analyzers/interfaces.py` over `interfaces.py`) reads
+Python and JavaScript text for the contracts between services that imports do
+not show. It never runs them.
+
+**Nodes** (category `symbol`, tag `api`, parent: the module that defines them).
+
+| `component_type` | Key | From | Metadata |
+|---|---|---|---|
+| `http-route` | `route:<file>:<METHOD> <template>` | FastAPI / Starlette (`@app.get`, `@router.post`, `api_route`, `websocket`), Flask (`@app.route`, `@bp.get`) and Express (`app.get`, `router.post`) | `method`, `path` (as written, with its prefixes), `template` (normalised: `/api/images/{}`), `handler`, `confidence`, `mounted` |
+| `task` | `task:<name>` | Celery `@app.task`, `@shared_task` (the `name=` argument, or the function's dotted name) | `func`, `positional`, `required`, `kwonly`, `var_positional`, `var_keyword`, `signature`, `bind` |
+
+A route's path joins its decorator with its router's prefix and the prefix the
+router is mounted with:
+
+- FastAPI `APIRouter(prefix=…)` and `app.include_router(router, prefix=…)`,
+  resolved through the module's imports, up to 6 levels deep;
+- Flask `Blueprint(url_prefix=…)` and `app.register_blueprint(bp, url_prefix=…)`
+  (the second replaces the first, as in Flask);
+- Express `app.use('/prefix', router)`, in the same file or through an
+  `import` / `require` of another file.
+
+Confidence is 0.85 when the route's router is mounted by an application, or has
+no router, and 0.7 when its router is never seen mounted.
+
+**Edges** (all with `metadata.label`).
+
+| Relationship | From → to | Meaning | Confidence |
+|---|---|---|---|
+| `calls-http` | module → `http-route` | a call (`requests`, `httpx`, `fetch`, `axios`, an `axios.create` instance) whose URL template matches the route's; the method must match when the call gives one | the call's (0.7 for a literal URL, 0.6 with a dynamic part), × 0.8 when it matches more than one route |
+| `enqueues` | module → `task` | `task.delay(…)`, `task.apply_async(…)`, `send_task("name", …)` | 0.8 |
+| `reads-env` | module → the service, env file, Dockerfile or manifest that declares the variable | `os.environ[…]`, `os.getenv`, `environ.get`, pydantic `BaseSettings` fields (with `env_prefix`), `process.env.X`, `import.meta.env.X`; `metadata.env_keys` lists the names | 0.9 |
+
+A URL is normalised to a path template: the scheme, host and query are
+dropped, `{id}`, `:id`, `<int:id>` and dynamic parts (`${id}`, f-string fields)
+become `{}`, and a trailing slash is ignored. A route parameter matches any
+segment; a dynamic part of a call matches only a route parameter. A URL with no literal path segment is ignored rather than guessed. A
+route in the same file as its caller makes no edge. One call links to at most 3
+routes.
+
+**Consumers on the module node** (kept whether they match or not, at most 50
+per kind): `metadata.http_calls` (`method`, `template`, `line`, `url`,
+`confidence`), `metadata.enqueues` (`kind`, `target` or `name`, `line`, the
+number of `positional` arguments and the `keywords`, and the resolved `task`), `metadata.env_reads`
+(`name`, `line`, `default`: whether the read has a default).
+
+**Declared variables on the repository node.** `metadata.env_declared` maps each
+variable (at most 1000) to up to 5 places that set it: a Compose service's
+`environment` (`env_keys`), `.env.example`-style files, Dockerfile `ENV` / `ARG`
+and Kubernetes-style `env: - name:` lists. Values are never read or stored.
+
+The review compares these between the base and the target: see
+"Cross-service contracts" in [review.md](review.md).
+
 ## SourceEvidence
 
 `path`, `start_line`, `end_line`, `construct` (`import`, `from-import`,

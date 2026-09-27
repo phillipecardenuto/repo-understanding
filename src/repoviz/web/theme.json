@@ -287,6 +287,27 @@
       "dash": "8 3",
       "arrow": "==>",
       "marker": "runs image"
+    },
+    "calls-http": {
+      "stroke": "#0891b2",
+      "width": 2.0,
+      "dash": "5 3",
+      "arrow": "-.->",
+      "marker": "calls HTTP"
+    },
+    "enqueues": {
+      "stroke": "#c2410c",
+      "width": 2.0,
+      "dash": "10 4",
+      "arrow": "-.->",
+      "marker": "enqueues"
+    },
+    "reads-env": {
+      "stroke": "#4d7c0f",
+      "width": 1.6,
+      "dash": "2 3",
+      "arrow": "-.->",
+      "marker": "reads env"
     }
   },
   "service_kinds": {

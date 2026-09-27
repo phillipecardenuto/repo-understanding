@@ -54,7 +54,7 @@ Labels:
 | [#10](https://github.com/phillipecardenuto/repo-understanding/issues/10) | Parallel agents: Git worktrees and overlap between concurrent waves · **✓ done** | P2 | L |
 | [#11](https://github.com/phillipecardenuto/repo-understanding/issues/11) | Third-party dependency changes (manifests, lock files) with supply-chain signals · **✓ done** | P2 | M |
 | [#12](https://github.com/phillipecardenuto/repo-understanding/issues/12) | Read existing coverage reports to flag changed lines no test runs · **✓ done** | P2 | M |
-| [#13](https://github.com/phillipecardenuto/repo-understanding/issues/13) | Cross-service contract changes: HTTP routes, background tasks, env vars | P2 | L |
+| [#13](https://github.com/phillipecardenuto/repo-understanding/issues/13) | Cross-service contract changes: HTTP routes, background tasks, env vars · **✓ done** | P2 | L |
 | [#14](https://github.com/phillipecardenuto/repo-understanding/issues/14) | Constant and configuration value changes, before → after · **✓ done** | P2 | S |
 | [#15](https://github.com/phillipecardenuto/repo-understanding/issues/15) | Submodule edge cases: fetch hint for missing history, nested submodules | P3 | S |
 | [#20](https://github.com/phillipecardenuto/repo-understanding/issues/20) | Standing guidance on components, exported as agent context | P3 | S |
@@ -121,8 +121,9 @@ Labels:
    after), #25 (`sys.path` imports, inferred projects) and #11 (dependency
    changes), done.
 6. **Next:** the other P2 items in number order: #7 (checkpoints), #8
-   (plan vs actual), #9 (verdict and gate), #10 (parallel agents) and #12
-   (coverage reports), done; then #13 and #30, then the P3 items.
+   (plan vs actual), #9 (verdict and gate), #10 (parallel agents), #12
+   (coverage reports) and #13 (cross-service contracts), done; then #30,
+   then the P3 items.
 
 ## Dependencies between items
 

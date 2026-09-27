@@ -690,7 +690,7 @@
       if (!s || !t || s === t) continue;
       if (!o.tests && (hasTag(si.nodes.get(s), "test") || hasTag(si.nodes.get(t), "test"))) continue;
       if (!o.services && (si.nodes.get(e.source_id) || {}).component_type === "service") continue;  // the System view draws a service's own links
-      if (RUNTIME_RELS.includes(e.relationship)) {  // a line of its own, labelled (not an import, not in cycles)
+      if (LABELLED_RELS.includes(e.relationship)) {  // a line of its own, labelled (not an import, not in cycles)
         const rk = s + "\u0000" + t + "\u0000" + e.relationship;
         const r = rpairs.get(rk) || { count: 0, labels: [], underlying: [] };
         r.count += e.occurrences; r.underlying.push(e.id);
@@ -880,12 +880,17 @@
   const SYSTEM_EDGES = ["starts-after", "talks-to", "shares-volume", "invokes-container"];
   /* Run-time coupling found in code (#23): its own line style, never mixed with imports. */
   const RUNTIME_RELS = ["invokes-container", "talks-to"];
+  /* Contracts between services (#13): HTTP routes called, tasks queued, environment variables read. */
+  const API_RELS = ["calls-http", "enqueues", "reads-env"];
+  const LABELLED_RELS = [...RUNTIME_RELS, ...API_RELS];
   /* Relationships offered by the Changes and Dependencies filters. */
-  const RELATIONSHIPS = ["imports", "depends-on", "calls", "invokes", "builds", "runs", "starts-after", "shares-volume", "runtime"];
-  /* A filter entry: "runtime" stands for the containers and HTTP calls found in code. */
-  const relsOf = (r) => (r === "runtime" ? RUNTIME_RELS : [r]);
+  const RELATIONSHIPS = ["imports", "depends-on", "calls", "invokes", "builds", "runs", "starts-after", "shares-volume", "runtime", "api"];
+  /* A filter entry: "runtime" stands for the containers and HTTP calls found in code, "api" for routes, tasks and
+     environment variables. */
+  const relsOf = (r) => (r === "runtime" ? RUNTIME_RELS : r === "api" ? API_RELS : [r]);
+  const RELATIONSHIP_LABEL = { runtime: "runtime (containers, services)", api: "API (HTTP routes, tasks, env)" };
   function relationshipChecks(o, redraw) {
-    return RELATIONSHIPS.map((r) => checkbox(r === "runtime" ? "runtime (containers, HTTP)" : r, relsOf(r).every((x) => o.relationships.includes(x)), (c) => {
+    return RELATIONSHIPS.map((r) => checkbox(RELATIONSHIP_LABEL[r] || r, relsOf(r).every((x) => o.relationships.includes(x)), (c) => {
       const set = new Set(o.relationships);
       for (const x of relsOf(r)) if (c) set.add(x); else set.delete(x);
       o.relationships = [...set]; redraw();
@@ -1515,7 +1520,9 @@
     return h("span", { class: "item" }, h("span", { class: "line", style: { borderTop: `${Math.max(2, r.width || 1.5)}px ${dash} ${r.stroke}` } }), text);
   }
   function runtimeLegend() {
-    return [relLine("invokes-container", "runs image (code starts a container built here)"), relLine("talks-to", "talks to (code calls a service's URL)")];
+    return [relLine("invokes-container", "runs image (code starts a container built here)"), relLine("talks-to", "talks to (code calls a service's URL)"),
+      relLine("calls-http", "calls HTTP (a route of this repository)"), relLine("enqueues", "enqueues (a background task)"),
+      relLine("reads-env", "reads env (declared by a service or env file)")];
   }
   function systemLegend(kinds) {
     const item = (name, text) => h("span", { class: "item" }, iconEl(name), " " + text);
@@ -1891,7 +1898,8 @@
         if (!u) continue;
         const us = idx.nodes.get(u.source_id), ut = idx.nodes.get(u.target_id);
         this.el.appendChild(h("h4", null, `${us ? displayName(us) : u.source_id} → ${ut ? displayName(ut) : u.target_id} `, statusPill(u.status),
-          (u.change_reasons || []).length ? h("span", { class: "faint" }, " " + u.change_reasons.join("; ")) : null));
+          (u.change_reasons || []).length ? h("span", { class: "faint" }, " " + u.change_reasons.join("; ")) : null,
+          u.confidence < 1 ? h("span", { class: "faint", title: "How sure the static analysis is about this link" }, ` · confidence ${Math.round(u.confidence * 100)}%`) : null));
         this.el.appendChild(evidenceList(evidenceOf(u), 5));
         if (u.base_evidence && u.base_evidence.length) put(this.el, h("div", { class: "muted", text: "Before:" }), evidenceList(u.base_evidence, 3));
       }
@@ -2503,12 +2511,16 @@
     constructor(app, root) {
       this.app = app; this.root = root;
       const cfg = app.bundle.config || {};
-      this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on", ...RUNTIME_RELS], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
+      this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on", ...RUNTIME_RELS, ...API_RELS], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
         cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false, contracts: false, services: false }, storage.get("rv.deps", {}));
       this.opts.cycleMembers = null;
       if (!this.opts.runtimeDefault) {  // saved filters from before runtime edges existed: show them once
         this.opts.relationships = [...new Set([...this.opts.relationships, ...RUNTIME_RELS])];
         this.opts.runtimeDefault = true;
+      }
+      if (!this.opts.apiDefault) {  // the same for the API relationships (#13)
+        this.opts.relationships = [...new Set([...this.opts.relationships, ...API_RELS])];
+        this.opts.apiDefault = true;
       }
     }
     save() { const o = Object.assign({}, this.opts); delete o.cycleMembers; storage.set("rv.deps", o); }
@@ -4109,6 +4121,16 @@
         this.fileEl.appendChild(h("h4", { text: `Signals in this file (${fl.length})` }));
         this.fileEl.appendChild(h("ul", { class: "plain" }, fl.map((x) => h("li", null, sevPill(x.severity), " ", h("b", { text: x.title }), x.line ? h("a", { href: "#", class: "mono", onclick: (ev) => { ev.preventDefault(); this.scrollToLine(x.line); } }, ` line ${x.line}`) : null, x.detail ? h("span", { class: "faint", text: " — " + x.detail }) : null))));
       }
+      const api = (f.symbols || []).filter((s) => s.kind === "http-route" || s.kind === "task");
+      if (api.length || f.env_reads) {  // contracts with other services (#13)
+        const envList = (label, xs, icon) => (xs && xs.length ? h("li", null, iconEl(icon), ` ${label}: `, h("span", { class: "mono", text: xs.join(", ") })) : null);
+        this.fileEl.appendChild(h("h4", null, "API changes ", h("span", { class: "faint", text: "— routes, tasks and environment variables other services rely on" })));
+        this.fileEl.appendChild(h("ul", { class: "plain api-changes" },
+          api.map((s) => h("li", null, statusPill(s.status), " ", pill(s.kind === "task" ? "task" : "route"), " ", h("span", { class: "mono", text: s.name }),
+            s.renamed_from ? h("span", { class: "faint" }, "  was ", h("span", { class: "mono", text: s.renamed_from })) : null,
+            s.signature_before && s.signature && s.signature_before !== s.signature ? h("span", { class: "mono faint", text: `  ${s.signature_before} → ${s.signature}` }) : null)),
+          envList("environment read (new)", (f.env_reads || {}).added, "sliders"), envList("environment no longer read", (f.env_reads || {}).removed, "sliders")));
+      }
       if ((f.tests_affected || []).length && !f.is_test) {
         this.fileEl.appendChild(h("h4", { text: `Tests that exercise this module (${f.tests_affected.length})` }));
         this.fileEl.appendChild(h("div", { class: "mono faint", text: f.tests_affected.join(", ") }));
@@ -4360,6 +4382,7 @@
           "A manifest's or lock file's card lists its **dependencies**: added, removed, **↑ upgraded**, **↓ downgraded**, **source changed** (now from a Git repository, a URL, a path outside the repository, an npm alias or another registry) or loosened (**unpinned**), with the version the lock file resolves. Indirect packages are counted. The header shows `+added −removed ↑ ↓` for the wave.",
           "Key changes also list **values**: constants, settings-class defaults and configuration keys, before → after (`MAX_IMAGES: 20 → 200`). A safety setting switched the risky way (debug on, TLS verification off, a timeout removed, CORS `*`) carries a **⚠** pill and a *Safety setting weakened* signal. Secret-looking names show `•••`.",
           "**Coverage.** When a coverage report already exists (coverage.xml, lcov.info, coverage-final.json, cover.out, jacoco.xml…), the card says how many changed executable lines a test ran, and the diff marks them **●** (run) or **○** (not run). The header shows the wave's **patch coverage**. A report older than a file's last change cannot say, and the card asks you to re-run the tests with coverage (repoviz never runs them).",
+          "**API changes.** A file that defines HTTP routes or background tasks, or reads environment variables, lists what changed in them: routes and tasks added or removed (with a task's parameters before → after), and variables it now reads or no longer reads. Signals follow them across services: a route removed while the frontend still calls it, a task whose `.delay()` callers pass the old arguments, a variable no Compose file, env file, Dockerfile or Kubernetes manifest sets.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
           "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file."] },
         { h: "Commit by commit" },
@@ -4422,6 +4445,7 @@
           "**Click a node** to spotlight it: the nodes that use it are joined by **solid, thick** links, the nodes it uses by **dashed, thick** links, and everything else fades. The line above the diagram gives both counts. The layout does not move. **Esc**, **Clear** or a click on the empty background shows everything again; clicking another node moves the spotlight. The fan-in / fan-out table does the same.",
           "**Focus** on a name to see its neighbourhood; **Depth** and **Direction** control it. *Dependents* answers \"what breaks if I change this?\"; *dependencies* answers \"what does this use?\".",
           "**Runtime (containers, HTTP)** (on by default) adds coupling that imports miss. A **runs image** line (dashed, labelled with the image) goes from code that starts a container to the code that builds that image: `client.containers.run(settings.ENGINE_IMAGE)` or `[\"docker\", \"run\", IMAGE]` leads to the submodule or directory the image is built from. A **talks to** line (solid, labelled with protocol and port) goes from code that calls a service's URL (`http://cbir-service:8000/…`, or a host variable that the Compose files point at a service) to that service. Constants are followed across imports; nothing is run. An image or host this repository does not provide makes no line: the module lists it under *external runtime references* in its details.",
+          "**API (HTTP routes, tasks, env)** (on by default) adds the contracts between services. A **calls HTTP** line goes from code that calls a URL (`requests`, `httpx`, `fetch`, `axios`) to the module defining the route it reaches (FastAPI, Flask, Express, prefixes included); an **enqueues** line goes to a Celery task's module; a **reads env** line goes to the Compose service or file that declares the variable. Each is labelled; click it for the evidence and its confidence. A URL built at run time is skipped rather than guessed.",
           "**Include**: external packages, the standard library, tests and type-only imports can be switched on or off to reduce noise.",
           "An import marked **via sys.path** (in the link's details) resolves only because the file edits `sys.path` (`sys.path.insert(0, …/app)`), or a `conftest.py` above it does; hover the pill for the edit's file and line. Without that edit it would not import.",
           "**Projects** come from manifests (`pyproject.toml`, `package.json`…). An app with only a `requirements.txt` next to its package is a project too, marked **inferred from requirements.txt** under *Repository discovery* in the Structure tab.",

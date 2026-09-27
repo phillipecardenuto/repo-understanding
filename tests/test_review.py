@@ -1994,3 +1994,98 @@ def test_coverage_of_a_commit_needs_the_same_content_on_disk(make_repo) -> None:
     os.utime(p, (1, 1))  # older than the report, but not the committed content: the report cannot describe it
     calc = next(f for f in build_review(r, resolve_target(r, "last-commit"))["files"] if f["path"] == "app/calc.py")
     assert calc["coverage"]["fresh"] is False
+
+
+# --------------------------------------------------------------------------- cross-service contracts (#13)
+
+
+def _api_review(make_repo, changes: dict[str, str]):
+    from test_analyzers import API_APP
+
+    repo = make_repo(API_APP)
+    repo.write(changes)
+    r = Repository(repo.path)
+    return build_review(r, resolve_target(r, "all"))
+
+
+def _api_kinds(report) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for f in report["findings"]:
+        out.setdefault(f["kind"], []).append(f)
+    return out
+
+
+def test_renamed_route_still_called_by_the_frontend(make_repo) -> None:
+    from test_analyzers import API_APP
+
+    images = API_APP["backend/app/routes/images.py"].replace('prefix="/images"', 'prefix="/pictures"')
+    report = _api_review(make_repo, {"backend/app/routes/images.py": images})
+    got = _api_kinds(report)["route-removed-still-called"]
+    assert [(f["path"], f["line"], f["severity"]) for f in got] == [("frontend/src/api.js", 2, "high"),
+                                                                    ("frontend/src/api.js", 5, "high")]
+    assert "GET /api/images/{image_id} (backend/app/routes/images.py) is now GET /api/pictures/{image_id}" in got[0]["detail"]
+    assert got[0]["excerpt"] == "/api/images/{}"
+    card = next(f for f in report["files"] if f["path"] == "backend/app/routes/images.py")
+    routes = [s for s in card["symbols"] if s["kind"] == "http-route"]  # the file card's "API changes"
+    assert {s["name"] for s in routes} == {"GET /api/pictures/{image_id}", "POST /api/pictures"}
+    assert {s["renamed_from"] for s in routes} == {"GET /api/images/{image_id}", "POST /api/images"}  # "was …"
+    # a route's references are URLs: no "renamed, no reference to the old name is left" next to the real problem
+    assert not {"renamed-symbol", "renamed-symbol-stale-references"} & set(_api_kinds(report))
+    # the frontend follows: nothing is broken any more
+    fixed = _api_review(make_repo, {"backend/app/routes/images.py": images,
+                                    "frontend/src/api.js": API_APP["frontend/src/api.js"].replace("/api/images", "/api/pictures")})
+    assert "route-removed-still-called" not in _api_kinds(fixed)
+
+
+def test_dynamic_urls_and_other_methods_are_not_matched(make_repo) -> None:
+    from test_analyzers import API_APP
+
+    images = API_APP["backend/app/routes/images.py"].replace('prefix="/images"', 'prefix="/pictures"')
+    js = ('export const a = (u) => fetch(u);\nexport const b = (p) => fetch(`${p}`);\n'
+          'export const c = () => fetch("/api/images", { method: "DELETE" });\n')
+    report = _api_review(make_repo, {"backend/app/routes/images.py": images, "frontend/src/api.js": js})
+    assert "route-removed-still-called" not in _api_kinds(report)  # unknown URLs, and no DELETE route ever existed
+
+
+def test_route_method_or_parameters_changed(make_repo) -> None:
+    from test_analyzers import API_APP
+
+    images = API_APP["backend/app/routes/images.py"].replace('@router.get("/{image_id}")', '@router.get("/{image_id}/{size}")')
+    got = _api_kinds(_api_review(make_repo, {"backend/app/routes/images.py": images}))
+    [f] = got["route-params-changed"]
+    assert f["severity"] == "medium" and f["symbol"] == "get_image"
+    assert "GET /api/images/{image_id} → GET /api/images/{image_id}/{size}" in f["detail"]
+    assert "route-removed-still-called" in got  # the frontend still calls /api/images/{id}
+
+
+def test_task_gaining_a_required_parameter_with_old_callers(make_repo) -> None:
+    from test_analyzers import API_APP
+
+    tasks = API_APP["backend/app/tasks.py"].replace("def process_image(image_id):", "def process_image(image_id, size):")
+    [f] = _api_kinds(_api_review(make_repo, {"backend/app/tasks.py": tasks}))["task-signature-changed"]
+    assert (f["path"], f["line"], f["severity"]) == ("backend/app/tasks.py", 5, "high")
+    assert "(image_id) to (image_id, size)" in f["detail"] and "backend/app/routes/images.py:10 (unchanged)" in f["detail"]
+    # with a default, the old calls still fit
+    ok = tasks.replace("size):", "size=100):")
+    assert "task-signature-changed" not in _api_kinds(_api_review(make_repo, {"backend/app/tasks.py": ok}))
+
+
+def test_environment_variables_nobody_sets(make_repo) -> None:
+    from test_analyzers import API_APP
+
+    main = API_APP["backend/app/main.py"] + 'TOKEN = os.environ["UPLOAD_TOKEN"]\nLEVEL = os.getenv("LOG_LEVEL", "info")\n'
+    got = _api_kinds(_api_review(make_repo, {"backend/app/main.py": main}))
+    [f] = got["env-var-unset"]  # LOG_LEVEL has a default
+    assert (f["path"], f["line"], f["severity"]) == ("backend/app/main.py", 11, "medium") and "UPLOAD_TOKEN" in f["detail"]
+    card = next(x for x in _api_review(make_repo, {"backend/app/main.py": main})["files"] if x["path"] == "backend/app/main.py")
+    assert card["env_reads"] == {"added": ["LOG_LEVEL", "UPLOAD_TOKEN"], "removed": []}
+    # the deployment renames a variable that the code still reads (without a default)
+    compose = API_APP["docker-compose.yml"].replace("DATABASE_URL:", "DB_URL:")
+    [f] = _api_kinds(_api_review(make_repo, {"docker-compose.yml": compose}))["env-var-renamed"]
+    assert (f["path"], f["line"]) == ("backend/app/main.py", 9)
+    assert "DATABASE_URL was declared in docker-compose.yml (service api) but no longer is" in f["detail"]
+    # a repository that declares nothing: nothing can be said
+    bare = make_repo({"app.py": 'import os\nX = os.environ["ANYTHING"]\n'})
+    bare.write({"app.py": 'import os\nX = os.environ["ANYTHING"]\nY = os.environ["NEW_ONE"]\n'})
+    r = Repository(bare.path)
+    assert "env-var-unset" not in _api_kinds(build_review(r, resolve_target(r, "all")))
