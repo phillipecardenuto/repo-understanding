@@ -243,3 +243,129 @@ def test_services_run_the_code_of_their_own_submodule(make_repo) -> None:
     idx = snap.node_index()
     runs = {idx[e.source_id].name: idx[e.target_id].path for e in snap.dependency_edges if e.relationship == "runs"}
     assert runs == {"api": "app/main.py", "scorer": "services/scorer/app/main.py"}  # the same module name, twice
+
+
+# --------------------------------------------------------------------------- submodule edge cases (#15)
+
+
+def test_a_shallow_submodule_update_says_exactly_how_to_fetch_the_missing_history(make_repo) -> None:
+    lib = make_repo({"v.py": "V = 1\n"})
+    for i in (2, 3):
+        lib.write({"v.py": f"V = {i}\n"})
+        lib.commit(f"v{i}")
+    first, last = lib.git("rev-parse", "HEAD~2").strip(), lib.git("rev-parse", "HEAD").strip()
+    main = make_repo({"a.txt": "x\n"})
+    _git(main.path, "submodule", "add", "-q", f"file://{lib.path}", "modules/lib")
+    _git(Path(main.path, "modules/lib"), "checkout", "-q", first)
+    _git(main.path, "commit", "-qam", "lib at v1")
+    _git(Path(main.path, "modules/lib"), "checkout", "-q", last)
+    _git(main.path, "commit", "-qam", "bump lib to v3")
+    # a shallow clone of the submodule, as `git submodule update --depth 1` leaves it: the old commit is missing
+    _git(main.path, "submodule", "deinit", "-q", "-f", "modules/lib")
+    subprocess.run(["rm", "-rf", str(Path(main.path, ".git/modules/modules/lib"))], check=True)
+    _git(main.path, "submodule", "update", "-q", "--init", "--depth", "1")
+    r = Repository(main.path)
+    report = build_review(r, resolve_target(r, "last-commit"))
+    sub = next(f for f in report["files"] if f["path"] == "modules/lib")["submodule"]
+    hint = f"git -C modules/lib fetch --depth=50 origin {first}"
+    assert sub["fetch"] == [hint, "git -C modules/lib fetch --unshallow"]
+    assert f"the previous commit {first[:10]} is not available locally (shallow clone)" in sub["note"] and hint in sub["note"]
+    assert hint in by_kind(report)["submodule-updated"][0]["detail"]  # `repoviz review` prints it too
+    older = r.discover(r.open_source("HEAD~1")).submodule_info[0]  # `repoviz discover` at the old commit
+    assert older["not_analyzed"] == f"commit {first[:10]} is not available in the local clone; fetch it with {hint}"
+    _git(Path(main.path, "modules/lib"), "fetch", "-q", "--depth=50", "origin", first)  # what the reviewer runs
+    fixed = build_review(Repository(main.path), resolve_target(Repository(main.path), "last-commit"))
+    after = next(f for f in fixed["files"] if f["path"] == "modules/lib")["submodule"]
+    assert after["note"] is None and after["fetch"] == [] and "modules/lib/v.py" in {f["path"] for f in fixed["files"]}
+
+
+def inner_url(main) -> str:
+    return _git(Path(main.path, "outer"), "config", "-f", ".gitmodules", "submodule.inner.url").strip()
+
+
+@pytest.fixture
+def nested(make_repo):
+    """``main`` → submodule ``outer`` → submodule ``outer/inner``, all checked out."""
+    inner = make_repo({"x.py": "def x():\n    return 1\n"})
+    outer = make_repo({"o.py": "def o():\n    return 1\n"})
+    _git(outer.path, "submodule", "add", "-q", inner.path, "inner")
+    _git(outer.path, "commit", "-qm", "add inner")
+    main = make_repo({"app.py": "print(1)\n"})
+    _git(main.path, "submodule", "add", "-q", outer.path, "outer")
+    _git(main.path, "submodule", "update", "-q", "--init", "--recursive")
+    _git(main.path, "commit", "-qm", "add outer")
+    return main
+
+
+def test_nested_submodules_are_reviewed_by_their_full_path_as_their_own_component(nested) -> None:
+    x = Path(nested.path, "outer/inner/x.py")
+    x.write_text(x.read_text() + "\nprint('debug')\n")
+    r = Repository(nested.path)
+    assert r.open_source("WORKTREE").submodules == ["outer", "outer/inner"]
+    report = build_review(r, resolve_target(r, "all"))
+    files = {f["path"]: f for f in report["files"]}
+    assert files["outer/inner/x.py"]["component"] == "outer/inner" and files["outer/inner/x.py"]["lines_added"] == 2
+    assert files["outer/inner"]["submodule"]["dirty"] == ["x.py"] and "outer" not in files  # no double counting
+    kinds = by_kind(report)
+    assert [f["path"] for f in kinds["submodule-uncommitted"]] == ["outer/inner"]
+    assert kinds["debug-output"][0]["path"] == "outer/inner/x.py"
+    snap = r.snapshot("WORKTREE")
+    idx = snap.node_index()
+    subs = {n.path: n for n in snap.components if n.component_type == "submodule"}
+    assert idx[subs["outer/inner"].parent_id].id == subs["outer"].id  # each level nested under its parent
+    assert snap.find(path="outer/inner/x.py").metadata["component_id"] == subs["outer/inner"].id
+    info = {i["path"]: i for i in snap.profile["submodule_info"]}
+    assert info["outer/inner"]["url"] == inner_url(nested)  # from outer's own .gitmodules
+    # a nested submodule moved to another commit: the pointer inside outer changes too
+    _git(Path(nested.path, "outer/inner"), "commit", "-qam", "debug inner")
+    moved = build_review(Repository(nested.path), resolve_target(Repository(nested.path), "all"))
+    status = {f["path"]: f["submodule"]["status"] for f in moved["files"] if f.get("kind") == "submodule"}
+    assert status == {"outer/inner": "updated"}  # reported once, by the submodule that moved
+
+
+def test_sessions_record_nested_submodules(nested) -> None:
+    x = Path(nested.path, "outer/inner/x.py")
+    x.write_text(x.read_text() + "# already here\n")
+    r = Repository(nested.path)
+    session = r.state.start_session(r.git, r.root, "wave")
+    assert session.submodules["outer/inner"] and "outer/inner/x.py" in session.submodule_overrides
+    Path(nested.path, "app.py").write_text("print(2)\n")
+    report = build_review(Repository(nested.path), resolve_target(Repository(nested.path), "session"))
+    assert [f["path"] for f in report["files"]] == ["app.py"]  # the nested edit was there before the session
+    x.write_text(x.read_text() + "print('new')\n")
+    report = build_review(Repository(nested.path), resolve_target(Repository(nested.path), "session"))
+    assert "outer/inner/x.py" in {f["path"] for f in report["files"]}
+
+
+def test_nested_submodule_caps_and_uninitialised_ones_are_reported(nested, monkeypatch) -> None:
+    from repoviz import submodules
+
+    monkeypatch.setattr(submodules, "MAX_NESTED_DEPTH", 1)
+    r = Repository(nested.path)
+    assert r.open_source("WORKTREE").submodules == ["outer"]
+    diag = next(d for d in r.discover(r.analysis_source(r.open_source("WORKTREE"))).diagnostics
+                if d.code == "nested-submodules-capped")
+    assert "outer/inner (nested more than 1 levels deep)" in diag.message
+    monkeypatch.setattr(submodules, "MAX_NESTED_DEPTH", 3)
+    monkeypatch.setattr(submodules, "MAX_SUBMODULES", 1)
+    assert Repository(nested.path).open_source("HEAD").nested_skipped == {"outer/inner": "more than 1 submodules in all"}
+    monkeypatch.setattr(submodules, "MAX_SUBMODULES", 50)
+    _git(Path(nested.path, "outer"), "submodule", "deinit", "-q", "-f", "inner")  # not initialised any more
+    snap = Repository(nested.path).snapshot("WORKTREE")
+    info = {i["path"]: i for i in snap.profile["submodule_info"]}
+    assert info["outer/inner"]["checked_out"] is False
+    assert info["outer/inner"]["not_analyzed"] == "not checked out (git submodule update --init --recursive)"
+    assert any(d.code == "submodules" and "outer/inner (not checked out" in d.message for d in snap.diagnostics)
+
+
+def test_git_inside_nested_submodules_is_hardened(nested, tmp_path: Path) -> None:
+    marker = tmp_path / "PWNED"
+    inner = Path(nested.path, "outer/inner")
+    _git(inner, "config", "core.fsmonitor", f"touch {marker}-fsmonitor; echo")
+    _git(inner, "config", "log.showSignature", "true")
+    _git(inner, "config", "gpg.program", f"sh -c 'touch {marker}-gpg'")
+    Path(inner, "x.py").write_text("def x():\n    return 2\n")
+    r = Repository(nested.path)
+    build_review(r, resolve_target(r, "all"))
+    r.snapshot("WORKTREE")
+    assert not list(tmp_path.glob("PWNED*"))

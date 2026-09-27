@@ -187,8 +187,32 @@ Either way, every changed file appears with its full path, for example
 `system_modules/cbir/src/config.py`. Scope rules, signals, notes and diffs apply
 to it like any other file. A session also records each submodule's commit and any
 files already modified inside it, so earlier work is not attributed to the agent.
-When the previous commit is not available locally (shallow clone) or the submodule
-is not checked out, the review says so instead of listing files.
+When the submodule is not checked out, the review says so instead of listing files.
+
+**Missing history.** After a shallow `git submodule update --depth 1`, the
+previous commit of an update is often not in the local clone. The review then
+says which commit is missing and why ("shallow clone" or "not fetched"), and
+gives the exact command to fetch it, to run from the superproject. repoviz never
+runs it:
+
+```
+git -C system_modules/cbir fetch --depth=50 origin 3f2a…   # the missing commit
+git -C system_modules/cbir fetch --unshallow              # or the whole history (shallow clones)
+```
+
+The commands are in the submodule's card, with a copy button, in the
+`submodule-updated` signal (so `repoviz review` prints them), and in `--format
+json` as `files[].submodule.fetch`. `repoviz discover` gives the same command
+for a state whose submodule commit is missing.
+
+**Nested submodules.** A checked-out submodule's own submodules are inspected
+too, up to 3 levels deep and 50 submodules in all. Each one keeps its full
+path (`outer/inner/x.py`), is its own component nested under its parent, and is
+recorded by sessions like a first-level one. A change inside it is reported
+once, by the nested submodule, not again by its parent. Submodules beyond the
+caps are listed in an info diagnostic (`nested-submodules-capped`); nested ones
+that are not initialised are listed as "not checked out (git submodule update
+--init --recursive)".
 
 ## Reviewing branches
 

@@ -22,7 +22,7 @@ from .manifests import ManifestData, parse_project_file
 from .model import Diagnostic
 from .services import compose_services, service_entry_points
 from .sources import TreeSource
-from .submodules import gitmodules_urls
+from .submodules import submodule_urls
 
 PROJECT_MANIFEST_KINDS = {
     "pyproject", "setup.py", "setup.cfg", "pipfile", "package.json", "cargo", "go.mod", "maven", "gradle",
@@ -138,7 +138,7 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
     nested: dict[str, Any] = getattr(source, "inner", None) or {}  # submodules analyzed with the superproject
     if prof.submodules:
         commits = source.submodule_commits()
-        urls = gitmodules_urls(source.read_text(".gitmodules") or "")
+        urls = submodule_urls(source)
         skipped: dict[str, str] = getattr(source, "skipped", None) or {}
         for sub in prof.submodules:
             info: dict[str, Any] = {"path": sub, "commit": commits.get(sub), "url": urls.get(sub)}
@@ -525,6 +525,12 @@ def discover(source: TreeSource, config: Config, *, root: str = "", name: str = 
                                      sorted(langs.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
         analyzed = [i["path"] for i in prof.submodule_info if i.get("analyzed")]
         others = [f"{i['path']} ({i['not_analyzed']})" for i in prof.submodule_info if i.get("not_analyzed")]
+        capped: dict[str, str] = getattr(source, "nested_skipped", None) or {}
+        if capped:  # nested submodules beyond the depth or count caps (submodules.expand_nested)
+            prof.diagnostics.append(Diagnostic(
+                "info", "nested-submodules-capped", f"{len(capped)} nested submodule(s) not inspected: "
+                + "; ".join(f"{p} ({why})" for p, why in sorted(capped.items())[:10])
+                + (" …" if len(capped) > 10 else "") + ".", "discovery", details={"skipped": capped}))
         prof.diagnostics.append(Diagnostic(
             "info", "submodules", f"{len(prof.submodules)} Git submodule(s), each pinned to a commit. "
             + (f"{len(analyzed)} are analyzed as nested sub-projects (their code is in the graphs). " if analyzed else

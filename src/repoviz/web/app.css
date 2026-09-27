@@ -401,3 +401,6 @@ table.diff td.mk .cov.run { color: var(--added); }
 .pill.health-hotspot { border-width: 2px; font-weight: 600; }
 .heat-item .mono { letter-spacing: -1px; margin-left: 4px; }
 .kv.health .mono, .spark { letter-spacing: 1px; }
+.fetch-hint { margin: 6px 0; }
+.fetch-hint .group { align-items: center; margin-top: 4px; }
+.fetch-hint code { overflow-wrap: anywhere; }

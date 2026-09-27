@@ -157,8 +157,25 @@ class TreeSource(ABC):
             self._text_cache[path] = text
         return text
 
-    #: Git submodule paths (gitlinks) present in this state.
+    #: Git submodule paths (gitlinks) present in this state; nested ones too, by their full path (``outer/inner``)
+    #: once :func:`repoviz.submodules.with_nested` has run.
     submodules: list[str] = []
+    #: Commits nested submodules are pinned to by their parent submodule, and those not inspected (caps).
+    nested_commits: dict[str, str] = {}
+    nested_skipped: dict[str, str] = {}
+    nested_done = False
+
+    def add_nested_submodules(self, found: dict[str, str], skipped: dict[str, str]) -> None:
+        """Nested submodules (full path -> the commit their parent records); see ``submodules.with_nested``."""
+        self.submodules = list(self.submodules) + [p for p in sorted(found) if p not in self.submodules]
+        self.nested_commits = dict(found)
+        self.nested_skipped = dict(skipped)
+        self.nested_done = True
+
+    def _inside_nested(self, path: str, rel: str) -> bool:
+        """``rel`` (inside submodule ``path``) belongs to a submodule nested in it, which reports it itself."""
+        full = f"{path}/{rel}"
+        return any(full == s or full.startswith(s + "/") for s in self.submodules if s.startswith(path + "/"))
 
     def submodule_commits(self) -> dict[str, str]:
         """Commit each submodule points to in this state (for a working tree: the checked-out commit)."""
@@ -249,7 +266,7 @@ class GitRevisionSource(TreeSource):
         return entry[1] if entry else None
 
     def submodule_commits(self) -> dict[str, str]:
-        return dict(self._sub_commits)
+        return {**self.nested_commits, **self._sub_commits}
 
     @property
     def revision_id(self) -> str:
@@ -284,7 +301,7 @@ class GitIndexSource(TreeSource):
         self._id = stable_hash("index", *(f"{p}\0{o}" for p, o in sorted({**self._entries, **self._sub_commits}.items())))
 
     def submodule_commits(self) -> dict[str, str]:
-        return dict(self._sub_commits)
+        return {**self.nested_commits, **self._sub_commits}
 
     def files(self) -> list[str]:
         return list(self._files)
@@ -372,14 +389,16 @@ class WorkingTreeSource(_DiskMixin, TreeSource):
             from .submodules import open_submodule  # local import: submodules imports this module
 
             sub = open_submodule(self.root, path)
+            recorded = self.submodule_recorded(path)
             if sub is None:  # not initialised: the recorded commit is all we know
-                state = (self._index_sub.get(path), [])
+                state = (recorded, [])
             else:
-                try:
-                    dirty = sorted({e.path for e in sub.status()})
+                try:  # a nested submodule reports its own files, and a moved one is a directory, not a file
+                    dirty = sorted(p for p in {e.path for e in sub.status()}
+                                   if not self._inside_nested(path, p) and not (self.root / path / p).is_dir())
                 except Exception:
                     dirty = []
-                state = (sub.head() or self._index_sub.get(path), dirty)
+                state = (sub.head() or recorded, dirty)
             self._sub_state[path] = state
         return state
 
@@ -395,7 +414,7 @@ class WorkingTreeSource(_DiskMixin, TreeSource):
         return list(self._submodule_state(path)[1]) if path in self.submodules else []
 
     def submodule_recorded(self, path: str) -> str | None:
-        return self._index_sub.get(path)
+        return self._index_sub.get(path) or self.nested_commits.get(path)
 
     def submodule_file(self, path: str, rel: str) -> bytes | None:
         p = self.root / path / rel
@@ -528,11 +547,13 @@ class OverlaySource(TreeSource):
         return self.base.content_hash(path)
 
     def submodule_commits(self) -> dict[str, str]:
-        return dict(self._sub_commits) if self._sub_commits is not None else self.base.submodule_commits()
+        recorded = dict(self._sub_commits) if self._sub_commits is not None else self.base.submodule_commits()
+        return {**self.nested_commits, **recorded}
 
     def submodule_dirty(self, path: str) -> list[str]:
         prefix = path + "/"
-        return sorted(p[len(prefix):] for p in self._sub_files if p.startswith(prefix))
+        return sorted(p[len(prefix):] for p in self._sub_files
+                      if p.startswith(prefix) and not self._inside_nested(path, p[len(prefix):]))
 
     def submodule_file(self, path: str, rel: str) -> bytes | None:
         return self._sub_files.get(f"{path}/{rel}")

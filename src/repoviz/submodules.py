@@ -23,6 +23,7 @@ superproject (see :mod:`repoviz.gitutil`).
 from __future__ import annotations
 
 import re
+import shlex
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +36,11 @@ from .sources import GitRevisionSource, OverlaySource, TreeSource, WorkingTreeSo
 MAX_FILES_PER_SUBMODULE = 300
 MAX_FILE_BYTES = 1_000_000
 MAX_COMMITS = 20
+#: Nested submodules (submodules of submodules) are inspected this many levels deep, the first level included,
+#: and at most this many submodules in total.
+MAX_NESTED_DEPTH = 3
+MAX_SUBMODULES = 50
+FETCH_DEPTH = 50
 
 _OPEN: dict[str, Git | None] = {}
 _OPEN_LOCK = threading.Lock()
@@ -57,6 +63,32 @@ def gitmodules_urls(text: str) -> dict[str, str]:
                 path = value.strip("/")
             elif key == "url":
                 url = value
+    return out
+
+
+def submodule_urls(source: Any) -> dict[str, str]:
+    """``full path -> url`` for every submodule of ``source``, nested ones from their parent's ``.gitmodules``."""
+    urls = gitmodules_urls(source.read_text(".gitmodules") or "")
+    subs = list(getattr(source, "submodules", []) or [])
+    for sub in subs:
+        if sub in urls:
+            continue
+        parents = [p for p in subs if sub.startswith(p + "/")]
+        if parents:
+            parent = max(parents, key=len)
+            inner = gitmodules_urls(source.read_text(f"{parent}/.gitmodules") or "")
+            if sub[len(parent) + 1:] in inner:
+                urls[sub] = inner[sub[len(parent) + 1:]]
+    return urls
+
+
+def gitmodules_paths(text: str) -> list[str]:
+    """Every ``path = …`` of a ``.gitmodules`` file."""
+    out = []
+    for line in text.splitlines():
+        key, eq, value = line.strip().partition("=")
+        if eq and key.strip().lower() == "path" and value.strip().strip("/"):
+            out.append(value.strip().strip("/"))
     return out
 
 
@@ -121,11 +153,13 @@ class SubmoduleChange:
     dirty: list[str] = field(default_factory=list)  # uncommitted paths (relative to the submodule)
     note: str | None = None
     truncated: bool = False
+    #: Commands that would fetch the missing history (shown, never run): see :func:`fetch_commands`.
+    fetch: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {"path": self.path, "status": self.status, "old": self.old, "new": self.new,
                 "commits": self.commits, "commit_count": self.commit_count, "files": [f[0] for f in self.files],
-                "dirty": self.dirty, "note": self.note, "truncated": self.truncated}
+                "dirty": self.dirty, "note": self.note, "truncated": self.truncated, "fetch": self.fetch}
 
 
 def _has_commit(git: Git, sha: str) -> bool:
@@ -145,6 +179,24 @@ def _read(git: Git, blob: str | None) -> bytes | None:
         return None
     data = git.read_blob(blob)
     return data if data is None or len(data) <= MAX_FILE_BYTES else TOO_LARGE
+
+
+def is_shallow(git: Git) -> bool:
+    return (git.try_run("rev-parse", "--is-shallow-repository") or "").strip() == "true"
+
+
+def fetch_commands(git: Git, path: str, missing: list[str]) -> list[str]:
+    """Copy-paste commands, run from the superproject, that fetch commits missing from a submodule's clone:
+    ``git -C system_modules/cbir fetch --depth=50 origin <sha>``, and ``fetch --unshallow`` for a shallow clone.
+    repoviz only shows them; it never fetches."""
+    remotes = git.remotes() if hasattr(git, "remotes") else []
+    remote = "origin" if "origin" in remotes or not remotes else remotes[0]
+    where = shlex.quote(path)
+    out = [f"git -C {where} fetch --depth={FETCH_DEPTH} {shlex.quote(remote)} {sha}" for sha in missing
+           if re.fullmatch(r"[0-9a-f]{7,64}", sha or "")]
+    if out and is_shallow(git):
+        out.append(f"git -C {where} fetch --unshallow")
+    return out
 
 
 def submodule_changes(root: Path, base: Any, target: Any) -> list[SubmoduleChange]:
@@ -182,8 +234,14 @@ def submodule_changes(root: Path, base: Any, target: Any) -> list[SubmoduleChang
                         if old_blobs.get(rel) != new_blobs.get(rel):
                             files[rel] = (_read(git, old_blobs.get(rel)), _read(git, new_blobs.get(rel)))
                 else:
-                    change.note = ("the previous commit is not available locally (shallow or not fetched): "
-                                   "the commits and files of this update cannot be listed")
+                    missing = [c for c, have in ((change.old, have_old), (change.new, have_new)) if c and not have]
+                    which = "previous" if not have_old else "new"
+                    change.fetch = fetch_commands(git, path, missing)
+                    change.note = (f"the {which} commit {missing[0][:10]} is not available locally "
+                                   f"({'shallow clone' if is_shallow(git) else 'not fetched'}): the commits and files "
+                                   "of this update cannot be listed"
+                                   + (f"; to see them, run {change.fetch[0]}" if change.fetch else "")
+                                   + (f" (or {change.fetch[-1]})" if len(change.fetch) > 1 else ""))
             elif change.new and not change.old and have_new:
                 count = (git.try_run("rev-list", "--count", change.new) or "").strip()
                 change.commit_count = int(count) if count.isdigit() else None
@@ -224,6 +282,78 @@ def _cap(data: bytes | None) -> bytes | None:
     return data if data is None or len(data) <= MAX_FILE_BYTES else TOO_LARGE
 
 
+# --------------------------------------------------------------------------- nested submodules (#15)
+
+
+def nested_gitlinks(root: Path, path: str, commit: str | None) -> list[tuple[str, str]] | None:
+    """The submodules inside the checked-out submodule at ``path`` (relative path, recorded commit): from its
+    index for the working tree (``commit`` None), else from its tree at ``commit``.  ``None`` when it is not
+    checked out, or does not have that commit locally."""
+    git = open_submodule(root, path)
+    if git is None:
+        return None
+    if commit is None:
+        if not (git.root / ".gitmodules").is_file():
+            return []
+        return [(p, obj) for mode, obj, _stage, p in git.ls_index() if mode == "160000"]
+    if not _has_commit(git, commit):
+        return None
+    paths = gitmodules_paths(git.try_run("cat-file", "blob", f"{commit}:.gitmodules") or "")
+    if not paths:
+        return []
+    out = []
+    for line in (git.try_run("ls-tree", "--end-of-options", commit, "--", *paths[:MAX_SUBMODULES]) or "").splitlines():
+        meta, _, rel = line.partition("\t")
+        parts = meta.split()
+        if len(parts) == 3 and parts[1] == "commit":
+            out.append((rel, parts[2]))
+    return out
+
+
+def expand_nested(root: Path, top: dict[str, str | None], known: dict[str, str] | None = None
+                  ) -> tuple[dict[str, str], dict[str, str]]:
+    """Submodules nested below ``top`` (first-level path -> its commit, or None for the working tree), breadth
+    first: ``({full path: commit its parent records}, {full path: why it was not inspected})``.  ``known`` are
+    commits already recorded for nested paths (a session baseline); they win over the parent's record.  At most
+    :data:`MAX_NESTED_DEPTH` levels and :data:`MAX_SUBMODULES` submodules in all."""
+    known = known or {}
+    worktree = all(c is None for c in top.values())
+    found: dict[str, str] = {}
+    skipped: dict[str, str] = {}
+    total = len(top)
+    queue: list[tuple[str, str | None, int]] = [(p, c, 1) for p, c in sorted(top.items())]
+    while queue:
+        path, commit, depth = queue.pop(0)
+        links = nested_gitlinks(root, path, None if worktree else commit)
+        for rel, obj in links or []:
+            full = f"{path}/{rel}"
+            if full in top or full in found:
+                continue
+            if depth >= MAX_NESTED_DEPTH:
+                skipped[full] = f"nested more than {MAX_NESTED_DEPTH} levels deep"
+                continue
+            if total >= MAX_SUBMODULES:
+                skipped[full] = f"more than {MAX_SUBMODULES} submodules in all"
+                continue
+            total += 1
+            found[full] = known.get(full) or obj
+            queue.append((full, None if worktree else found[full], depth + 1))
+    return found, skipped
+
+
+def with_nested(root: Path, source: Any) -> Any:
+    """``source`` with its nested submodules listed under their full superproject paths (``outer/inner``), so
+    reviews, sessions and the analysis treat them like any other submodule.  Idempotent; returns ``source``."""
+    if getattr(source, "nested_done", False) or not getattr(source, "submodules", None):
+        return source
+    worktree = source.kind == "worktree"
+    commits = {} if worktree else source.submodule_commits()
+    top = {p: None if worktree else commits.get(p) for p in source.submodules if worktree or commits.get(p)}
+    found, skipped = expand_nested(Path(root), top, known=commits) if top else ({}, {})
+    source.add_nested_submodules(found, skipped)
+    return source
+
+
 # --------------------------------------------------------------------------- nested analysis (#21)
 
 
@@ -250,6 +380,19 @@ class NestedSource(TreeSource):
         if name.startswith("__") or name in ("base", "inner", "skipped", "_prefixes"):
             raise AttributeError(name)
         return getattr(self.base, name)
+
+    # TreeSource defines these as class attributes, so __getattr__ would not see the superproject state's.
+    @property
+    def nested_commits(self) -> dict[str, str]:  # type: ignore[override]
+        return self.base.nested_commits
+
+    @property
+    def nested_skipped(self) -> dict[str, str]:  # type: ignore[override]
+        return self.base.nested_skipped
+
+    @property
+    def nested_done(self) -> bool:  # type: ignore[override]
+        return True  # its submodules are the superproject state's, already expanded
 
     def _split(self, path: str) -> tuple[TreeSource, str]:
         for p in self._prefixes:
@@ -315,7 +458,8 @@ def nested_source(root: Path, source: TreeSource, *, exclude: list[str] | None =
             continue
         git = open_submodule(root, path)
         if git is None:
-            skipped[path] = "not checked out (git submodule update --init)"
+            nested = any(path.startswith(p + "/") for p in source.submodules)
+            skipped[path] = "not checked out (git submodule update --init" + (" --recursive)" if nested else ")")
             continue
         src: TreeSource
         if source.kind == "worktree":
@@ -323,7 +467,9 @@ def nested_source(root: Path, source: TreeSource, *, exclude: list[str] | None =
         else:
             commit = commits.get(path)
             if not commit or not _has_commit(git, commit):
-                skipped[path] = f"commit {(commit or '?')[:10]} is not available in the local clone"
+                hint = fetch_commands(git, path, [commit]) if commit else []
+                skipped[path] = f"commit {(commit or '?')[:10]} is not available in the local clone" + (
+                    f"; fetch it with {hint[0]}" if hint else "")
                 continue
             src = GitRevisionSource(git, commit, label=f"{path}@{commit[:10]}")
             dirty = source.submodule_dirty(path)

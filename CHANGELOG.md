@@ -6,6 +6,21 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Submodule edge cases: the exact fetch for missing history, and nested submodules** ([#15](https://github.com/phillipecardenuto/repo-understanding/issues/15)).
+  - When an update's old or new commit is missing from a submodule's clone
+    (a shallow `git submodule update --depth 1`), the review says which one
+    and why, and gives the command to run from the superproject:
+    `git -C <submodule> fetch --depth=50 origin <sha>`, plus
+    `fetch --unshallow` for a shallow clone. It is in the submodule's card
+    (with a copy button), the `submodule-updated` signal, JSON
+    (`submodule.fetch`) and `repoviz discover`. repoviz never fetches.
+  - Nested submodules are inspected, up to 3 levels deep and 50 in all. They
+    keep their full path (`outer/inner/x.py`), are components nested under
+    their parent, and are recorded by sessions. A change is reported once, by
+    the submodule that holds it. Beyond the caps they are listed in a
+    `nested-submodules-capped` diagnostic; uninitialised ones say how to
+    initialise them. Git inside them runs with the same hardened
+    configuration.
 - **Code health metrics and hotspot overlays** ([#30](https://github.com/phillipecardenuto/repo-understanding/issues/30)).
   - A new `metrics` analyzer gives every module code lines, complexity
     (cyclomatic per Python function, counted in the parse the Python analyzer

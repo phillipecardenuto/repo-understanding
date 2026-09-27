@@ -10,7 +10,7 @@ supports become structural nodes tagged ``unsupported``.
 from __future__ import annotations
 
 from .. import classify
-from ..submodules import gitmodules_urls
+from ..submodules import submodule_urls
 from ..model import CATEGORY_COMPONENT, ComponentNode
 from .base import CAP_COMPONENTS, CAP_CONTAINMENT, CAP_DIAGNOSTICS, AnalysisContext, Analyzer, Detection, SnapshotBuilder
 
@@ -110,7 +110,7 @@ class FilesystemAnalyzer(Analyzer):
     def _submodules(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
         prof = ctx.profile
         commits = ctx.source.submodule_commits() if prof.submodules else {}
-        urls = gitmodules_urls(ctx.source.read_text(".gitmodules") or "") if prof.submodules else {}
+        urls = submodule_urls(ctx.source) if prof.submodules else {}
         info = {i["path"]: i for i in prof.submodule_info}
         for sub in prof.submodules:
             # A submodule is a separate repository: it is its own component, pinned to a commit.  When it is

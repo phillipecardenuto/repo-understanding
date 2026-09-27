@@ -158,6 +158,13 @@ code is never run.
   diagrams like any other change. Reviews already listed them file by file (see
   [review.md](review.md#submodules)).
 
+**Nested submodules.** Submodules of submodules are found through each
+checked-out submodule's own `.gitmodules`, up to 3 levels deep and 50
+submodules in all. They are analyzed the same way, under their full path
+(`outer/inner/`), each as its own component nested under its parent. A missing
+commit comes with the `git -C <path> fetch …` command that would get it (see
+[review.md](review.md#submodules)).
+
 `analyze = false` restores the previous behaviour: one box per submodule.
 
 ## Coverage reports

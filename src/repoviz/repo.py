@@ -184,6 +184,15 @@ class Repository:
         return session if session and session.active else None
 
     def open_source(self, spec: str | RevSpec) -> TreeSource:
+        """The tree of a revision spec, with nested submodules listed by their full path (``submodules.with_nested``)."""
+        source = self._open_source(spec)
+        if source.submodules and self.git is not None:
+            from .submodules import with_nested
+
+            with_nested(self.root, source)
+        return source
+
+    def _open_source(self, spec: str | RevSpec) -> TreeSource:
         rs = RevSpec.parse(spec) if isinstance(spec, str) else spec
         if rs.kind == "empty":
             return EmptySource()

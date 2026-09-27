@@ -4363,7 +4363,11 @@
         "updated+modified": "moved to another commit and has uncommitted changes inside" }[m.status] || m.status;
       put(this.fileEl, h("h4", null, iconEl("link"), ` Submodule ${what}`),
         h("div", { class: "mono" }, `${short(m.old)} → ${short(m.new)}`, m.commit_count !== null && m.commit_count !== undefined ? h("span", { class: "faint", text: `  (${plural(m.commit_count, "commit")})` }) : null),
-        m.note ? h("div", { class: "notice warn", text: m.note }) : null);
+        m.note ? h("div", { class: "notice warn", text: (m.fetch || []).length ? m.note.split("; to see them, run ")[0] + "." : m.note }) : null,  // the commands follow
+        (m.fetch || []).length ? h("div", { class: "fetch-hint" }, h("div", { class: "faint", text: "To see this update, fetch the missing history in a terminal (repoviz never fetches):" }),
+          m.fetch.map((cmd) => { const btn = h("button", { class: "btn small", type: "button", title: "Copy the command", onclick: () => {
+            if (navigator.clipboard) navigator.clipboard.writeText(cmd).then(() => { btn.textContent = "✓ Copied"; setTimeout(() => { btn.textContent = "Copy"; }, 1200); }, () => {});
+          } }, "Copy"); return h("div", { class: "group" }, h("code", { text: cmd }), btn); })) : null);
       if ((m.commits || []).length) {
         put(this.fileEl, h("h4", { text: "Commits" }), h("ul", { class: "plain mono" }, m.commits.map((c) => h("li", null, h("b", { text: c.sha }), " " + c.subject))),
           m.commit_count > m.commits.length ? h("div", { class: "faint", text: `… ${m.commit_count - m.commits.length} more` }) : null);
@@ -4567,7 +4571,7 @@
           "**Coverage.** When a coverage report already exists (coverage.xml, lcov.info, coverage-final.json, cover.out, jacoco.xml…), the card says how many changed executable lines a test ran, and the diff marks them **●** (run) or **○** (not run). The header shows the wave's **patch coverage**. A report older than a file's last change cannot say, and the card asks you to re-run the tests with coverage (repoviz never runs them).",
           "**API changes.** A file that defines HTTP routes or background tasks, or reads environment variables, lists what changed in them: routes and tasks added or removed (with a task's parameters before → after), and variables it now reads or no longer reads. Signals follow them across services: a route removed while the frontend still calls it, a task whose `.delay()` callers pass the old arguments, a variable no Compose file, env file, Dockerfile or Kubernetes manifest sets.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
-          "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file."] },
+          "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file. When the old or new commit is missing from the local clone (a shallow `git submodule update --depth 1`), the card gives the exact `git -C <submodule> fetch …` command to copy (repoviz never fetches). Nested submodules (a submodule's own submodules, up to 3 levels) appear by their full path, as their own component."] },
         { h: "Commit by commit" },
         { ul: ["When the wave has commits, the **Commits** panel lists them oldest first, followed by any uncommitted work, with files, lines and signals per commit.",
           "Click a commit (or press `[` / `]`) to review that step alone: in the live app its own diff, key changes and signals; in a report, the files it touched. **Show all** returns to the whole wave.",

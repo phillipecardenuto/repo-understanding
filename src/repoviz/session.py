@@ -216,7 +216,9 @@ class StateStore:
         """Checked-out commit of every submodule, and copies of the files modified inside them."""
         if not (root / ".gitmodules").is_file():
             return {}, {}
-        worktree = WorkingTreeSource(git)
+        from .submodules import with_nested
+
+        worktree = with_nested(root, WorkingTreeSource(git))  # nested submodules too, by their full path
         files_dir = self._session_dir(sid) / "files"
         _mkdir_private(files_dir)
         overrides: dict[str, str | None] = {}
@@ -316,8 +318,13 @@ class StateStore:
                         continue
             return out
 
-        return OverlaySource(base, load(overrides_map), label=label, kind=kind, revision_id=revision_id,
-                             submodule_commits=submodules or None, submodule_files=load(submodule_overrides or {}))
+        overlay = OverlaySource(base, load(overrides_map), label=label, kind=kind, revision_id=revision_id,
+                                submodule_commits=submodules or None, submodule_files=load(submodule_overrides or {}))
+        if git is not None and overlay.submodules:
+            from .submodules import with_nested
+
+            with_nested(git.root, overlay)  # nested submodules at the commits the session recorded
+        return overlay
 
     def baseline_source(self, session: Session, git: Git | None) -> TreeSource:
         return self._overlay(session, git, session.baseline_head, session.overrides,

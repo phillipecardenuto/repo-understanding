@@ -608,8 +608,11 @@ See [docs/configuration.md](docs/configuration.md) for every option.
   git call overrides the settings in `.git/config` that would do so:
   `core.fsmonitor`, clean/smudge filter drivers, `log.showSignature` (GPG) and
   submodule recursion.
-- Checked-out Git submodules are analyzed with the superproject (see
-  [configuration](docs/configuration.md#submodules)). Git runs inside them with
+- Checked-out Git submodules, and their own submodules up to 3 levels deep,
+  are analyzed with the superproject (see
+  [configuration](docs/configuration.md#submodules)). When a submodule's
+  history is missing locally, a review shows the `git -C … fetch` command to
+  run; repoviz never fetches. Git runs inside them with
   the same overrides, and nothing is ever fetched.
 - Build files are parsed without entity expansion. Pathological inputs (huge
   minified lines, adversarial globs) can't cause catastrophic regex

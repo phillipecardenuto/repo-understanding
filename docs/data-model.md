@@ -75,6 +75,11 @@ their `component_id`.
 A `depends-on` edge into or out of an analyzed submodule has
 `metadata.cross_repository: true`.
 
+A nested submodule (a submodule's own submodule, up to 3 levels deep and 50 in
+all) is a submodule node too, named by its full path (`outer/inner`), whose
+parent is the submodule that contains it. Nested submodules left out by those
+caps are listed in the `nested-submodules-capped` diagnostic.
+
 ## Services (Compose)
 
 `services.py` merges a directory's Compose files, and the manifest analyzer adds
