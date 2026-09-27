@@ -204,6 +204,46 @@ and Kubernetes-style `env: - name:` lists. Values are never read or stored.
 The review compares these between the base and the target: see
 "Cross-service contracts" in [review.md](review.md).
 
+## Health metrics
+
+The `metrics` analyzer runs last and measures every module (and every
+programming file of a language repoviz does not parse). It never runs code. Its
+results are in `metadata.metrics`:
+
+| Field | Meaning |
+|---|---|
+| `sloc` | Code lines: not blank, not only a comment. |
+| `complexity`, `complexity_kind` | `cyclomatic` for Python: the sum of its functions' McCabe complexity plus the decision points of module-level code. `whitespace` for other languages: the sum of the indentation levels of the code lines (Tornhill), in the file's own indentation unit, with a tab as one level. |
+| `max_complexity`, `max_complexity_symbol` | Python: the most complex function or method. |
+| `max_nesting` | The deepest block nesting (Python: `if`, `for`, `while`, `try` and `with`; an `elif` stays at its `if`'s depth), or the deepest indentation level. |
+| `fan_in`, `fan_out`, `instability` | Modules that import it (test modules not counted), modules it imports, and `fan_out / (fan_in + fan_out)` (`null` when both are 0). |
+| `hotspot_top`, `hotspot_score` | Complexity × churn. Both are ranked (complexity within its kind), and the product is ranked again: `hotspot_top` is the share of modules at or above this one, as a percentage (`3` = the top 3 %). Only modules changed at least twice in the churn window take part, and tests are not ranked. |
+
+**Python cyclomatic complexity** is 1 plus one for each `if` / `elif`,
+conditional expression, `for` / `while` loop, `except` handler, `match` case,
+extra operand of `and` / `or`, and `for` / `if` clause of a comprehension.
+`else`, `try`, `finally` and `with` add nothing. A nested function or class is
+measured on its own. Functions and methods carry their own `complexity` and
+`nesting` in their metadata. The Python analyzer counts all this in the walk
+that already collects calls, so it is cached with the parse, per file content.
+Whitespace complexity is cached per file content too.
+
+**Rolled up.** Directories, packages, projects, submodules and the repository
+get `metrics` with `modules`, `sloc` and `complexity` (sums), `fan_in` /
+`fan_out` (modules *outside* it that import something inside it / that
+something inside it imports), `hotspot_top` and `hottest` (its hottest module),
+and `owner_share` (weighted by commits). The live app and reports roll up
+configured components the same way, from their modules.
+
+**History.** A file's `metadata.churn` has `commits`, `last_commit`,
+`authors` (how many people made those commits), `owner_share` (the share of
+the most active one) and `spark` (commits in 12 equal slices of the churn
+window, oldest first). The snapshot's `metadata.churn_span` gives the window's
+`start`, `end` and team size (`authors`). **No author name is stored in a
+snapshot.** The live app asks `GET /api/owners` for names, which follows
+`[privacy] show_authors` (see
+[configuration.md](configuration.md#author-names)).
+
 ## SourceEvidence
 
 `path`, `start_line`, `end_line`, `construct` (`import`, `from-import`,

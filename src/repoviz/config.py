@@ -160,6 +160,9 @@ class Config:
     # Persistent parse cache in the state directory ([cache]); REPOVIZ_NO_DISK_CACHE=1 turns it off too.
     cache_disk: bool = True
     cache_max_mb: float = 500.0
+    # [privacy] show_authors: "live" (author names only in the live app), "true" (also in reports, the CLI and
+    # JSON) or "false" (nowhere).  Snapshots never hold names either way (metrics.py).
+    privacy_show_authors: str = "live"
     # Where the values came from (for display/debugging).
     sources: list[str] = field(default_factory=list)
 
@@ -170,7 +173,7 @@ class Config:
         data.pop("checkpoint_seconds", None)
         data.pop("max_checkpoints", None)
         data.pop("max_diagram_nodes", None)
-        for key in [k for k in data if k.startswith(("review_", "history_", "contracts", "cache_"))]:
+        for key in [k for k in data if k.startswith(("review_", "history_", "contracts", "cache_", "privacy_"))]:
             data.pop(key)
         return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -308,6 +311,16 @@ def apply_mapping(cfg: Config, data: dict[str, Any], origin: str) -> Config:
                 raise ConfigError("cache.max_mb must be a number") from None
             if cfg.cache_max_mb <= 0:
                 raise ConfigError("cache.max_mb must be positive")
+    privacy = take("privacy")
+    if privacy is not None:
+        if not isinstance(privacy, dict):
+            raise ConfigError("'privacy' must be a table")
+        if "show_authors" in privacy:
+            value = privacy["show_authors"]
+            mode = {True: "true", False: "false"}.get(value, str(value).strip().lower()) if isinstance(value, (bool, str)) else ""
+            if mode not in ("live", "true", "false"):
+                raise ConfigError('privacy.show_authors must be true, false or "live"')
+            cfg.privacy_show_authors = mode
     subs = take("submodules")
     if subs is not None:
         if not isinstance(subs, dict):

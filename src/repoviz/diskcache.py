@@ -46,6 +46,7 @@ def _codecs() -> dict[str, Codec]:
         "python": (lambda v: v.to_json(), PyFileInfo.from_json),
         "javascript": (lambda v: v.to_json(), JsFileInfo.from_json),
         "git-churn": same,  # {path: {...}}: plain JSON already
+        "metrics": same,  # size and whitespace complexity of one non-Python file (metrics.py)
         "interfaces": same,  # routes, tasks, consumers of one file (interfaces.py): plain JSON already
     }
 

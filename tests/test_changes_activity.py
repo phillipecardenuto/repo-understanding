@@ -616,3 +616,66 @@ def test_worktrees_are_listed_with_their_state_and_keep_their_own_sessions(make_
     text = format_fleet(res)
     assert "same symbol: search in app/search.py" in text and "calls it at app/api.py:5" in text
     assert "Not listed:" in text and "-wt-gone" in text
+
+
+# ---------------------------------------------------------------- health metrics (#30)
+
+def metrics_repo(make_repo):
+    """``app/core.py`` (complex, imported by three modules) changed in six commits, five of them by Ana; ``app/api.py``
+    three times, twice by Bo; the rest once."""
+    branches = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(12))
+    repo = make_repo({"app/__init__.py": "", "app/core.py": f"def pick(x):\n{branches}    return None\n",
+                      "app/api.py": "from app import core\n\n\ndef get(x):\n    return core.pick(x)\n",
+                      "app/cli.py": "from app import core\nfrom app import api\n\n\ndef main():\n    return api.get(1)\n",
+                      "app/util.py": "from app import core\n\n\ndef helper():\n    return core.pick(0)\n",
+                      "tests/test_core.py": "from app import core\n\n\ndef test_pick():\n    assert core.pick(1) == 1\n"})
+    for i in range(5):
+        repo.append("app/core.py", f"# tweak {i}\n")
+        repo.git("add", "-A")
+        repo.git("commit", "-q", "-m", f"tune core {i}", "--author", "Ana Quillfeather <ana@example.com>")
+    for i in range(2):
+        repo.append("app/api.py", f"# api {i}\n")
+        repo.git("add", "-A")
+        repo.git("commit", "-q", "-m", f"api {i}", "--author", "Bo Tindal <bo@example.com>")
+    return repo
+
+
+def test_fan_in_fan_out_instability_hotspots_and_rollups(make_repo) -> None:
+    repo = metrics_repo(make_repo)
+    snap = Repository(repo.path).snapshot()
+    by = {n.path: n for n in snap.modules}
+    core, api, cli = (by[p].metadata["metrics"] for p in ("app/core.py", "app/api.py", "app/cli.py"))
+    # fan-in counts importers that are not tests; fan-out counts what a module imports
+    assert (core["fan_in"], core["fan_out"], core["instability"]) == (3, 0, 0.0)
+    assert (api["fan_in"], api["fan_out"], api["instability"]) == (1, 1, 0.5)
+    assert (cli["fan_in"], cli["fan_out"], cli["instability"]) == (0, 2, 1.0)
+    assert core["complexity"] == 13 and core["complexity_kind"] == "cyclomatic" and core["max_complexity_symbol"] == "pick"
+    # hotspots: complexity × churn, ranked; only modules changed at least twice, and never tests
+    assert core["hotspot_top"] < api["hotspot_top"] and "hotspot_top" not in cli
+    assert "hotspot_top" not in by["tests/test_core.py"].metadata["metrics"]
+    # the package rolls its modules up; its fan-in counts importers outside it (the test does not count)
+    pkg = next(n for n in snap.components if n.path == "app").metadata["metrics"]
+    assert pkg["modules"] == 5 and pkg["sloc"] == sum(by[p].metadata["metrics"]["sloc"] for p in by if p.startswith("app/"))
+    assert pkg["hotspot_top"] == core["hotspot_top"] and pkg["hottest"] == "app/core.py" and pkg["fan_in"] == 0
+    # ownership: counts and shares only, and a sparkline of commits over the window
+    churn = by["app/core.py"].metadata["churn"]
+    assert (churn["commits"], churn["authors"], churn["owner_share"]) == (6, 2, 0.83)
+    assert sum(churn["spark"]) == 6 and len(churn["spark"]) == 12
+    assert snap.metadata["churn_span"]["authors"] == 3  # Ana, Bo and the fixture's own author
+    text = json.dumps(snap.to_dict())
+    assert "Quillfeather" not in text and "ana@example.com" not in text and "Tindal" not in text  # no name enters a snapshot
+
+
+def test_metrics_rank_hotspots_for_the_cli(make_repo) -> None:
+    from repoviz import metrics
+
+    repo = metrics_repo(make_repo)
+    r = Repository(repo.path)
+    snap = r.snapshot()
+    rows = metrics.rows(snap, "hotspot")
+    assert [x["path"] for x in rows[:2]] == ["app/core.py", "app/api.py"]
+    assert [x["path"] for x in metrics.rows(snap, "fan-in")][:1] == ["app/core.py"]
+    assert "tests/test_core.py" not in {x["path"] for x in rows} and "tests/test_core.py" in {x["path"] for x in metrics.rows(snap, "sloc", tests=True)}
+    text = metrics.format_rows(rows[:2], 300)
+    assert "app/core.py" in text and "▮" in text and "Quillfeather" not in text
+    assert metrics.owner_names(r)["app/core.py"] == [["Ana Quillfeather", 5], ["Test", 1]]  # names: only on request

@@ -2,19 +2,23 @@
 
 Contributes repository-level metadata (branch, HEAD, default branch, remote
 *names* -- never assuming a hosting provider) and per-path change frequency
-("churn") over recent history, which the UI uses to highlight hotspots.
+("churn") over recent history, which the UI uses to highlight hotspots, with how many people made those commits
+and when (a sparkline).  Author names stay out of the snapshot (see :mod:`repoviz.metrics`).
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 
+from .. import metrics
 from .base import CAP_DIAGNOSTICS, AnalysisContext, Analyzer, Detection, SnapshotBuilder
+
+SPARK_BUCKETS = 12
 
 
 class GitAnalyzer(Analyzer):
     name = "git"
-    version = "1"
+    version = "2"  # 2: authors (counts only) and a commit sparkline per file (#30)
     capabilities = (CAP_DIAGNOSTICS,)
     mandatory = True
 
@@ -50,10 +54,15 @@ class GitAnalyzer(Analyzer):
         rev = getattr(ctx.source, "sha", None) or ctx.profile.head
         if not rev:
             return
-        key = ("git-churn", rev, ctx.config.churn_commits)
-        churn = ctx.cached(key, lambda: ctx.git.churn(rev, ctx.config.churn_commits))
+        key = ("git-churn", rev, ctx.config.churn_commits, "authors")  # metrics.owner_names reads the same entry
+        churn = ctx.cached(key, lambda: ctx.git.churn(rev, ctx.config.churn_commits, authors=True))
         if not churn:
             return
+        times = [t for stats in churn.values() for t in stats.get("ts") or ()]
+        start, end = (min(times), max(times)) if times else (0, 0)
+        team: set[str] = set()
+        for stats in churn.values():
+            team.update((stats.get("authors") or {}).keys())
         dir_totals: dict[str, int] = {}
         for node in b.nodes.values():
             if node.path is None or node.component_type == "directory" or node.category == "symbol":
@@ -64,6 +73,8 @@ class GitAnalyzer(Analyzer):
             node.metadata["churn"] = {
                 "commits": stats["commits"],
                 "last_commit": _dt.datetime.fromtimestamp(int(stats["last_commit_ts"]), _dt.timezone.utc).isoformat(),
+                **metrics.ownership(stats.get("authors") or {}),  # counts and shares only: never a name
+                "spark": _spark(stats.get("ts") or [], start, end),
             }
             parts = node.path.split("/")[:-1]
             for i in range(0, len(parts) + 1):
@@ -74,3 +85,16 @@ class GitAnalyzer(Analyzer):
                     and node.path is not None and node.path in dir_totals:
                 node.metadata["churn"] = {"commits": dir_totals[node.path]}
         b.metadata["churn_window_commits"] = ctx.config.churn_commits
+        if times:
+            iso = lambda t: _dt.datetime.fromtimestamp(t, _dt.timezone.utc).isoformat()  # noqa: E731
+            b.metadata["churn_span"] = {"start": iso(start), "end": iso(end), "buckets": SPARK_BUCKETS,
+                                        "authors": len(team)}
+
+
+def _spark(times: list[int], start: int, end: int) -> list[int]:
+    """Commits per equal slice of the churn window (oldest first): the details panel's sparkline."""
+    out = [0] * SPARK_BUCKETS
+    width = max(1, end - start)
+    for t in times:
+        out[min(SPARK_BUCKETS - 1, max(0, (t - start) * SPARK_BUCKETS // width))] += 1
+    return out

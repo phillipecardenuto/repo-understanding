@@ -72,7 +72,10 @@ external_dependencies = false
 poll_seconds = 3                  # live app auto-refresh
 checkpoint_seconds = 30           # live app: automatic checkpoint of the session at most this often (0: never)
 max_checkpoints = 200             # per session; the oldest automatic ones are removed first
-churn_commits = 300               # history window for hotspots (0 disables)
+churn_commits = 300               # history window for hotspots, churn and ownership metrics (0 disables)
+
+[privacy]
+show_authors = "live"             # author names: "live" (only in the live app), true (also reports, CLI, JSON), false (nowhere)
 
 # ----- change coupling from Git history (see review.md) --------------------------------------
 [history]
@@ -181,6 +184,24 @@ never produces a report.
   file only when the file has not changed on disk since, and the reviewed
   content is what is on disk. Otherwise the changed lines are "unknown", and the
   review adds one `coverage-stale` note: re-run your test suite with coverage.
+
+## Author names
+
+Health metrics count authors (how many made a file's recent commits, and the
+share of the most active one), but a snapshot never stores a name. Names come
+from the same `git log` (the name, never the email), and where they appear is
+set in `[privacy]`:
+
+```toml
+[privacy]
+show_authors = "live"   # the default: the live app only (a file's owners in its details panel)
+# show_authors = true   # also static reports, `repoviz metrics --authors`, and commit lists in JSON output
+# show_authors = false  # nowhere, not even in the live app
+```
+
+With the default, a static report contains no author name at all: not the
+owners, not the authors of the recent commits it lists, and not those of a
+review's commits.
 
 ## Parse cache
 

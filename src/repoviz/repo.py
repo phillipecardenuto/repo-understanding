@@ -157,16 +157,22 @@ class Repository:
             "shallow": self.git.is_shallow(),
         }
 
-    def revisions(self, commits: int = 30) -> dict[str, Any]:
+    def revisions(self, commits: int = 30, where: str = "report") -> dict[str, Any]:
+        """Branches, tags and recent commits; a commit's author name only where ``[privacy] show_authors`` allows
+        it (``where``: "live" for the live app, "report" for reports and other output)."""
+        from .metrics import show_authors
+
         info = self.git_info()
         if self.git is None:
             return {**info, "branches": [], "tags": [], "commits": [], "remote_branches": []}
+        names = show_authors(self.config, where)
         return {
             **info,
             "branches": self.git.branches(),
             "remote_branches": self.git.remote_branches()[:100],
             "tags": self.git.tags(100),
-            "commits": [c.to_dict() for c in self.git.recent_commits(commits)],
+            "commits": [{k: v for k, v in c.to_dict().items() if names or k != "author"}
+                        for c in self.git.recent_commits(commits)],
             "has_staged": any(e.staged for e in self.git.status()),
             "presets": {k: v[2] for k, v in PRESETS.items() if k != "working"},
         }

@@ -87,7 +87,7 @@ Labels:
 | [#24](https://github.com/phillipecardenuto/repo-understanding/issues/24) | Smarter Dependencies-tab defaults and honest header counts · **✓ done** | P2 | S |
 | [#28](https://github.com/phillipecardenuto/repo-understanding/issues/28) | "Why does A depend on B?" path finder and blast radius on click · **✓ done** | P2 | M |
 | [#29](https://github.com/phillipecardenuto/repo-understanding/issues/29) | Lists that scale: grouping, relevance sort, filter and search · **✓ done** | P2 | M |
-| [#30](https://github.com/phillipecardenuto/repo-understanding/issues/30) | Health metrics and hotspot overlays (complexity × churn, fan-in/out, ownership) | P2 | M |
+| [#30](https://github.com/phillipecardenuto/repo-understanding/issues/30) | Health metrics and hotspot overlays (complexity × churn, fan-in/out, ownership) · **✓ done** | P2 | M |
 | [#31](https://github.com/phillipecardenuto/repo-understanding/issues/31) | History-based comparisons for clean checkouts on the Changes tab · **✓ done** | P2 | S |
 | [#32](https://github.com/phillipecardenuto/repo-understanding/issues/32) | Architecture over time: a drift timeline across tags, releases or waves | P3 | M |
 | [#33](https://github.com/phillipecardenuto/repo-understanding/issues/33) | Moved-code detection and word-level highlights in diffs | P3 | M |
@@ -122,8 +122,8 @@ Labels:
    changes), done.
 6. **Next:** the other P2 items in number order: #7 (checkpoints), #8
    (plan vs actual), #9 (verdict and gate), #10 (parallel agents), #12
-   (coverage reports) and #13 (cross-service contracts), done; then #30,
-   then the P3 items.
+   (coverage reports), #13 (cross-service contracts) and #30 (health metrics),
+   done; then the P3 items #15, #20, #26, #32 and #33.
 
 ## Dependencies between items
 

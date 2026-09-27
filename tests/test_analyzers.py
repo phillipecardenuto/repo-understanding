@@ -590,3 +590,73 @@ def test_express_router_mounted_from_another_file(make_repo) -> None:
     idx = snap.node_index()
     assert [(idx[e.source_id].path, idx[e.target_id].name) for e in snap.dependency_edges
             if e.relationship == "calls-http"] == [("web/client.js", "GET /api/images/:id")]
+
+
+# ---------------------------------------------------------------- health metrics (#30)
+
+COMPLEX_PY = '''\
+"""Module docstring."""
+import os
+
+# a comment line: not code
+LIMIT = 10 if os.name == "nt" else 20
+
+
+def classify(n, flags):
+    if n < 0 and flags or n == 0:
+        return "small"
+    elif n < LIMIT:
+        for f in flags:
+            while f:
+                f -= 1
+    else:
+        pass
+    try:
+        n = int(n)
+    except ValueError:
+        return None
+    except (TypeError, KeyError):
+        return None
+    finally:
+        pass
+    return [x for x in flags if x if n]
+
+
+class Box:
+    SIZES = [s for s in range(3)]
+
+    def get(self, key):
+        with open(key) as fh:
+            def inner():
+                return key or fh
+            return inner()
+'''
+
+
+def test_python_cyclomatic_complexity_matches_a_hand_count() -> None:
+    from repoviz.analyzers.python import parse_python
+
+    info = parse_python(COMPLEX_PY)
+    got = {s.qualname: (s.complexity, s.nesting) for s in info.symbols if s.kind in ("function", "method")}
+    # classify: 1 + if + (and, or) 2 + elif + for + while + 2 except + comprehension (for + 2 ifs) 3 = 12;
+    # nesting: elif (same depth as its if) > for > while = 3; else, try, finally and with add nothing
+    assert got["classify"] == (12, 3)
+    assert got["Box.get"] == (1, 1)  # with: nesting only
+    assert got["Box.get.inner"] == (2, 0)  # `or` in a nested function counts there, not in get
+    # module: its functions (12 + 1 + 2) + the conditional expression + the class-level comprehension
+    assert info.complexity == 17 and info.max_nesting == 3
+    assert info.sloc == len([ln for ln in COMPLEX_PY.splitlines() if ln.strip() and not ln.strip().startswith("#")])
+
+
+def test_whitespace_complexity_and_code_lines_for_other_languages() -> None:
+    from repoviz import metrics
+
+    js = "// header comment\nfunction a(x) {\n  if (x) {\n    for (const y of x) {\n      use(y);\n    }\n  }\n" \
+         "  /* block\n   * comment */\n  return x;\n}\n"
+    m = metrics.text_metrics(js, "javascript")
+    # 2-space indentation: levels 0, 1, 2, 3, 2, 1, 1, 0 over the code lines (comments and blank lines skipped)
+    assert m == {"sloc": 8, "complexity": 10, "complexity_kind": "whitespace", "max_nesting": 3}
+    go = "package x\n\nfunc a() {\n\tif b {\n\t\tc()\n\t}\n}\n"
+    assert metrics.text_metrics(go, "go")["complexity"] == 1 + 2 + 1  # tabs are whole levels
+    assert metrics.sloc(["x = 1", "", "   # note", "y = 2  # trailing"], "python") == 2
+    assert metrics.bars(3) == "▮▮▮▯" and metrics.bars(0) == "▯▯▯▯"

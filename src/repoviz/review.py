@@ -26,7 +26,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from . import classify, depchanges, globs
+from . import classify, depchanges, globs, metrics
 from .activity import _ImpactIndex, _tests_affected, nodes_by_path
 from .config import DependencyRule
 from .contracts import check as check_contracts
@@ -707,6 +707,11 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         env_before = {r["name"] for r in (old_node.metadata.get("env_reads") or [])} if old_node is not None else set()
         if env_now != env_before:
             entry["env_reads"] = {"added": sorted(env_now - env_before), "removed": sorted(env_before - env_now)}
+        # what kind of file this was before the wave: hotspot, central, one person's (metrics.py)
+        hl = metrics.health(old_node, base_snap) if old_node is not None else \
+            metrics.health(t_idx.get(node.id) if node is not None else None, target_snap)
+        if hl:
+            entry["health"] = hl
         if cov is not None and path in cov.lines and exists_after and after is not None and not is_test:
             fresh = _fresh_on_disk(repo.root, path, target_src, cov.lines[path][0].time)
             entry["coverage"] = file_coverage(cov, path, [n for n, _ in added_lines], fresh=fresh)
@@ -979,8 +984,10 @@ def _commit_item(repo: "Repository", commits: dict[str, Any], sha: str) -> dict[
     if item is None and repo.git is not None and sha != UNCOMMITTED:
         info = repo.git.commit_info(sha)
         if info is not None:
-            item = {"sha": sha, "short": sha[:8], "subject": _redact(info.subject[:200]), "author": _redact(info.author),
+            item = {"sha": sha, "short": sha[:8], "subject": _redact(info.subject[:200]),
                     "time": info.date, "parents": [], "files": [], "signals": 0}
+            if metrics.show_authors(repo.config, "report"):  # names only when [privacy] show_authors = true
+                item["author"] = _redact(info.author)
     return item
 
 
@@ -1006,9 +1013,10 @@ def _attach_commits(repo: "Repository", target: ReviewTarget, cr: _CommitRange, 
     from .activity import _count_lines
 
     items: list[dict[str, Any]] = []
+    names = metrics.show_authors(repo.config, "report")  # a review is also a report, CLI and CI output
     for c in (cr.listing or {}).get("commits", []):
         items.append({"sha": c["sha"], "short": c["sha"][:8], "subject": _redact(c["subject"][:200]),
-                      "author": _redact(c["author"]),
+                      **({"author": _redact(c["author"])} if names else {}),
                       "time": _dt.datetime.fromtimestamp(c["time"], _dt.timezone.utc).isoformat(timespec="seconds"),
                       "parents": c["parents"], "files": c["files"]})
     touched: dict[str, list[str]] = {}

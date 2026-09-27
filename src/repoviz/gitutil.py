@@ -521,25 +521,34 @@ class Git:
         out = self.run_bytes(*args, check=False)
         return [p.decode("utf-8", errors="surrogateescape") for p in out.split(b"\0") if p]
 
-    def churn(self, rev: str = "HEAD", max_commits: int = 300) -> dict[str, dict[str, object]]:
-        """Per-path commit counts over the last ``max_commits`` commits reachable from ``rev``."""
+    def churn(self, rev: str = "HEAD", max_commits: int = 300, authors: bool = False) -> dict[str, dict[str, object]]:
+        """Per-path commit counts over the last ``max_commits`` commits reachable from ``rev``.
+
+        With ``authors``, each path also gets ``ts`` (its commit times) and ``authors`` (``{name: commits}``: the
+        author *name* only, never the email)."""
         if max_commits <= 0:
             return {}
-        out = self.try_run("log", f"--max-count={max_commits}", "--no-renames", "--format=\x1e%ct",
+        out = self.try_run("log", f"--max-count={max_commits}", "--no-renames",
+                           "--format=\x1e%ct\x1f%an" if authors else "--format=\x1e%ct",
                            "--name-only", "--end-of-options", rev)
         stats: dict[str, dict[str, object]] = {}
         for block in (out or "").split("\x1e"):
             lines = [l for l in block.splitlines() if l.strip()]
             if not lines:
                 continue
+            head, _, name = lines[0].partition("\x1f")
             try:
-                ts = int(lines[0])
+                ts = int(head)
             except ValueError:
                 continue
             for path in lines[1:]:
                 entry = stats.setdefault(path, {"commits": 0, "last_commit_ts": ts})
                 entry["commits"] = int(entry["commits"]) + 1  # type: ignore[arg-type]
                 entry["last_commit_ts"] = max(int(entry["last_commit_ts"]), ts)  # type: ignore[arg-type]
+                if authors:
+                    entry.setdefault("ts", []).append(ts)  # type: ignore[union-attr]
+                    by = entry.setdefault("authors", {})
+                    by[name] = by.get(name, 0) + 1  # type: ignore[union-attr,index]
         return stats
 
     def commits_in_range(self, base: str | None, head: str, limit: int = 200) -> dict[str, object] | None:

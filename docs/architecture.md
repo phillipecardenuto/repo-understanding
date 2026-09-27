@@ -90,12 +90,15 @@ and the manifest analyzer's entry points are linked to Python callables.
 | Analyzer | Mandatory | Phases used |
 |---|---|---|
 | `filesystem` | yes | components (repository root, directories, files, roles), containment |
-| `git` | yes (when Git is available) | components (branch/HEAD/default branch/remote names, shallow/detached diagnostics), finalize (churn) |
+| `git` | yes (when Git is available) | components (branch/HEAD/default branch/remote names, shallow/detached diagnostics), finalize (churn, author counts, a commit sparkline) |
 | `manifest` | – | components (projects, workspaces, containers, compose services, CI), entry points, dependencies (internal project graph, external packages) |
 | `python` | – | modules, containment (packages/namespace packages), symbols + call index, entry points, dependencies (+ grimp cross-check) |
 | `javascript` | – | modules, symbols + call index, dependencies |
 | `go` | – | modules, symbols, dependencies |
+| `runtime` | – | calls: containers the code starts and services it calls (`invokes-container`, `talks-to`); finalize: their service-to-service copies |
+| `interfaces` | – | calls: HTTP routes, background tasks and environment variables, and the code that calls, enqueues or reads them |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
+| `metrics` | – | finalize (last): size, complexity, fan-in / fan-out, hotspots, rolled up to folders (see [data-model.md](data-model.md#health-metrics)) |
 
 ### Python imports through `sys.path` edits
 

@@ -371,6 +371,15 @@ class AppState:
         except (RepositoryError, GitError, ValueError) as exc:
             raise ApiError(400, str(exc)) from exc
 
+    def owners(self) -> dict[str, Any]:
+        """The most active authors of each file in the churn window, unless ``[privacy] show_authors = false``
+        (names only, never emails; metrics.py)."""
+        from .metrics import owner_names, show_authors
+
+        if not show_authors(self.repo.config, "live"):
+            return {"shown": False, "owners": {}}
+        return {"shown": True, "owners": owner_names(self.repo)}
+
     def why(self, query: dict[str, str]) -> dict[str, Any]:
         """Why one node depends on another (the Dependencies tab's edge panel): the shortest chains, with evidence."""
         from .query import QueryError, why
@@ -546,7 +555,7 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 elif path == "/api/bundle":
                     self._json(200, st.bundle())
                 elif path == "/api/revisions":
-                    self._json(200, st.repo.revisions())
+                    self._json(200, st.repo.revisions(where="live"))
                 elif path == "/api/diff":
                     self._json(200, st.diff(self._query()))
                 elif path == "/api/snapshot":
@@ -572,6 +581,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, st.fleet(self._query()))
                 elif path == "/api/comparisons":
                     self._json(200, st.comparisons())
+                elif path == "/api/owners":
+                    self._json(200, st.owners())
                 elif path == "/api/path":
                     self._json(200, st.why(self._query()))
                 elif path == "/api/impact":

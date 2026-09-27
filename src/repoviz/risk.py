@@ -13,7 +13,8 @@ Factor             What counts                                                 D
 ``entry_points``   entry points that reach the changed code, log-scaled        15
 ``tests``          no test reaches the change, or none of them was updated     10
 ``sensitive``      protected, security-related, sensitive or out-of-scope path 10
-``churn``          a churn hotspot (see :func:`hotspot_threshold`)             5
+``churn``          a churn hotspot (see :func:`hotspot_threshold`), a          5
+                   complexity × churn hotspot, or a single owner (metrics.py)
 ``size``           lines added and removed, log-scaled                         10
 =================  ==========================================================  =======
 
@@ -45,6 +46,7 @@ ENTRY_POINTS_FULL = 8
 SIZE_FULL = 400  # lines added + removed for full size points
 HOT_PERCENTILE = 0.8  # a churn hotspot is at or above the 80th percentile of commits among modules,
 MIN_HOT_COMMITS = 2  # and changed at least twice (a file committed once is not churn)
+SINGLE_OWNER_SHARE = 0.4  # of the churn points, for a file only one person changed (and no hotspot)
 MAX_WALK = 200_000  # nodes visited, over all files of a review, when following callers
 MAX_WALK_PER_FILE = 5_000
 
@@ -289,13 +291,22 @@ class RiskContext:
             share, text = max(shares, key=lambda s: s[0])
             self._factor(factors, "sensitive", share, text)
 
-        # Churn hotspot (history before the wave).
+        # Churn hotspot (history before the wave), with its complexity × churn rank and a single owner (metrics.py).
         commits = self.churn.get(entry.get("previous_path") or path) or self.churn.get(path)
+        health = entry.get("health") or {}
+        badges = {b["kind"]: b for b in health.get("badges") or []}
+        window = f" of the last {self.window}" if self.window else ""
+        texts = []
         if commits and self.hot_threshold is not None and commits >= self.hot_threshold:
-            window = f" of the last {self.window}" if self.window else ""
-            self._factor(factors, "churn", 1.0,
-                         f"churn hotspot: changed in {commits}{window} commits (hotspots: {self.hot_threshold} "
+            texts.append(f"churn hotspot: changed in {commits}{window} commits (hotspots: {self.hot_threshold} "
                          f"or more, the busiest {round((1 - HOT_PERCENTILE) * 100)}% of modules)")
+        if "hotspot" in badges:
+            texts.append(f"complexity × churn {badges['hotspot']['text']}")
+        if "owner" in badges:
+            texts.append(f"single owner: one author made all {health.get('commits')}{window} commits")
+        if texts:
+            self._factor(factors, "churn", 1.0 if len(texts) > 1 or "owner" not in badges else SINGLE_OWNER_SHARE,
+                         "; ".join(texts))
 
         # Size of the change.
         if entry.get("kind") == "submodule":

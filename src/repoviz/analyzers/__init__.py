@@ -18,6 +18,7 @@ from .golang import GoAnalyzer
 from .interfaces import InterfacesAnalyzer
 from .javascript import JavaScriptAnalyzer
 from .manifest import ManifestAnalyzer
+from .metrics import MetricsAnalyzer
 from .python import PythonAnalyzer
 from .runtime import RuntimeAnalyzer
 
@@ -32,6 +33,7 @@ _REGISTRY: list[type[Analyzer]] = [
     RuntimeAnalyzer,
     InterfacesAnalyzer,
     CallFlowAnalyzer,
+    MetricsAnalyzer,  # last: it reads modules, imports and churn
 ]
 _PLUGINS_LOADED = False
 

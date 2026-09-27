@@ -27,7 +27,8 @@ def test_second_process_reads_the_disk_and_one_change_parses_one_file(make_repo)
     repo = make_repo(FILES)
     first = fresh(repo)
     first.snapshot("WORKTREE")
-    assert first.file_cache.stats["misses"] == 6 and first.file_cache.stats["written"] == 6  # 5 files + HEAD's churn
+    # 5 files, HEAD's churn and the two JavaScript files' metrics (Python's come with its parse)
+    assert first.file_cache.stats["misses"] == 8 and first.file_cache.stats["written"] == 8
     second = fresh(repo)
     snap = second.snapshot("WORKTREE")
     assert second.file_cache.stats["misses"] == 0 and second.file_cache.stats["disk_hits"] >= 5
@@ -89,7 +90,7 @@ def test_eviction_schema_and_corruption(make_repo, tmp_path) -> None:
     r = fresh(repo)
     snap = r.snapshot("WORKTREE")
     assert any(d.code == "cache-reset" for d in snap.diagnostics)
-    assert Path(str(db) + ".corrupt").exists() and r.file_cache.stats["misses"] == 6
+    assert Path(str(db) + ".corrupt").exists() and r.file_cache.stats["misses"] == 8
     assert fresh(repo).snapshot("WORKTREE") is not None and fresh(repo).file_cache.disk.info()["entries"] >= 5
 
 
@@ -174,5 +175,5 @@ def test_no_writable_state_dir_means_no_disk_cache(make_repo, tmp_path, monkeypa
     repo = make_repo(FILES)
     r = fresh(repo)
     snap = r.snapshot("WORKTREE")  # the analysis still works, from memory
-    assert snap.symbols and r.file_cache.stats["misses"] == 6
+    assert snap.symbols and r.file_cache.stats["misses"] == 8
     assert "unavailable" in r.file_cache.disk.info()["note"]

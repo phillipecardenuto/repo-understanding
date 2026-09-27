@@ -361,5 +361,49 @@
       "icon": "🐳",
       "ui_icon": "container"
     }
+  },
+  "heat": {
+    "none": {
+      "fill": "#ffffff",
+      "stroke": "#a8a29e",
+      "color": "#57534e",
+      "width": 1,
+      "dash": "3 3"
+    },
+    "0": {
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "color": "#334155",
+      "width": 1,
+      "dash": null
+    },
+    "1": {
+      "fill": "#fef9c3",
+      "stroke": "#a16207",
+      "color": "#422006",
+      "width": 1.2,
+      "dash": null
+    },
+    "2": {
+      "fill": "#fde68a",
+      "stroke": "#b45309",
+      "color": "#451a03",
+      "width": 1.8,
+      "dash": null
+    },
+    "3": {
+      "fill": "#fdba74",
+      "stroke": "#c2410c",
+      "color": "#431407",
+      "width": 2.6,
+      "dash": null
+    },
+    "4": {
+      "fill": "#fca5a5",
+      "stroke": "#991b1b",
+      "color": "#450a0a",
+      "width": 3.6,
+      "dash": null
+    }
   }
 }

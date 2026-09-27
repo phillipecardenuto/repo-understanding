@@ -908,3 +908,47 @@ def test_fleet_api_worktree_switch_and_cli(make_repo, capsys) -> None:
 
 main_cli = main
 FLEET_API_A = "from app.search import search\n\n\ndef api():\n    return search(\"y\")\n"
+
+
+def test_author_names_stay_out_of_reports_unless_asked_and_metrics_cli(make_repo, capsys) -> None:
+    from test_changes_activity import metrics_repo
+
+    repo = metrics_repo(make_repo)
+    r = Repository(repo.path)
+    bundle = build_bundle(r, include_reviews=False)
+    assert "owners" not in bundle and bundle["config"]["show_authors"] == "live"
+    html = render_static_html(bundle)
+    assert "Quillfeather" not in html and "Tindal" not in html  # a report never names authors by default
+    full = json.dumps(build_bundle(r))  # with its reviews (their commit lists) too
+    assert "Quillfeather" not in full and "Tindal" not in full
+    srv = create_server(r, port=0)  # the live app does
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, _ = request(srv, "GET", "/api/owners", headers={})
+        assert status == 403  # the X-Repoviz header is required
+        status, _, body = request(srv, "GET", "/api/owners")
+        owners = json.loads(body)
+        assert status == 200 and owners["shown"] and owners["owners"]["app/core.py"][0] == ["Ana Quillfeather", 5]
+        assert b"ana@example.com" not in body  # never an email
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    repo.write({".repoviz.toml": "[privacy]\nshow_authors = false\n"})
+    hidden = Repository(repo.path)
+    srv = create_server(hidden, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, body = request(srv, "GET", "/api/owners")
+        assert status == 200 and json.loads(body) == {"shown": False, "owners": {}}
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert main(["metrics", "-C", repo.path, "--authors"]) == 0
+    captured = capsys.readouterr()
+    assert "app/core.py" in captured.out and "Quillfeather" not in captured.out and "show_authors = true" in captured.err
+    repo.write({".repoviz.toml": "[privacy]\nshow_authors = true\n"})
+    shown = Repository(repo.path)
+    assert build_bundle(shown, include_reviews=False)["owners"]["owners"]["app/api.py"] == [["Bo Tindal", 2], ["Test", 1]]
+    assert main(["metrics", "-C", repo.path, "--authors", "--json", "--sort", "churn"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["rows"][0]["path"] == "app/core.py" and out["rows"][0]["owners"][0] == ["Ana Quillfeather", 5]

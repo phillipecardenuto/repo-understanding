@@ -6,6 +6,31 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Code health metrics and hotspot overlays** ([#30](https://github.com/phillipecardenuto/repo-understanding/issues/30)).
+  - A new `metrics` analyzer gives every module code lines, complexity
+    (cyclomatic per Python function, counted in the parse the Python analyzer
+    already makes; whitespace complexity for other languages, cached per file
+    content), deepest nesting, fan-in / fan-out and instability, and a
+    complexity × churn **hotspot** rank. Folders, packages, projects and the
+    repository roll them up. Tests are not ranked as hotspots. About +2.5 % on
+    a Django cold snapshot.
+  - Git history adds how many authors made a file's recent commits, the share
+    of the most active one, and a 12-slice commit sparkline. No name is stored
+    in a snapshot: `GET /api/owners` gives names to the live app, and
+    `[privacy] show_authors` (`"live"` by default, `true`, `false`) decides
+    where they appear. Static reports now leave commit authors out too, unless
+    `show_authors = true`.
+  - **Colour by** on the Structure and Dependencies tabs: hotspot, churn,
+    complexity, fan-in or ownership, with `▮▮▮▯` bars and the value in each
+    label, a border that thickens with the level, and the scale in the legend.
+    The details panel gets a **Health** section.
+  - AI Review file cards say what a file was before the change: *hotspot
+    (top 5%)*, *high fan-in (used by N modules)*, *single owner*
+    (`files[].health` in JSON). They feed the risk score's `churn` factor.
+  - `repoviz metrics [--sort hotspot|churn|complexity|fan-in|sloc|ownership]
+    [--by module|component] [--top N] [--tests] [--authors] [--json]`.
+  - Analyzer versions: `python` 5, `git` 2 (their cache entries are rebuilt
+    once).
 - **Cross-service contracts: HTTP routes, background tasks and environment variables** ([#13](https://github.com/phillipecardenuto/repo-understanding/issues/13)).
   - A new `interfaces` analyzer reads (never runs) FastAPI / Starlette, Flask
     and Express routes, with the prefixes of their routers and mounts

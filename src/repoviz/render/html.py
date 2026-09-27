@@ -25,6 +25,7 @@ from typing import Any
 from .. import __version__
 from ..activity import observe
 from ..model import RepositoryDiff
+from ..metrics import owner_names, show_authors
 from ..pipeline import utcnow
 from ..repo import Comparison, Repository
 from .mermaid import theme
@@ -273,7 +274,7 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "generated_at": utcnow(),
         "profile": snapshot.profile,
         "breakdown": breakdown(snapshot),
-        "revisions": _revisions(repo),
+        "revisions": _revisions(repo, "live" if mode == "live" else "report"),
         "comparisons": payloads,
         "activity": to_jsonable(activity) if activity is not None else None,
         "reviews": reviews,
@@ -283,9 +284,12 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
         "theme": theme(),
         "session": _current_session(repo),
         "config": {"sources": repo.config.sources, "max_diagram_nodes": repo.config.max_diagram_nodes,
-                   "external_dependencies": repo.config.external_dependencies},
+                   "external_dependencies": repo.config.external_dependencies,
+                   "show_authors": repo.config.privacy_show_authors},
         "errors": errors,
     }
+    if mode == "static" and show_authors(repo.config, "report"):  # names in a report only when asked for
+        bundle["owners"] = {"shown": True, "owners": owner_names(repo)}
     bundle.update(_worktrees(repo, mode))
     if embed_snapshot:
         snap = compact_snapshot(snapshot.to_dict())
@@ -351,9 +355,9 @@ def _hotspot_changes(repo: Repository, snapshot: Any) -> dict[str, Any]:
         return {}
 
 
-def _revisions(repo: Repository) -> dict[str, Any]:
+def _revisions(repo: Repository, where: str) -> dict[str, Any]:
     try:
-        return repo.revisions()
+        return repo.revisions(where=where)
     except Exception:
         return repo.git_info()
 

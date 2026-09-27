@@ -393,3 +393,11 @@ table.diff td.mk .cov { margin-left: 2px; font-size: 1em; }
 table.diff td.mk .cov.not-run { color: var(--removed); font-weight: 700; }
 table.diff td.mk .cov.run { color: var(--added); }
 .coverage-line { margin: 4px 0; }
+
+/* Health (#30): badges on a file card, the "Colour by" legend and the commit sparkline. Each badge has an icon and
+   words; the legend's bars (▮▮▮▯) repeat the level in text. */
+.health-line { margin: 4px 0; align-items: center; flex-wrap: wrap; }
+.pill.health { color: var(--modified); border-color: var(--modified); background: var(--modified-bg); }
+.pill.health-hotspot { border-width: 2px; font-weight: 600; }
+.heat-item .mono { letter-spacing: -1px; margin-left: 4px; }
+.kv.health .mono, .spark { letter-spacing: 1px; }

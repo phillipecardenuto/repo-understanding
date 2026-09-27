@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .. import classify
+from .. import classify, metrics
 from ..ids import stable_hash
 from ..manifests import normalize_python_name
 from ..model import CATEGORY_MODULE, CATEGORY_SYMBOL, REL_IMPORTS, ComponentNode, SourceEvidence
@@ -110,6 +110,8 @@ class RawSymbol:
     is_async: bool = False
     doc: str = ""
     body_fingerprint: str = ""  # the definition without its own name: survives a rename
+    complexity: int = 0  # cyclomatic complexity (functions and methods; metrics.py)
+    nesting: int = 0  # deepest block nesting
 
 
 @dataclass
@@ -136,6 +138,11 @@ class PyFileInfo:
     # Static ``sys.path`` edits: [anchor, relative path, line, mode]; anchor "dir" is the file's directory and
     # "cwd" a literal relative path (resolved against the repository root); mode is "insert" or "append".
     sys_paths: list[list[Any]] = field(default_factory=list)
+    # Health metrics (metrics.py): code lines, the module's cyclomatic complexity (its functions plus its
+    # module-level code) and deepest nesting.
+    sloc: int = 0
+    complexity: int = 0
+    max_nesting: int = 0
 
     def to_json(self) -> dict[str, Any]:
         """Plain data for the persistent parse cache (``diskcache``); :meth:`from_json` reverses it."""
@@ -149,7 +156,8 @@ class PyFileInfo:
                    calls=[RawCallSite(c["caller"], c["class_qual"], tuple(c["parts"]), c["line"]) for c in d["calls"]],
                    unresolvable_calls=d["unresolvable_calls"], semantic_fingerprint=d["semantic_fingerprint"],
                    loc=d["loc"], all_names=d["all_names"], top_level_names=d["top_level_names"],
-                   sys_paths=d.get("sys_paths") or [])
+                   sys_paths=d.get("sys_paths") or [], sloc=d.get("sloc", 0), complexity=d.get("complexity", 0),
+                   max_nesting=d.get("max_nesting", 0))
 
 
 def _dotted(node: ast.AST) -> tuple[str, ...] | None:
@@ -369,11 +377,23 @@ def normalized_source(lines: list[str]) -> str:
     return "\n".join(out)
 
 
+_COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try, getattr(ast, "TryStar", ast.Try))
+_BRANCHES = (ast.If, ast.For, ast.AsyncFor, ast.While)
+_DEFS = {ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef}
+# Decision points found inside simple statements and expressions (and in match statements, walked whole).
+_DECISIONS = {ast.If, ast.IfExp, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler,
+              *((ast.match_case,) if hasattr(ast, "match_case") else ())}
+
+
 class _Extractor:
     def __init__(self, info: PyFileInfo, lines: list[str], dynamic: bool = True) -> None:
         self.info = info
         self.lines = lines
         self.scan_dynamic = dynamic
+        # Complexity (metrics.py), counted during the one walk that also collects calls: decision points and the
+        # deepest block nesting per scope ("" = module level, a class or function qualname otherwise).
+        self.points: dict[str, int] = {}
+        self.nesting: dict[str, int] = {}
 
     def fingerprint(self, node: ast.AST) -> str:
         start = getattr(node, "lineno", 1)
@@ -480,7 +500,7 @@ class _Extractor:
             return q if seen[q] == 1 else f"{q}#{seen[q]}"
 
         def walk(body: list[ast.stmt], prefix: str, parent: str | None, class_qual: str | None,
-                 caller: str, locals_: set[str], in_class_body: bool) -> None:
+                 caller: str, locals_: set[str], in_class_body: bool, depth: int = 0) -> None:
             for node in body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     qual = unique(f"{prefix}{node.name}")
@@ -515,10 +535,18 @@ class _Extractor:
                         self.fingerprint(node), None))
                     walk(node.body, "", None, None, qual, set(), False)
                 else:
-                    self._calls_in(node, caller, class_qual, locals_, body_walker=lambda b: walk(
-                        b, prefix, parent, class_qual, caller, locals_, in_class_body))
+                    self._calls_in(node, caller, class_qual, locals_, body_walker=lambda b, same=False: walk(
+                        b, prefix, parent, class_qual, caller, locals_, in_class_body, depth if same else depth + 1),
+                        depth=depth)
 
         walk(tree.body, "", None, None, "", set(), False)
+        for sym in self.info.symbols:
+            if sym.kind in ("function", "method"):
+                sym.complexity = 1 + self.points.pop(sym.qualname, 0)
+                sym.nesting = self.nesting.get(sym.qualname, 0)
+        fns = [x for x in self.info.symbols if x.kind in ("function", "method")]
+        self.info.complexity = sum(x.complexity for x in fns) + sum(self.points.values())
+        self.info.max_nesting = max(self.nesting.values(), default=0)
 
     def _decorator_calls(self, node: Any, caller: str, class_qual: str | None, locals_: set[str]) -> None:
         for d in node.decorator_list:
@@ -530,35 +558,53 @@ class _Extractor:
                 self._calls_in(d, caller, class_qual, locals_)
 
     def _calls_in(self, node: ast.AST, caller: str, class_qual: str | None, locals_: set[str],
-                  body_walker: Any = None) -> None:
+                  body_walker: Any = None, depth: int = 0) -> None:
         # Compound statements may contain nested definitions: hand their bodies back to the walker.
-        if body_walker is not None and isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With,
-                                                         ast.AsyncWith, ast.Try, getattr(ast, "TryStar", ast.Try))):
+        if body_walker is not None and isinstance(node, _COMPOUND):
+            handlers = getattr(node, "handlers", [])
+            points = (1 if isinstance(node, _BRANCHES) else 0) + len(handlers)
+            if points:
+                self.points[caller] = self.points.get(caller, 0) + points
+            if depth + 1 > self.nesting.get(caller, 0):
+                self.nesting[caller] = depth + 1
             for fname in ("test", "iter", "target"):
                 sub = getattr(node, fname, None)
                 if sub is not None:
                     self._calls_in(sub, caller, class_qual, locals_)
             for item in getattr(node, "items", []):
                 self._calls_in(item.context_expr, caller, class_qual, locals_)
-            for fname in ("body", "orelse", "finalbody"):
-                body_walker(getattr(node, fname, []) or [])
-            for h in getattr(node, "handlers", []):
+            body_walker(node.body)
+            orelse = getattr(node, "orelse", None) or []
+            # ``elif``: an If that is the whole else-branch stays at its parent's depth
+            body_walker(orelse, isinstance(node, ast.If) and len(orelse) == 1 and isinstance(orelse[0], ast.If))
+            body_walker(getattr(node, "finalbody", None) or [])
+            for h in handlers:
                 body_walker(h.body)
             return
         stack = [node]
+        points = 0
         while stack:
             cur = stack.pop()
-            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            kind = type(cur)
+            if kind in _DEFS:
                 continue
-            if isinstance(cur, ast.Call):
+            if kind in _DECISIONS:
+                points += 1
+            elif kind is ast.BoolOp:
+                points += len(cur.values) - 1  # type: ignore[attr-defined]
+            elif kind is ast.comprehension:
+                points += 1 + len(cur.ifs)  # type: ignore[attr-defined]
+            if kind is ast.Call:
                 parts = _dotted(cur.func)
                 if parts is None:
                     self.info.unresolvable_calls += 1
                 elif parts[0] in locals_ and parts[0] not in ("self", "cls"):
                     self.info.unresolvable_calls += 1
                 else:
-                    self.info.calls.append(RawCallSite(caller, class_qual, parts, cur.lineno))
+                    self.info.calls.append(RawCallSite(caller, class_qual, parts, cur.lineno))  # type: ignore[attr-defined]
             stack.extend(ast.iter_child_nodes(cur))
+        if points:
+            self.points[caller] = self.points.get(caller, 0) + points
 
 
 def _nearest_package_ancestor(directory: str, packages: set[str]) -> str | None:
@@ -605,6 +651,7 @@ def parse_python(text: str, path: str = "<file>") -> PyFileInfo:
         ex.symbols(tree)
         if "sys.path" in text or "addsitedir" in text:
             info.sys_paths = _sys_path_edits(tree)
+        info.sloc = metrics.sloc(lines, "python")
     except RecursionError:  # pragma: no cover - pathological nesting
         info.error = "RecursionError: file is too deeply nested to analyze"
     return info
@@ -640,7 +687,7 @@ _GRIMP_LOCK = threading.Lock()
 
 class PythonAnalyzer(Analyzer):
     name = "python"
-    version = "4"
+    version = "5"  # 5: complexity and code lines (#30)
     languages = ("python",)
     capabilities = (CAP_MODULES, CAP_CONTAINMENT, CAP_SYMBOLS, CAP_ENTRY_POINTS, CAP_DEPENDENCIES, CAP_CALLS,
                     CAP_EVIDENCE, CAP_DIAGNOSTICS)
@@ -818,6 +865,9 @@ class PythonAnalyzer(Analyzer):
                     meta["body_fingerprint"] = sym.body_fingerprint
                 if sym.is_async:
                     meta["async"] = True
+                if sym.complexity:
+                    meta["complexity"] = sym.complexity
+                    meta["nesting"] = sym.nesting
                 if sym.kind == "main-block":
                     tags.append("entry-point")
                     meta["entry_kind"] = "__main__ guard"

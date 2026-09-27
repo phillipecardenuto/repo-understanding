@@ -29,6 +29,7 @@ implementation waves, and for understanding any codebase. It answers questions l
 | What depends on what? Why? (file:line evidence) | **Dependencies** tab, `repoviz mermaid --view dependencies` |
 | Why does A depend on B? Which import chain, in which files? | **Dependencies** → right-click a link (or `w`), `repoviz why A B` |
 | If this changes, what may break? (blast radius) | **Dependencies** → `b` on a node, `repoviz impact X` |
+| Where is the risky code: complex files that keep changing, modules everything uses, files only one person knows? | **Structure** / **Dependencies** → *Colour by*, a node's **Health**, `repoviz metrics` |
 | What changed since another commit / branch / tag / merge base? | **Changes** tab, `repoviz diff` |
 | Did a change introduce a new dependency or a dependency cycle? Resolve one? | **Changes** tab, `repoviz diff --fail-on new-cycle` |
 | Which parts of the repository are being modified right now? | **Activity & Flow** tab, `repoviz activity` |
@@ -67,6 +68,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz review [TARGET] [--format text\|markdown\|prompt\|json\|sarif\|github\|pr-comment] [--fail-on …] [--commit SHA] [--by-commit] [--from-report FILE]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. `sarif`, `github` (inline annotations) and `pr-comment` are for CI; `--from-report` re-renders a saved JSON report without analysing again. |
 | `repoviz review --wait [--open] [--timeout 30m] [--format json]` | For agents: block until the reviewer submits a verdict in the live app, then print it with the notes and the feedback prompt. Exit 0 approve, 2 request changes, 3 reject, 4 timeout. |
 | `repoviz fleet [--json] [--risk]` | Parallel agents: every Git worktree of the repository (branch, commits ahead, uncommitted files, session, verdict, optionally risk) and where their work overlaps: the same symbol, a changed signature the other one calls, the same file. |
+| `repoviz metrics [--sort hotspot] [--by component] [--json]` | Code health, top first: code lines, complexity (cyclomatic for Python, whitespace for other languages), fan-in / fan-out, complexity × churn hotspots and ownership (counts only; `--authors` prints names when `[privacy] show_authors = true`). |
 | `repoviz gate [TARGET] [--require approve\|any] [--require-all-reviewed] [--max-open SEVERITY] [--json] [--hook-input]` | Before a push: exit 3 unless a fresh verdict approves the work (and, optionally, every file is marked reviewed and no signal is left without a note). `--hook-input` makes it a Claude Code `PreToolUse` hook that blocks `git push`. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
 | `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
@@ -221,8 +223,19 @@ as a tree or as nested boxes, with churn hotspots from Git history. Double-click
 a node to drill down. Click a churn hotspot to open its **code changes** under
 the graph (its last commits and the diff of one of them, with `+` / `−` on
 every changed line); Esc closes it and the graph stays as it was. Any other file
-offers *Show code changes* in the live app. Below it, the discovery profile
-lists:
+offers *Show code changes* in the live app.
+
+**Colour by** (here and in Dependencies) paints the nodes by a health metric:
+*hotspot* (complexity × churn, ranked), *churn*, *complexity*, *fan-in* or
+*ownership*. Each label shows the level as bars (`▮▮▮▯`) with the value, and the
+border thickens with it, so the overlay reads in greyscale too. A folder or
+component adds up its files. Click a node for its **Health**: code lines,
+complexity and its worst function, fan-in / fan-out, hotspot rank, recent
+commits with a sparkline, and ownership. In AI Review, a changed file's card
+says what it was before the change: *hotspot (top 5%)*, *high fan-in (used by
+42 modules)* or *single owner*; these add to its risk.
+
+Below the diagram, the discovery profile lists:
 
 - languages, with whether each is analyzed or structure-only
 - projects, workspaces, manifests and lock files
@@ -618,6 +631,10 @@ See [docs/configuration.md](docs/configuration.md) for every option.
   cannot run anything.
 - If Git refuses a repository ("dubious ownership"), the tool respects that and
   analyzes it as a plain directory, with a diagnostic explaining why.
+- Author names (never emails) are shown only in the live app, as a file's
+  owners. Snapshots and static reports hold counts and shares only, unless
+  `[privacy] show_authors = true`; `false` hides names everywhere (see
+  [configuration](docs/configuration.md#author-names)).
 
 ## Development
 

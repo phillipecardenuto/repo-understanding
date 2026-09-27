@@ -729,7 +729,7 @@ reason.
 | `entry_points` | 0–15 | Entry points (console scripts, `__main__`, route handlers, container commands…) that reach the changed code through calls (log scale, full at 8). |
 | `tests` | 0–10 | Changed behaviour that no test imports or calls (10), or whose tests were not updated in this wave (5). |
 | `sensitive` | 0–10 | A protected path (10); a sensitive file, such as CI, a lock file, a migration, deployment or `.env` (7); a security-related path such as `auth/`, `permissions`, `crypto` or `login` (7); a path outside the allowed scope (5). |
-| `churn` | 0–5 | A churn hotspot before the wave: at or above the 80th percentile of modules by commits in the churn window, and changed at least twice. This is the same rule the Structure tab uses to mark hotspots. |
+| `churn` | 0–5 | A churn hotspot before the wave: at or above the 80th percentile of modules by commits in the churn window, and changed at least twice. This is the same rule the Structure tab uses to mark hotspots. The text adds the file's *complexity × churn* rank when it is in the top 10 % (full points on its own too), and "single owner" when one author made all its recent commits (2 points on its own). See [Health of the changed files](#health-of-the-changed-files). |
 | `size` | 0–10 | Lines added and removed (log scale, full at 400). A file too large to diff gets full points. |
 
 - **Levels:** *high* from 40, *medium* from 20, *low* below that.
@@ -754,6 +754,29 @@ Where the score shows up:
 The weights live in `[review.risk]`. They are normalised, so the maximum score is
 always 100; set a weight to 0 to ignore a factor. `high` and `medium` move the
 level thresholds.
+
+### Health of the changed files
+
+How careful to be with a change depends on *what kind of file* it landed in.
+Each changed file's card says what the file was **before** the wave (from the
+base state's metrics; a new file has none), under the risk line:
+
+- **hotspot (top 5%)**: complex *and* often changed. Its complexity ×
+  churn rank is in the top 10 % of the repository's modules (tests are not
+  ranked).
+- **high fan-in (used by 42 modules)**: at or above the 90th percentile of the
+  modules' fan-in, and imported by at least 5 modules (tests not counted).
+- **single owner**: one author made all its recent commits (at least 3), in a
+  team of at least two. Ask them.
+
+Hover a badge for its reason. The card also shows the file's complexity, fan-in
+and recent commits. The same data is in `--format json` as `files[].health`
+(`sloc`, `complexity`, `complexity_kind`, `max_complexity`,
+`max_complexity_symbol`, `max_nesting`, `fan_in`, `fan_out`, `instability`,
+`hotspot_top`, `commits`, `authors`, `owner_share` and `badges[]` with `kind`,
+`text` and `detail`). These are not signals: they add to the risk score's
+`churn` factor. The metrics themselves are defined in
+[data-model.md](data-model.md#health-metrics).
 
 ```toml
 [review.risk]

@@ -81,6 +81,8 @@
     /* Graph queries run in the page, over the embedded snapshot (the live app asks the server). */
     async why(si, a, b) { return whyPaths(si, a, b); }
     async impact(si, id) { return blastRadius(si, id, null, 200); }
+    /* Author names are in a report only when it was built with [privacy] show_authors = true. */
+    async owners() { return this.data.owners || { shown: false, owners: {} }; }
     async comparison(id) {
       const c = this.data.comparisons.find((x) => x.id === id) || this.data.comparisons[0];
       return c;
@@ -143,6 +145,11 @@
     verdict(payload) { return this.post("/api/review/verdict", payload); }
     saveReviewed(key, reviewed) { return this.post("/api/review/reviewed", { key, reviewed }); }
     fleet(risk) { return this.get("/api/fleet" + (risk ? "?risk=1" : "")); }
+    owners() {  // once per worktree: the authors of each file (unless [privacy] show_authors = false)
+      this.ownersBy = this.ownersBy || new Map();
+      if (!this.ownersBy.has(this.worktree)) this.ownersBy.set(this.worktree, this.get("/api/owners").catch(() => ({ shown: false, owners: {} })));
+      return this.ownersBy.get(this.worktree);
+    }
   }
 
   // ---------------------------------------------------------------- indexes
@@ -1119,6 +1126,7 @@
       const [o, c] = SHAPES[n.shape] || SHAPES.box;
       let cls = view.mode === "diff" ? `st_${n.status}` : view.mode === "role" ? `role_${n.kind}` : `kind_${n.kind}`;
       if (view.mode === "role" && (n.status === "added" || n.status === "removed")) cls = `st_${n.status}`;
+      if (n.heat !== undefined && view.mode === "kind") cls = `heat_${n.heat}`;  // a "Colour by" overlay
       return `${indent}${n.id}${o}${nodeLabel(n, view.mode)}${c}:::${cls}`;
     };
     const byParent = new Map();
@@ -1153,7 +1161,7 @@
       ls.push(`  linkStyle ${i} ${s.style}`);
     });
     return lines.concat(ls, classDefs("st_", THEME.status), classDefs("kind_", THEME.kind), classDefs("role_", THEME.role),
-      classDefs("scope_", THEME.scope || {})).join("\n") + "\n";
+      classDefs("scope_", THEME.scope || {}), classDefs("heat_", THEME.heat || {})).join("\n") + "\n";
   }
 
   // -------------------------------------------------------- diagram widget
@@ -1812,7 +1820,7 @@
   }
 
   // --------------------------------------------------------- details panel
-  const HIDDEN_META = new Set(["component_id", "project_id", "underlying_edges", "semantic_fingerprint", "qualified_name_authoritative", "roles", "signature_id"]);
+  const HIDDEN_META = new Set(["metrics", "component_id", "project_id", "underlying_edges", "semantic_fingerprint", "qualified_name_authoritative", "roles", "signature_id"]);
   let APP = null;
   /* Compact (embedded) diffs omit evidence of unchanged edges; the working-tree snapshot has the same edge IDs. */
   function evidenceOf(e) {
@@ -1831,6 +1839,49 @@
     if (!rows.length) return null;
     return h("dl", { class: "kv" }, rows.flatMap(([k, v]) => [h("dt", { text: k.replace(/_/g, " ") }),
       h("dd", { class: typeof v === "object" ? "mono" : null, text: typeof v === "object" ? JSON.stringify(v, null, Array.isArray(v) && v.length < 6 ? 0 : 1) : String(v) })]));
+  }
+
+  /* Health (#30): a node's metrics, its commits over time (a sparkline, oldest first) and, where allowed, who made
+     them.  Author names come from the live server (or a report built with [privacy] show_authors = true). */
+  const SPARK = "▁▂▃▄▅▆▇█";
+  function sparkline(counts) {
+    const max = Math.max(0, ...counts);
+    return counts.map((c) => (c ? SPARK[Math.min(SPARK.length - 1, Math.ceil((c / max) * (SPARK.length - 1)))] : "·")).join("");
+  }
+  function healthSection(app, n) {
+    const m = meta(n).metrics, c = meta(n).churn;
+    if (!m && !(c && c.commits) && !meta(n).complexity) return null;
+    const span = ((app.bundle.snapshot || {}).metadata || {}).churn_span;
+    const window = churnWindow(app);
+    const rows = [];
+    const row = (k, v, title) => rows.push(h("dt", { text: k }), h("dd", { title: title || null }, v));
+    if (m) {
+      if (m.modules) row("modules", String(m.modules));
+      if (m.sloc !== undefined) row("code lines", String(m.sloc));
+      if (m.complexity !== undefined) row("complexity", `${m.complexity}${m.complexity_kind === "whitespace" ? " (whitespace)" : m.complexity_kind ? " (cyclomatic)" : ""}`
+        + (m.max_complexity_symbol ? ` · worst: ${m.max_complexity_symbol} ${m.max_complexity}` : ""), "Cyclomatic complexity for Python (decision points), whitespace complexity (indentation) for other languages");
+      if (m.max_nesting) row("deepest nesting", String(m.max_nesting));
+      if (m.fan_in !== undefined) row("fan-in / fan-out", `used by ${plural(m.fan_in, "module")} · uses ${plural(m.fan_out || 0, "module")}` + (m.instability !== null && m.instability !== undefined ? ` · instability ${m.instability}` : ""),
+        "Modules that import it (tests not counted) and modules it imports; instability = fan-out / (fan-in + fan-out)");
+      if (m.hotspot_top) row("hotspot", h("span", null, h("span", { class: "mono", text: bars(hotspotLevel(m.hotspot_top)) }), ` ${m.modules ? "hottest file" : "complexity × churn"}: top ${m.hotspot_top}%` + (m.hottest ? ` (${m.hottest})` : "")));
+    }
+    if (meta(n).complexity) row("complexity", `${meta(n).complexity} (cyclomatic)${meta(n).nesting ? ` · nesting ${meta(n).nesting}` : ""}`);
+    if (c && c.commits) {
+      const files = !!(m && m.modules) || !c.last_commit;  // a folder: its files' commits added up
+      row(files ? "file changes" : "commits", h("span", null, files ? `${c.commits} in the last ${window || "?"} commits` : `${c.commits}${window ? ` of the last ${window}` : ""}`,
+        c.spark ? h("span", { class: "mono spark", title: span ? `commits over time, ${span.start.slice(0, 10)} → ${span.end.slice(0, 10)} (${c.spark.length} slices)` : "commits over time", text: " " + sparkline(c.spark) }) : null));
+      const owner = c.owner_share !== undefined ? c.owner_share : m && m.owner_share;
+      if (owner !== undefined && owner !== null) {
+        const who = h("span", { class: "owners" });
+        row("ownership", h("span", null, h("span", { class: "mono", text: bars(ownershipLevel(owner)) }), ` ${Math.round(owner * 100)}% by the most active author` + (c.authors ? ` · ${plural(c.authors, "author")}` : ""), who));
+        if (n.path && app.api.owners) app.api.owners().then((res) => {
+          const names = res && res.shown && (res.owners || {})[n.path];
+          if (names) who.textContent = " · " + names.map(([name, k]) => `${name} (${k})`).join(", ");
+        }).catch(() => {});
+      }
+    }
+    if (!rows.length) return null;
+    return [h("h4", { text: "Health" }), h("dl", { class: "kv health" }, rows)];
   }
 
   /* Links that "why" explains with chains (import or call chains); other links carry their own evidence. */
@@ -1856,6 +1907,8 @@
         tagsOf(n).length ? [h("dt", { text: "tags" }), h("dd", null, tagsOf(n).map((t) => pill(t)))] : null,
         [h("dt", { text: "analyzers" }), h("dd", { text: (n.analyzers || [n.analyzer]).join(", ") })],
         [h("dt", { text: "id" }), h("dd", { class: "mono faint", text: n.id })]));
+      const hl = healthSection(this.app, n);
+      if (hl) put(this.el, hl);
       const m = metaTable(n.metadata);
       if (m) put(this.el, h("h4", { text: "Metadata" }), m);
       if (n.before && Object.keys(n.before).length) put(this.el, h("h4", { text: "Before" }), metaTable(n.before));
@@ -2190,7 +2243,7 @@
   class StructureTab {
     constructor(app, root) {
       this.app = app; this.root = root;
-      this.opts = Object.assign({ view: null, depth: 3, files: false, symbols: false, layout: "tree", hotspots: false, maxNodes: (app.bundle.config || {}).max_diagram_nodes || 200, root: null }, storage.get("rv.structure", {}));
+      this.opts = Object.assign({ view: null, depth: 3, files: false, symbols: false, layout: "tree", hotspots: false, colorBy: "none", maxNodes: (app.bundle.config || {}).max_diagram_nodes || 200, root: null }, storage.get("rv.structure", {}));
     }
     save() { storage.set("rv.structure", this.opts); }
     async init() {
@@ -2219,6 +2272,7 @@
           checkbox("modules / files", o.files, (c) => { o.files = c; redraw(); }),
           checkbox("symbols", o.symbols, (c) => { o.symbols = c; redraw(); }),
           checkbox("churn hotspots", o.hotspots, (c) => { o.hotspots = c; redraw(); }))),
+        field("Colour by", select(HEAT_METRICS, o.colorBy, (v) => { o.colorBy = v; redraw(); })),
         h("span", { class: "muted", text: "Double-click a node to drill down." })];
       this.systemNote = h("span", { class: "muted", text: "Services from the Compose files. Click a service for its variants; double-click its code to open it in the Files view." });
       put(this.root, h("div", { class: "toolbar" },
@@ -2251,9 +2305,10 @@
       for (const c of this.fileControls) c.hidden = system;
       this.systemNote.hidden = !system;
       if (system) return this.drawSystem();
-      this.diagram.setLegend(kindLegend);
       this.drawCrumbs();
       const view = structureView(this.si, Object.assign({}, this.opts, { keep: this.keepSet(), unfolded: this.unfolded }));
+      const scale = applyHeat(view, this.si, this.opts.colorBy);
+      this.diagram.setLegend(() => (scale ? heatLegend(scale, churnWindow(this.app)) : kindLegend()));
       if (view.folds.size) this.foldsSeen = true;
       const r = this.si.nodes.get(this.opts.root || rootOf(this.si));
       const counts = [...this.si.nodes.values()].filter((n) => n.category === "module" && meta(n).churn).map((n) => meta(n).churn.commits).sort((a, b) => a - b);
@@ -2507,12 +2562,125 @@
       h("span", { class: "item" }, iconEl("play"), " entry point"), h("span", { class: "item" }, iconEl("flask"), " test"), h("span", { class: "item" }, "→ from a dependent to what it uses")];
   }
 
+  // ---------------------------------------------------------------- health overlays (#30)
+  /* "Colour by" on the Structure and Dependencies tabs: each node's value (its own metrics, or its modules'
+     rolled up), shown as four bars ▮▮▮▯ in its label and as a fill and border that grow with the value, so the
+     overlay reads in greyscale too.  Hotspot and ownership use fixed levels (metrics.py); churn, complexity and
+     fan-in split the values in view into quartiles, which the legend lists. */
+  const HEAT_METRICS = [["none", "None"], ["hotspot", "Hotspot (complexity × churn)"], ["churn", "Churn (recent commits)"], ["complexity", "Complexity"],
+    ["fan-in", "Fan-in (used by)"], ["ownership", "Ownership (one author's share)"]];
+  const bars = (lv) => "▮".repeat(lv) + "▯".repeat(4 - lv);
+  const hotspotLevel = (top) => (!top ? 0 : top <= 5 ? 4 : top <= 10 ? 3 : top <= 25 ? 2 : 1);
+  const ownershipLevel = (s) => (!s ? 0 : s >= 0.9 ? 4 : s >= 0.75 ? 3 : s >= 0.5 ? 2 : 1);
+  /* Rolled-up metrics for nodes the analyzer did not roll up (configured components): their modules, by component_id. */
+  function memberMetrics(si) {
+    if (si.memberMetrics) return si.memberMetrics;
+    const acc = new Map();
+    for (const n of si.nodes.values()) {
+      const m = meta(n).metrics;
+      if (!m || n.category !== "module") continue;
+      const c = meta(n).churn || {};
+      for (const owner of new Set([meta(n).component_id, meta(n).project_id].filter(Boolean))) {
+        const a = acc.get(owner) || { modules: 0, sloc: 0, complexity: 0, commits: 0, fan_in: 0, hotspot_top: null, owned: 0, ownedCommits: 0 };
+        a.modules++; a.sloc += m.sloc || 0; a.complexity += m.complexity || 0; a.commits += c.commits || 0;
+        a.fan_in = Math.max(a.fan_in, m.fan_in || 0);
+        if (m.hotspot_top && (!a.hotspot_top || m.hotspot_top < a.hotspot_top)) a.hotspot_top = m.hotspot_top;
+        if (c.owner_share && c.commits) { a.owned += c.owner_share * c.commits; a.ownedCommits += c.commits; }
+        acc.set(owner, a);
+      }
+    }
+    for (const a of acc.values()) a.owner_share = a.ownedCommits ? Math.round((a.owned / a.ownedCommits) * 100) / 100 : null;
+    si.memberMetrics = acc;
+    return acc;
+  }
+  /* A node's value for one metric: {value, text} (null: no data).  Symbols use their module's history. */
+  function heatValue(si, id, metric) {
+    const n = si.nodes.get(id);
+    if (!n) return null;
+    let own = meta(n).metrics, churn = meta(n).churn;
+    const symbol = n.category === "symbol";
+    if (symbol) {
+      if (!si.moduleByPath) { si.moduleByPath = new Map(); for (const x of si.nodes.values()) if (x.category === "module" && x.path) si.moduleByPath.set(x.path, x); }
+      const mod = si.moduleByPath.get(n.path);
+      own = mod ? meta(mod).metrics : null; churn = mod ? meta(mod).churn : null;
+    }
+    const agg = !own ? memberMetrics(si).get(id) : null;
+    const group = !symbol && n.category !== "module" && !hasTag(n, "unsupported");
+    if (metric === "churn") {  // a folder sums its files' commits: file changes, not commits
+      const v = churn && churn.commits !== undefined ? churn.commits : agg ? agg.commits : null;
+      return v === null || v === undefined ? null : { value: v, text: group || agg ? plural(v, "file change") : plural(v, "commit") };
+    }
+    if (metric === "complexity") {
+      const v = symbol && meta(n).complexity ? meta(n).complexity : own ? own.complexity : agg ? agg.complexity : null;
+      if (v === null || v === undefined) return null;
+      return { value: v, text: `${own && own.complexity_kind === "whitespace" && !group ? "whitespace " : ""}complexity ${v}` + (!symbol && own && own.max_complexity_symbol ? ` · worst ${own.max_complexity_symbol} ${own.max_complexity}` : "") };
+    }
+    if (metric === "hotspot") {
+      const v = own ? own.hotspot_top : agg ? agg.hotspot_top : null;
+      if (!own && !agg) return null;
+      return v ? { value: v, level: hotspotLevel(v), text: `${group ? "hottest file " : "hotspot "}top ${v}%` } : { value: 0, level: 0, text: "not a hotspot" };
+    }
+    if (metric === "fan-in") {
+      const v = own ? own.fan_in : agg ? agg.fan_in : null;
+      return v === null || v === undefined ? null : { value: v, text: `used by ${plural(v, "module")}` };
+    }
+    if (metric === "ownership") {
+      const v = churn && churn.owner_share !== undefined ? churn.owner_share : own && own.owner_share !== undefined ? own.owner_share : agg ? agg.owner_share : null;
+      if (v === null || v === undefined) return null;
+      const who = churn && churn.authors ? ` · ${plural(churn.authors, "author")}` : "";
+      return { value: v, level: ownershipLevel(v), text: `${Math.round(v * 100)}% by one author${who}` };
+    }
+    return null;
+  }
+  /* Colour a view by a metric: sets node.heat (0-4, or "none") and appends the bars and the value to the label.
+     Returns the scale for the legend. */
+  function applyHeat(view, si, metric) {
+    if (!metric || metric === "none") return null;
+    const vals = new Map();
+    for (const n of view.nodes) if (!n.fold) vals.set(n.id, heatValue(si, n.id, metric));
+    let cuts = null;
+    if (metric === "churn" || metric === "complexity" || metric === "fan-in") {
+      const pos = [...vals.values()].filter((v) => v && v.value > 0).map((v) => v.value).sort((a, b) => a - b);
+      if (pos.length) cuts = [0.25, 0.5, 0.75].map((q) => pos[Math.min(pos.length - 1, Math.floor(pos.length * q))]).concat([pos[pos.length - 1]]);
+    }
+    const levelOf = (v) => (v.level !== undefined ? v.level : !v.value ? 0 : !cuts ? 1 : v.value <= cuts[0] ? 1 : v.value <= cuts[1] ? 2 : v.value <= cuts[2] ? 3 : 4);
+    for (const n of view.nodes) {
+      if (n.fold) continue;
+      const v = vals.get(n.id);
+      if (!v) { n.heat = "none"; n.sublabel = (n.sublabel ? n.sublabel + " · " : "") + "no data"; continue; }
+      const lv = levelOf(v);
+      n.heat = lv;
+      n.sublabel = (n.sublabel ? n.sublabel + " · " : "") + `${bars(lv)} ${v.text}`;
+    }
+    return { metric, cuts };
+  }
+  const churnWindow = (app) => ((app.bundle.snapshot || {}).metadata || {}).churn_window_commits;
+  function heatLegend(scale, window) {
+    if (!scale) return [];
+    const heat = THEME.heat || {};
+    const sw = (lv, text) => { const k = heat[lv] || {}; return h("span", { class: "item heat-item" }, h("span", { class: "swatch", style: { background: k.fill, borderColor: k.stroke, borderWidth: (k.width || 1) + "px", borderStyle: k.dash ? "dashed" : "solid" } }), h("span", { class: "mono", text: lv === "none" ? "" : bars(lv) }), " " + text); };
+    const name = (HEAT_METRICS.find((x) => x[0] === scale.metric) || [, scale.metric])[1];
+    const items = [h("span", { class: "item" }, h("b", { text: `Colour by ${name.toLowerCase()}` }))];
+    if (scale.metric === "hotspot") items.push(sw(4, "top 5%"), sw(3, "top 10%"), sw(2, "top 25%"), sw(1, "other hotspot candidates"), sw(0, "not a hotspot (fewer than 2 recent commits, or a test)"));
+    else if (scale.metric === "ownership") items.push(sw(4, "≥ 90% of the commits by one author"), sw(3, "≥ 75%"), sw(2, "≥ 50%"), sw(1, "shared"));
+    else if (scale.cuts) {
+      const c = scale.cuts, unit = scale.metric === "fan-in" ? " modules" : "";
+      const range = (lv, lo, hi) => (lo > hi ? null : sw(lv, lo === hi ? `${hi}${unit}` : `${lo}–${hi}${unit}`));  // tied quartiles: no empty level
+      items.push(...[range(1, 1, c[0]), range(2, c[0] + 1, c[1]), range(3, c[1] + 1, c[2]), range(4, c[2] + 1, c[3])].filter(Boolean), sw(0, "0"));
+    }
+    items.push(sw("none", "no data"));
+    items.push(h("span", { class: "item muted" }, scale.metric === "hotspot" ? `complexity × churn${window ? ` over the last ${window} commits` : ""}, ranked; a folder shows its hottest file`
+      : scale.metric === "churn" ? `commits${window ? ` in the last ${window}` : ""}; a folder adds up its files' commits` : scale.metric === "complexity" ? "cyclomatic (Python) or whitespace (other languages); folders sum their files"
+      : scale.metric === "fan-in" ? "modules that import it (tests not counted); a folder counts importers outside it" : "share of recent commits by the most active author"));
+    return items;
+  }
+
   class DependenciesTab {
     constructor(app, root) {
       this.app = app; this.root = root;
       const cfg = app.bundle.config || {};
       this.opts = Object.assign({ level: "auto", relationships: ["imports", "depends-on", ...RUNTIME_RELS, ...API_RELS], external: !!cfg.external_dependencies, stdlib: false, tests: true, typeOnly: true,
-        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false, contracts: false, services: false }, storage.get("rv.deps", {}));
+        cycles: true, cyclesOnly: false, focus: null, depth: 2, direction2: "both", maxNodes: cfg.max_diagram_nodes || 150, cluster: false, contracts: false, services: false, colorBy: "none" }, storage.get("rv.deps", {}));
       this.opts.cycleMembers = null;
       if (!this.opts.runtimeDefault) {  // saved filters from before runtime edges existed: show them once
         this.opts.relationships = [...new Set([...this.opts.relationships, ...RUNTIME_RELS])];
@@ -2572,7 +2740,8 @@
           this.servicesCheck = checkbox("services", o.services, (c) => { o.services = c; redraw(); }),
           checkbox("highlight cycles", o.cycles, (c) => { o.cycles = c; redraw(); }), checkbox("cycles only", o.cyclesOnly, (c) => { o.cyclesOnly = c; redraw(); }),
           checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
-        h("div", { class: "field" }, h("span", { text: "Overlay" }), h("div", { class: "group" }, overlay))),
+        h("div", { class: "field" }, h("span", { text: "Overlay" }), h("div", { class: "group" }, overlay)),
+        field("Colour by", select(HEAT_METRICS, o.colorBy, (v) => { o.colorBy = v; redraw(); }))),
         this.levelNote = h("div", { class: "notice level-note", role: "status", hidden: true }), this.blastNote,
         h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el),
         h("div", { class: "two-col" }, this.cyclesEl, this.fanEl), this.contractsEl);
@@ -2684,6 +2853,8 @@
       if (o.level !== "auto") this.levelNote.hidden = true;
       const view = o.level === "auto" ? this.autoView() : dependencyView(si, o);
       view.level = view.level || o.level;
+      const scale = applyHeat(view, si, o.colorBy);
+      this.diagram.setLegend(() => (scale ? [...heatLegend(scale, churnWindow(this.app)), runtimeLegend(), contractLegend()] : [...kindLegend(), runtimeLegend(), contractLegend()]));
       const f = o.focus ? si.nodes.get(o.focus) : null;
       this.diagram.setTitle(`Dependencies · ${view.level} level${o.level === "auto" ? " (auto)" : ""}${f ? " · focus " + displayName(f) : ""}`);
       if (this.datalist.childElementCount === 0 || this.datalistLevel !== o.level) {
@@ -3080,6 +3251,16 @@
   }
   const riskFactorsText = (risk) => ((risk && risk.factors) || []).map((x) => `+${x.points} ${x.text}`).join("\n") || "no risk factor";
   const byRisk = (a, b) => ((b.risk || {}).score || 0) - ((a.risk || {}).score || 0) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  /* What kind of file a change landed in, before the change (metrics.py health): hotspot, central, one person's. */
+  const HEALTH_ICON = { hotspot: "pulse", "fan-in": "hub", owner: "comment" };
+  function healthLine(hl) {
+    if (!hl) return null;
+    const facts = [hl.complexity !== undefined ? `complexity ${hl.complexity}` : null, hl.fan_in ? `used by ${plural(hl.fan_in, "module")}` : null,
+      hl.commits ? plural(hl.commits, "recent commit") : null].filter(Boolean);
+    if (!(hl.badges || []).length && !facts.length) return null;
+    return h("div", { class: "group health-line" }, (hl.badges || []).map((b) => h("span", { class: `pill health health-${b.kind}`, title: b.detail || "" }, iconEl(HEALTH_ICON[b.kind] || "gauge"), " " + b.text)),
+      facts.length ? h("span", { class: "faint", text: "before this change: " + facts.join(" · ") }) : null);
+  }
   /* Mirror of risk.wave_risk: a set of files is as risky as its riskiest file. */
   function waveRiskOf(files) {
     const scored = files.filter((f) => f.risk).sort(byRisk);
@@ -4062,6 +4243,7 @@
         f.risk ? h("details", { class: "risk-factors", open: f.risk.level !== "low" },
           h("summary", null, "Risk ", riskPill(f.risk), " ", h("span", { class: "faint", text: f.risk.factors.length ? f.risk.factors[0].text : "no risk factor" })),
           f.risk.factors.length ? h("ul", { class: "plain" }, f.risk.factors.map((x) => h("li", null, h("span", { class: "mono", text: `+${x.points}` }), " " + x.text))) : null) : null,
+        healthLine(f.health),
         h("div", { class: "muted", text: [f.previous_path ? "↦ moved from " + f.previous_path : null, f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
         h("div", { class: "group actions" },
           h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, iconEl("lock"), " Should not be touched"),
@@ -4381,6 +4563,7 @@
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
           "A manifest's or lock file's card lists its **dependencies**: added, removed, **↑ upgraded**, **↓ downgraded**, **source changed** (now from a Git repository, a URL, a path outside the repository, an npm alias or another registry) or loosened (**unpinned**), with the version the lock file resolves. Indirect packages are counted. The header shows `+added −removed ↑ ↓` for the wave.",
           "Key changes also list **values**: constants, settings-class defaults and configuration keys, before → after (`MAX_IMAGES: 20 → 200`). A safety setting switched the risky way (debug on, TLS verification off, a timeout removed, CORS `*`) carries a **⚠** pill and a *Safety setting weakened* signal. Secret-looking names show `•••`.",
+          "**What kind of file it is.** Under the risk line, the card says what the file was *before* the change: **hotspot (top 5%)** (complex and often changed), **high fan-in (used by 42 modules)** or **single owner** (one author made all its recent commits: ask them). These feed the risk score's churn factor.",
           "**Coverage.** When a coverage report already exists (coverage.xml, lcov.info, coverage-final.json, cover.out, jacoco.xml…), the card says how many changed executable lines a test ran, and the diff marks them **●** (run) or **○** (not run). The header shows the wave's **patch coverage**. A report older than a file's last change cannot say, and the card asks you to re-run the tests with coverage (repoviz never runs them).",
           "**API changes.** A file that defines HTTP routes or background tasks, or reads environment variables, lists what changed in them: routes and tasks added or removed (with a task's parameters before → after), and variables it now reads or no longer reads. Signals follow them across services: a route removed while the frontend still calls it, a task whose `.delay()` callers pass the old arguments, a variable no Compose file, env file, Dockerfile or Kubernetes manifest sets.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
@@ -4431,6 +4614,8 @@
           "**Layout**: *Tree* is compact for big projects; *Nested* draws containment as boxes.",
           "**Long lists fold.** More than 8 test files, docs, modules or files under one parent become one node, such as *+ 27 test files*. Click it to expand. A changed file, the selected node and what **Find** matches stay outside a fold.",
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
+          "**Colour by** (Structure and Dependencies) paints every node by one health metric: **hotspot** (complexity × churn, ranked: the complex files that keep changing), **churn** (recent commits), **complexity** (cyclomatic for Python, indentation-based *whitespace complexity* for other languages), **fan-in** (modules that import it) or **ownership** (the share of recent commits by one author). Each node's label shows the level as bars (`▮▮▮▯`) with its value, and the border thickens with the level, so it reads without colour; the legend lists the scale. A folder or component shows its files added up (its hottest file, for hotspots).",
+          "Click a node for its **Health**: code lines, complexity and its worst function, fan-in / fan-out and instability, hotspot rank, recent commits with a sparkline over time (`▁▃█`), and how concentrated its ownership is. Author names appear only in the live app (never in a report unless `[privacy] show_authors = true`; never with `show_authors = false`). `repoviz metrics` lists the same in a terminal.",
           "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
           "**The header chips** count what the repository holds, each apart: code components, services, submodules, external packages and entry points. Click one to open its view. `repoviz discover` prints the same numbers.",
           "**Git submodules** are separate repositories. When checked out, they are analyzed with the rest: a submodule is a group holding its own code (double-click to drill in). Its line shows the pinned commit, files and languages, `⬇ N behind` its remote (from the local remote-tracking branch: repoviz never fetches), `↦ moved` when it is checked out at another commit, and `✎ N uncommitted` for local edits. One that is not analyzed says why: not checked out, excluded in `[submodules]`, or too large. The **submodules** chip in the header opens the table of their states.",

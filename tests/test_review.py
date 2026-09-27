@@ -2089,3 +2089,45 @@ def test_environment_variables_nobody_sets(make_repo) -> None:
     bare.write({"app.py": 'import os\nX = os.environ["ANYTHING"]\nY = os.environ["NEW_ONE"]\n'})
     r = Repository(bare.path)
     assert "env-var-unset" not in _api_kinds(build_review(r, resolve_target(r, "all")))
+
+
+# ---------------------------------------------------------------- health on file cards (#30)
+
+def health_repo(make_repo):
+    """20 modules changed in two rounds; ``app/core.py`` (complex, imported by six of them) five more times, once
+    by Cy; ``app/solo.py`` created and changed only by Cy."""
+    branches = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(12))
+    files = {"app/__init__.py": "", "app/core.py": f"def pick(x):\n{branches}    return None\n"}
+    for i in range(20):
+        files[f"app/m{i}.py"] = "from app import core\n\n\ndef f():\n    return core.pick(1)\n" if i < 6 else f"def f{i}():\n    return {i}\n"
+    repo = make_repo(files)
+    for rnd in range(2):
+        for i in range(20):
+            repo.append(f"app/m{i}.py", f"# round {rnd}\n")
+        repo.commit(f"round {rnd}")
+    for i in range(5):
+        repo.append("app/core.py", f"# tune {i}\n")
+        repo.git("add", "-A")
+        repo.git("commit", "-q", "-m", f"tune core {i}", *(["--author", "Cy Solo <cy@example.com>"] if i == 0 else []))
+    for i in range(3):
+        repo.write({"app/solo.py": f"def solo():\n    return {i}\n"})
+        repo.git("add", "-A")
+        repo.git("commit", "-q", "-m", f"solo {i}", "--author", "Cy Solo <cy@example.com>")
+    return repo
+
+
+def test_file_cards_say_hotspot_high_fan_in_and_single_owner_and_feed_the_risk(make_repo) -> None:
+    repo = health_repo(make_repo)
+    repo.append("app/core.py", "# the agent was here\n")
+    repo.write({"app/solo.py": "def solo():\n    return 42\n"})
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    card = {f["path"]: f for f in report["files"]}
+    core, solo = card["app/core.py"]["health"], card["app/solo.py"]["health"]
+    assert [b["text"] for b in core["badges"]] == ["hotspot (top 5%)", "high fan-in (used by 6 modules)"]
+    assert (core["complexity"], core["fan_in"], core["commits"]) == (13, 6, 6)  # before the change
+    assert [b["text"] for b in solo["badges"]] == ["single owner"] and solo["authors"] == 1
+    factors = {f["path"]: {x["factor"]: x["text"] for x in f["risk"]["factors"]} for f in report["files"]}
+    assert "complexity × churn hotspot (top 5%)" in factors["app/core.py"]["churn"]
+    assert "single owner: one author made all 3 of the last 300 commits" in factors["app/solo.py"]["churn"]
+    assert "Cy Solo" not in json.dumps(report)  # counts and shares only

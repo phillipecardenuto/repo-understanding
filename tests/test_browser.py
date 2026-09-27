@@ -1515,3 +1515,73 @@ def test_coverage_on_the_file_card_and_in_the_diff_gutter(page, make_repo, tmp_p
     assert ["7", "○", "not run by any test (coverage.xml)"] in marks and ["5", "●", "run by a test (coverage.xml)"] in marks
     assert "Changed lines no test runs" in page.inner_text("#tab-review .findings-card")
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_colour_by_overlays_legend_details_and_file_card_health(page, make_repo, tmp_path: Path) -> None:
+    from test_review import health_repo
+
+    repo = health_repo(make_repo)
+    repo.append("app/core.py", "# the agent was here\n")
+    report = tmp_path / "health.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    page.goto(report.as_uri() + "#tab=structure")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    page.check("#tab-structure label.check:has-text('modules / files') input")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    page.select_option("#tab-structure label.field:has-text('Colour by') select", "hotspot")
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    core = page.evaluate(NODE_OF, "app/core.py")
+    node = page.locator(f"#tab-structure g.node[data-node-id='{core}']")
+    assert "▮▮▮▮ hotspot top 5%" in node.text_content()  # the level in text: readable without colour
+    legend = page.inner_text("#tab-structure .legend")
+    assert "Colour by hotspot" in legend and "top 5%" in legend and "no data" in legend
+    # border width grows with the level (greyscale-proof), as well as the fill
+    page.click("#tab-structure g.node:has-text('folded')")  # unfold the other modules (lower levels)
+    page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    assert "▮▯▯▯" in page.locator("#tab-structure g.node.heat_1").first.text_content()
+    widths = page.evaluate("""(id) => {
+        const w = (sel) => parseFloat(getComputedStyle(document.querySelector(sel).querySelector('rect, path, polygon')).strokeWidth);
+        return [w(`#tab-structure g.node[data-node-id='${id}']`), w('#tab-structure g.node.heat_0, #tab-structure g.node.heat_1')]; }""", core)
+    assert widths[0] > widths[1]
+    node.click()
+    details = page.inner_text("#tab-structure .split > .card")
+    assert "Health" in details and "complexity × churn: top 5%" in details and "used by 6 modules" in details
+    assert any(ch in details for ch in "▁▂▃▄▅▆▇█")  # the commit sparkline
+    assert "Cy Solo" not in details  # a report names nobody unless [privacy] show_authors = true
+    # Dependencies: colour by fan-in, with the quartiles in the legend
+    page.click("nav [data-tab='dependencies']")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    page.select_option("#tab-dependencies .toolbar select >> nth=0", "module")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    page.select_option("#tab-dependencies label.field:has-text('Colour by') select", "fan-in")
+    page.wait_for_function(ALL_RENDERED, arg="dependencies", timeout=60_000)
+    assert "used by 6 modules" in page.locator(f"#tab-dependencies g.node[data-node-id='{core}']").text_content()
+    assert "Colour by fan-in" in page.inner_text("#tab-dependencies .legend")
+    # the review's file card says what kind of file the agent changed
+    page.click("nav [data-tab='review']")
+    page.wait_for_selector("#tab-review .files-split table tbody tr", timeout=60_000)
+    page.click("#tab-review .files-split table tbody tr:has-text('app/core.py')")
+    line = page.locator("#tab-review .health-line")
+    line.wait_for(timeout=10_000)
+    assert "hotspot (top 5%)" in line.inner_text() and "high fan-in (used by 6 modules)" in line.inner_text()
+    assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_live_details_name_a_files_owners(page, make_repo) -> None:
+    from test_changes_activity import metrics_repo
+
+    repo = metrics_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=structure")
+        page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+        page.check("#tab-structure label.check:has-text('modules / files') input")
+        page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+        page.click(f"#tab-structure g.node[data-node-id='{page.evaluate(NODE_OF, 'app/core.py')}']")
+        page.wait_for_function("() => document.querySelector('#tab-structure .health .owners').textContent.includes('Ana Quillfeather (5)')", timeout=10_000)
+        assert "83% by the most active author · 2 authors" in page.inner_text("#tab-structure .health")
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()

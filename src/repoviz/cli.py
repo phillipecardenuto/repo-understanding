@@ -16,6 +16,7 @@ Examples::
     repoviz review --wait --format json   # an agent waits for the reviewer's verdict (exit 0 / 2 / 3, 4 timeout)
     repoviz gate                          # before a push: exit 3 unless a fresh verdict approves the work
     repoviz fleet                         # parallel agents: every worktree, and where their work overlaps
+    repoviz metrics --sort hotspot        # code health: complexity × churn hotspots, fan-in, ownership
     repoviz activity
     repoviz why app.routes app.db         # which imports make the routes depend on the database?
     repoviz impact app.services.images.list_images   # what may break if it changes
@@ -941,6 +942,32 @@ def cmd_fleet(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """``repoviz metrics``: size, complexity, coupling, hotspots and ownership, the top modules first."""
+    from . import metrics
+    from .render.html import dumps
+
+    repo = _open(args)
+    snap = repo.snapshot("WORKTREE", "working tree")
+    items = metrics.rows(snap, args.sort, args.by, tests=args.tests)[:max(1, args.top)]
+    names = None
+    if args.authors:
+        if not metrics.show_authors(repo.config, "report"):
+            print('repoviz: author names are hidden here; set [privacy] show_authors = true to print them',
+                  file=sys.stderr)
+        else:
+            names = metrics.owner_names(repo)
+    window = snap.metadata.get("churn_window_commits")
+    if args.json:
+        for r in items:
+            if names and r["path"] in names:
+                r["owners"] = names[r["path"]]
+        _write(dumps({"sort": args.sort, "by": args.by, "churn_window_commits": window, "rows": items}), args.output)
+    else:
+        _write(metrics.format_rows(items, window, names, args.by), args.output)
+    return EXIT_OK
+
+
 def format_review_markdown(report: dict[str, Any]) -> str:
     s = report["summary"]
     lines = [f"### AI change review: {report['target']['label']}", "",
@@ -1226,6 +1253,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.add_argument("--risk", action="store_true", help="also review each worktree for its risk (slower)")
     p.set_defaults(func=cmd_fleet)
+
+    p = sub.add_parser("metrics", parents=[common],
+                       help="code health: size, complexity, fan-in / fan-out, complexity × churn hotspots and "
+                       "ownership, the top modules first")
+    p.add_argument("--sort", choices=("hotspot", "churn", "complexity", "fan-in", "sloc", "ownership"),
+                   default="hotspot")
+    p.add_argument("--by", choices=("module", "component"), default="module")
+    p.add_argument("--top", type=int, default=20, help="how many rows (default 20)")
+    p.add_argument("--tests", action="store_true", help="include test modules")
+    p.add_argument("--authors", action="store_true", help="also print the most active authors of each file "
+                   "(only when [privacy] show_authors = true)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_metrics)
 
     p = sub.add_parser("gate", parents=[common],
                        help="exit 3 unless a fresh verdict approves the review (run it before a push: pre-push hook, "
