@@ -2266,7 +2266,7 @@ def coverage_line(report: dict[str, Any]) -> str:
     if cov.get("stale_count"):
         parts.append(f"{cov['stale_count']} changed file(s) newer than the report: unknown")
     errors = [f"{r['path']}: {r['error']}" for r in cov.get("reports") or [] if r.get("error")]
-    parts += errors
+    parts += errors + [f"{r['path']}: {r['note']}" for r in cov.get("reports") or [] if r.get("note")]
     return "; ".join(parts) or f"{names} describes none of the changed files"
 
 

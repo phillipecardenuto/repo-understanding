@@ -10,6 +10,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -849,6 +850,73 @@ def test_verdict_api_review_wait_and_gate(make_repo, monkeypatch, tmp_path, caps
     assert main(["review", "-C", repo.path, "--wait", "--format", "markdown"]) == 1
 
 
+def test_live_review_follows_a_rerun_coverage_report(make_repo) -> None:
+    from test_review import _cov_wave, _report, cobertura
+
+    repo = _cov_wave(make_repo)
+    _report(repo, "coverage.xml", cobertura({"app/calc.py": {5: 1, 6: 1, 7: 0, 8: 1}}), +100)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        first = json.loads(request(srv, "GET", "/api/review?id=all")[2])["coverage"]
+        assert (first["covered"], first["executable"]) == (3, 4)
+        # the tests are run again with coverage: coverage.xml is git-ignored, so no reviewed file changed
+        _report(repo, "coverage.xml", cobertura({"app/calc.py": {5: 1, 6: 1, 7: 1, 8: 1}}), +200)
+        again = json.loads(request(srv, "GET", "/api/review?id=all")[2])["coverage"]
+        assert (again["covered"], again["executable"]) == (4, 4)  # not the cached review
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_worktree_state_is_opened_once_and_other_worktrees_are_read_briefly_once(make_repo, monkeypatch) -> None:
+    import repoviz.fleet as fleet_mod
+    from repoviz.server import AppState
+
+    from test_review import fleet_repo
+
+    main, a, b = fleet_repo(make_repo)
+    state = AppState(Repository(main.path))
+    opened = []
+    real = Repository.__init__
+
+    def counting(self, *args, **kwargs):
+        opened.append(args[0] if args else kwargs.get("path"))
+        time.sleep(0.05)  # widen the race window
+        real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Repository, "__init__", counting)
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(state.for_worktree(a.path))) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(opened) == 1 and len({id(x) for x in got}) == 1  # one Repository (and its git processes) per path
+    monkeypatch.setattr(Repository, "__init__", real)
+    calls = []
+    monkeypatch.setattr(fleet_mod, "others_state", lambda repo: calls.append(1) or (("x",),))
+    assert state.others_state() == state.others_state() == (("x",),) and len(calls) == 1  # reused within OTHERS_TTL
+
+
+def test_gate_hook_fails_closed_when_the_review_cannot_be_checked(make_repo, monkeypatch, capsys) -> None:
+    import io
+
+    repo = make_repo({"app.py": "x = 1\n"})
+
+    def hook(*extra: str) -> int:
+        payload = {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": repo.path}
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+        return main(["gate", "--hook-input", *extra])
+
+    assert hook("session:no-such-session") == 2  # only exit 2 blocks: an error must not let the push through
+    assert "could not be checked" in capsys.readouterr().err
+    repo.write({".repoviz.toml": "this = is not [toml\n"})
+    assert hook() == 2
+    assert "could not be checked" in capsys.readouterr().err
+    assert main(["gate", "-C", repo.path]) == 1  # outside a hook an error is an error (a pre-push hook blocks on it)
+
+
 # --------------------------------------------------------------------------- parallel agents: worktrees (#10)
 
 
@@ -857,8 +925,11 @@ def test_fleet_api_worktree_switch_and_cli(make_repo, capsys) -> None:
 
     from test_review import fleet_repo
 
+    import repoviz.server as server_mod
+
     main, a, b = fleet_repo(make_repo)
     r = Repository(main.path)
+    server_mod.OTHERS_TTL, ttl = 0.0, server_mod.OTHERS_TTL  # this test edits a worktree and asks again at once
     srv = create_server(r, port=0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -893,6 +964,7 @@ def test_fleet_api_worktree_switch_and_cli(make_repo, capsys) -> None:
         status, _, _ = request(srv, "GET", "/api/fleet", headers={"X-Repoviz-Worktree": quote(b.path)})
         assert status == 403  # still needs X-Repoviz
     finally:
+        server_mod.OTHERS_TTL = ttl
         srv.shutdown()
         srv.server_close()
     assert main_cli(["fleet", "-C", a.path, "--json"]) == 0

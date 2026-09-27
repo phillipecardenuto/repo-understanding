@@ -134,11 +134,15 @@ def indexes(path: str, text: str | None) -> set[str]:
                                                 text)}
     if kind == "pyproject":
         try:
-            tool = tomllib.loads(text).get("tool") or {}
+            tool = tomllib.loads(text).get("tool")
         except tomllib.TOMLDecodeError:
             return set()
-        entries = ((tool.get("uv") or {}).get("index") or []) + ((tool.get("poetry") or {}).get("source") or []) + \
-            ((tool.get("pdm") or {}).get("source") or [])
+        entries: list[Any] = []
+        for owner, key in (("uv", "index"), ("poetry", "source"), ("pdm", "source")):
+            section = tool.get(owner) if isinstance(tool, dict) else None
+            value = section.get(key) if isinstance(section, dict) else None
+            # [[tool.uv.index]] is an array of tables; a single [tool.uv.index] table (a common slip) counts too
+            entries += [value] if isinstance(value, dict) else value if isinstance(value, list) else []
         return {str(e["url"]) for e in entries if isinstance(e, dict) and e.get("url")}
     return set()
 

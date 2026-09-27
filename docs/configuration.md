@@ -180,12 +180,19 @@ never produces a report.
 - **Formats.** Cobertura XML (coverage.py `coverage xml`, Jest's `cobertura`,
   many others), JaCoCo XML, LCOV (`lcov.info`), Istanbul
   `coverage-final.json` and Go `cover.out`. The format is recognised from the
-  content. XML with entity declarations is refused.
+  content. XML with an internal DTD subset (entity declarations) is refused,
+  whatever its encoding. A report that cannot be read (malformed XML or JSON,
+  an unknown format) is listed with the reason; it never stops a review. A Go
+  profile is read up to 2,000,000 line marks, and the review says when it was
+  read only in part.
 - **Paths.** A report's file names are matched to the repository as they are,
   then under Cobertura's `<source>` directories, then by the longest path
   suffix that names exactly one file. So `/home/ci/build/app/calc.py` from
   another machine maps to `app/calc.py`. A suffix that fits several files is
-  skipped and listed as ambiguous.
+  skipped and listed as ambiguous. The suffix includes a directory as well as
+  the file name (unless the report gives a bare file name), so an entry for a
+  file outside the repository, such as `site-packages/requests/api.py`, never
+  lands on the repository's own `server/api.py`.
 - **Freshness.** A report describes the code as it was when it was written
   (its own timestamp, else its modification time). It is used for a changed
   file only when the file has not changed on disk since, and the reviewed

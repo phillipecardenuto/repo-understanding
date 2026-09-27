@@ -5,10 +5,12 @@ coverage report from CI or a local run; reading it gives line-level truth for th
 
 * **Reports.**  ``[review.coverage] paths`` (default :data:`DEFAULT_PATHS`, relative to the repository; absolute
   paths may be configured).  Regular files only, at most ``max_mb`` (50 MB).  Formats: Cobertura XML (coverage.py,
-  many JavaScript tools), JaCoCo XML, LCOV, Istanbul ``coverage-final.json`` and Go ``cover.out``.  XML with entity
-  declarations is refused (entity-expansion bombs, external entities).
+  many JavaScript tools), JaCoCo XML, LCOV, Istanbul ``coverage-final.json`` and Go ``cover.out``.  XML with an
+  internal DTD subset (entity declarations: expansion bombs, external entities) is refused, whatever its encoding.
+  A report that cannot be read is listed with the reason; it never stops a review.
 * **Paths.**  A report's paths are mapped to repository paths: as they are, under Cobertura's ``<source>`` roots,
-  else by the longest path suffix that names exactly one file; an ambiguous suffix is skipped and reported.
+  else by the longest path suffix that names exactly one file (a directory and the file name at least, unless the
+  report gives a bare file name); an ambiguous suffix is skipped and reported.
 * **Freshness.**  A report describes the code as it was when it was written (its own timestamp when it has one,
   else its modification time).  It applies to a changed file only when the file has not changed since, on disk,
   and the reviewed state of the file is what is on disk; otherwise the changed lines are "unknown".
@@ -23,6 +25,7 @@ import os
 import re
 import threading
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -32,6 +35,7 @@ DEFAULT_PATHS = ("coverage.xml", ".coverage.xml", "coverage/cobertura-coverage.x
 MAX_REPORT_MB = 50.0
 MAX_REPORT_FILES = 50_000  # files described by one report
 MAX_LISTED_LINES = 200  # covered / uncovered line numbers kept per file for the page
+MAX_GO_LINES = 2_000_000  # line marks read from one Go profile (a block may span up to 10,000 lines)
 
 
 @dataclass
@@ -44,25 +48,54 @@ class Report:
     files: dict[str, dict[int, bool]] = field(default_factory=dict)
     roots: list[str] = field(default_factory=list)  # Cobertura <source> directories
     error: str | None = None
+    note: str | None = None  # read in part (a cap applied)
 
     def summary(self) -> dict[str, Any]:
         out = {"path": self.path, "format": self.format, "time": self.time, "files": len(self.files)}
         if self.error:
             out["error"] = self.error
+        if self.note:
+            out["note"] = self.note
         return out
 
 
 # --------------------------------------------------------------------------- parsers
 
 
-_ENTITY = re.compile(rb"<!ENTITY", re.IGNORECASE)
+class _Prolog(Exception):
+    """The root element started: the prolog (where a DTD can declare entities) is over."""
+
+
+def _check_prolog(data: bytes) -> None:
+    """Refuse an internal DTD subset or an entity declaration (entity-expansion bombs, external entities), read by
+    expat itself so that every encoding it accepts (UTF-16 too) is covered.  Stops at the root element."""
+
+    def doctype(_name: str, _system: str | None, _public: str | None, internal: int) -> None:
+        if internal:
+            raise ValueError("XML entity declarations are not supported (the report has an internal DTD subset)")
+
+    def entity(*_args: Any) -> None:
+        raise ValueError("XML entity declarations are not supported")
+
+    def root(*_args: Any) -> None:
+        raise _Prolog
+
+    p = expat.ParserCreate()
+    p.StartDoctypeDeclHandler = doctype
+    p.EntityDeclHandler = entity
+    p.StartElementHandler = root
+    try:
+        p.Parse(data, True)
+    except _Prolog:
+        return
+    except expat.ExpatError as exc:
+        raise ValueError(f"not well-formed XML: {exc}") from None
 
 
 def _xml(data: bytes) -> ET.Element:
-    """Parse an XML report; entity declarations (entity-expansion bombs, external entities) are refused.  An external
-    DTD reference (JaCoCo's) is harmless: the parser never fetches it."""
-    if _ENTITY.search(data):
-        raise ValueError("XML entity declarations are not supported")
+    """Parse an XML report; an internal DTD subset is refused (see :func:`_check_prolog`).  An external DTD reference
+    (JaCoCo's) is harmless: the parser never fetches it."""
+    _check_prolog(data)
     root = ET.fromstring(data)
     for el in root.iter():
         if isinstance(el.tag, str) and "}" in el.tag:
@@ -148,9 +181,10 @@ def parse_istanbul(data: Any, report: Report) -> None:
         lines = report.files.setdefault(name, {})
         counts = entry.get("s") if isinstance(entry.get("s"), dict) else {}
         for sid, loc in entry["statementMap"].items():
-            start = (loc or {}).get("start") or {}
+            start = loc.get("start") if isinstance(loc, dict) else None
             count = counts.get(sid, 0)
-            _mark(lines, start.get("line"), isinstance(count, (int, float)) and count > 0)
+            _mark(lines, start.get("line") if isinstance(start, dict) else None,
+                  isinstance(count, (int, float)) and count > 0)
         if len(report.files) >= MAX_REPORT_FILES:
             return
 
@@ -159,6 +193,7 @@ _GO_BLOCK = re.compile(r"^(.+?):(\d+)\.\d+,(\d+)\.\d+ \d+ (\d+)$")
 
 
 def parse_go(text: str, report: Report) -> None:
+    budget = MAX_GO_LINES
     for raw in text.splitlines():
         m = _GO_BLOCK.match(raw.strip())
         if not m:
@@ -168,8 +203,13 @@ def parse_go(text: str, report: Report) -> None:
             continue
         lines = report.files.setdefault(name, {})
         start, end, count = int(m.group(2)), int(m.group(3)), int(m.group(4))
-        for n in range(start, min(end, start + 10_000) + 1):
+        last = min(end, start + 10_000, start + budget - 1)
+        for n in range(start, last + 1):
             _mark(lines, n, count > 0)
+        budget -= max(0, last - start + 1)
+        if budget <= 0:
+            report.note = f"read in part: only the first {MAX_GO_LINES:,} line marks of this profile"
+            return
 
 
 def parse(path: Path, display: str, max_bytes: int) -> Report:
@@ -206,9 +246,9 @@ def parse(path: Path, display: str, max_bytes: int) -> Report:
             parse_lcov(data.decode("utf-8", errors="replace"), report)
             if not report.files:
                 raise ValueError("not a coverage report (no SF: records)")
-    except (ValueError, ET.ParseError, RecursionError, UnicodeDecodeError) as exc:
+    except Exception as exc:  # a report is untrusted input: whatever is wrong with it, list it and go on
         report.files = {}
-        report.error = f"cannot read it: {exc}"[:300]
+        report.error = f"cannot read it: {type(exc).__name__ + ': ' if not isinstance(exc, ValueError) else ''}{exc}"[:300]
     return report
 
 
@@ -277,7 +317,9 @@ def map_paths(report: Report, repo_files: Iterable[str], root: Path) -> tuple[di
         if found is None:
             parts = [x for x in name.split("/") if x and x != "."]
             pool = by_name.get(parts[-1], []) if parts else []
-            for k in range(len(parts), 0, -1):  # the longest suffix that names a file decides
+            # the longest suffix that names a file decides; a directory and the file name at least, so that a report
+            # entry for a file outside the repository (site-packages/requests/api.py) never lands on server/api.py
+            for k in range(len(parts), 1 if len(parts) > 1 else 0, -1):
                 suffix = "/".join(parts[-k:])
                 hits = [f for f in pool if f == suffix or f.endswith("/" + suffix)]
                 if len(hits) == 1:
@@ -304,6 +346,21 @@ class CoverageSet:
     def summary(self) -> dict[str, Any]:
         return {"reports": [r.summary() for r in self.reports], "ambiguous": self.ambiguous[:20],
                 "ambiguous_count": len(self.ambiguous)}
+
+
+def reports_stamp(root: Path, config: Any) -> tuple[tuple[str, int, int], ...]:
+    """What a review's coverage depends on besides the reviewed files: each report found, with its size and
+    modification time.  Reports are usually ignored by Git, so a cached review keys on this too."""
+    if not getattr(config, "review_coverage_enabled", True):
+        return ()
+    out = []
+    for path, display in find_reports(root, getattr(config, "review_coverage_paths", None)):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        out.append((display, st.st_size, st.st_mtime_ns))
+    return tuple(out)
 
 
 def coverage_for(root: Path, repo_files: Iterable[str], config: Any) -> CoverageSet | None:
@@ -339,7 +396,7 @@ def file_coverage(cov: CoverageSet, path: str, changed_lines: list[int], *, fres
     uncovered = [n for n in executable if not lines[n]]
     return {"report": report.path, "fresh": True, "report_time": report.time, "executable": len(executable),
             "covered": len(covered), "covered_lines": covered[:MAX_LISTED_LINES],
-            "uncovered_lines": uncovered[:MAX_LISTED_LINES]}
+            "uncovered_lines": uncovered[:MAX_LISTED_LINES], **({"report_note": report.note} if report.note else {})}
 
 
 def ranges(numbers: list[int], limit: int = 8) -> str:

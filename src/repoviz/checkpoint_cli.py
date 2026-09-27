@@ -27,8 +27,17 @@ def hook_payload() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+class _NotMine(Exception):
+    """Arguments the fast path does not handle: the full CLI takes them (and reports any error)."""
+
+
+class _QuietParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # type: ignore[override]
+        raise _NotMine(message)  # never print a usage error of our own: the full CLI may accept these arguments
+
+
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="repoviz session", add_help=False)
+    p = _QuietParser(prog="repoviz session", add_help=False)
     p.add_argument("-C", "--repo", default=".")
     p.add_argument("--config")
     p.add_argument("action", choices=("checkpoint", "note"))
@@ -45,7 +54,7 @@ def fast_main(argv: list[str]) -> int | None:
     """Run ``session checkpoint|note``; ``None`` when ``argv`` has options only the full CLI knows."""
     try:
         args, rest = parser().parse_known_args(argv[1:])
-    except SystemExit:
+    except (_NotMine, SystemExit):
         return None
     if rest:
         return None

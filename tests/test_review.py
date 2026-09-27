@@ -1456,6 +1456,18 @@ def test_added_dependency_with_its_resolved_version(make_repo, capsys) -> None:
     assert "| `requests` | added | _(none)_ → `>=2.31,<3` (resolved `2.32.3`) | `pyproject.toml:9` |" in comment
 
 
+def test_odd_tool_tables_in_pyproject_never_crash_the_review(make_repo) -> None:
+    repo = make_repo(DEPS_APP)
+    base = DEPS_APP["pyproject.toml"]
+    repo.write({"pyproject.toml": base + '\n[tool.uv.index]\nurl = "https://pkgs.example.test/simple"\n'})
+    kinds = by_kind(_review_all(repo))  # a single table where uv expects [[tool.uv.index]]: still an index
+    assert any(f["title"] == "Package index added" and "pkgs.example.test" in f["detail"]
+               for f in kinds["dependency-source-changed"])
+    for odd in ('\n[tool]\nuv = "x"\n', '\n[tool.poetry]\nsource = 3\n', '\ntool = 1\n'):
+        repo.write({"pyproject.toml": base + odd})
+        assert "files" in _review_all(repo), odd
+
+
 def test_source_downgrade_unpinned_and_index_signals(make_repo) -> None:
     repo = make_repo({**DEPS_APP, "requirements.txt": "flask==3.0.0\nnumpy==1.26.0\ngunicorn==21.2.0\n"})
     repo.write({
@@ -1956,6 +1968,10 @@ def test_coverage_formats_paths_and_settings(make_repo, tmp_path) -> None:
     assert jac.format == "jacoco" and jac.files["com/acme/Calc.java"] == {3: True, 4: False}
     mapped, ambiguous = coverage.map_paths(lcov, ["app/calc.py", "a/utils.py", "b/utils.py"], Path(repo.path))
     assert list(mapped) == ["app/calc.py"] and ambiguous == ["utils.py"]  # two files end with utils.py: skipped
+    outside = coverage.Report("x", "lcov", 0.0, files={"/venv/lib/site-packages/requests/api.py": {1: True},
+                                                       "/ci/app/calc.py": {5: True}})
+    mapped, _ = coverage.map_paths(outside, ["server/api.py", "app/calc.py"], Path(repo.path))
+    assert list(mapped) == ["app/calc.py"]  # a file outside the repository never lands on a namesake (server/api.py)
     assert coverage.ranges([3, 7, 8, 9, 12]) == "3, 7-9, 12"
     # A configured path (and only files inside the repository for relative paths); the threshold.
     _report(repo, "out/cov.info", "SF:app/calc.py\nDA:5,1\nDA:6,1\nDA:7,0\nDA:8,1\nend_of_record\n", +100)

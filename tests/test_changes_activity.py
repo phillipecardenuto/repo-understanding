@@ -679,3 +679,91 @@ def test_metrics_rank_hotspots_for_the_cli(make_repo) -> None:
     text = metrics.format_rows(rows[:2], 300)
     assert "app/core.py" in text and "▮" in text and "Quillfeather" not in text
     assert metrics.owner_names(r)["app/core.py"] == [["Ana Quillfeather", 5], ["Test", 1]]  # names: only on request
+
+
+def test_fleet_redacts_code_survives_a_broken_worktree_and_reads_each_worktree_once(make_repo, monkeypatch) -> None:
+    import subprocess
+    import sys
+
+    import repoviz.fleet as fleet_mod
+    from test_review import FLEET_APP, fleet_repo
+
+    main, a, b = fleet_repo(make_repo)
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    b.write({"app/api.py": FLEET_APP["app/api.py"].replace('search("x")', f'search("x", token="{secret}")')})
+    res = fleet_mod.fleet(Repository(main.path))
+    assert any(o["kind"] == "overlap-contract" for p in res["overlaps"] for o in p["items"])
+    assert secret not in json.dumps(res)  # the calling line is code from another worktree: redacted like any excerpt
+    # a worktree that cannot be opened says why in its row; the others and the overlaps stay
+    def repo_for(path: str) -> Repository:
+        if path == a.path:
+            raise RuntimeError("cannot open this one")
+        return Repository(path)
+    res = fleet_mod.fleet(Repository(main.path), with_risk=True, repo_for=repo_for)
+    rows = {w["path"]: w for w in res["worktrees"]}
+    assert "cannot open this one" in rows[a.path]["error"] and rows[b.path]["risk"] and res["overlaps"]
+    # --risk reviews every worktree, reusing what the fleet already read (not N reviews × N worktrees)
+    reads = []
+    real = fleet_mod.side_of
+    monkeypatch.setattr(fleet_mod, "side_of", lambda *args: reads.append(args[0].path) or real(*args))
+    fleet_mod.fleet(Repository(main.path), with_risk=True)
+    assert sorted(reads) == sorted({main.path, a.path, b.path})
+    # the cache key of the other worktrees' state is the same in every process (no per-process hash())
+    code = ("import sys; from repoviz.repo import Repository; from repoviz.fleet import others_state; "
+            "print(repr(others_state(Repository(sys.argv[1]))))")
+    keys = {subprocess.run([sys.executable, "-c", code, main.path], capture_output=True, text=True, check=True).stdout
+            for _ in range(2)}
+    assert len(keys) == 1 and b.path in keys.pop()
+
+
+def test_pruned_checkpoints_fold_statuses_that_cancel_out(tmp_path) -> None:
+    from repoviz import checkpoints as cp
+
+    def step(n: int, origin: str, *changes: tuple[str, str, int, int]) -> dict:
+        return {"n": n, "origin": origin, "changed": [{"path": p, "status": st, "added": a, "removed": r}
+                                                      for p, st, a, r in changes]}
+
+    tl = {"checkpoints": [step(1, "manual"),
+                          step(2, "auto", ("tmp.py", "added", 3, 0), ("old.py", "removed", 0, 2), ("a.py", "added", 1, 0)),
+                          step(3, "auto", ("tmp.py", "removed", 0, 3), ("old.py", "added", 2, 0), ("a.py", "modified", 1, 1)),
+                          step(4, "manual")]}
+    assert cp._prune(tmp_path, tl, 3)
+    merged = tl["checkpoints"][1]
+    # created then deleted: gone; deleted then re-created: modified; created then edited: still added
+    assert [(c["path"], c["status"]) for c in merged["changed"]] == [("a.py", "added"), ("old.py", "modified")]
+    assert (merged["files"], merged["lines_added"], merged["lines_removed"]) == (2, 4, 3)
+
+
+def test_a_note_label_never_takes_the_fast_path_nor_prints_its_usage_error(make_repo, capsys) -> None:
+    from repoviz.entry import _session_action, main
+
+    repo = make_repo({"a.py": "x = 1\n"})
+    assert main(["session", "start", "-C", repo.path, "--label", "note"]) == 0
+    err = capsys.readouterr().err
+    assert "invalid choice" not in err and "error:" not in err
+    assert Repository(repo.path).current_session().label == "note"
+    assert _session_action(["session", "-C", "checkpoint", "scope", "--expect", "note"]) == "scope"
+    assert _session_action(["session", "--quiet", "checkpoint"]) == "checkpoint"
+    assert main(["session", "-C", repo.path, "checkpoint", "--quiet"]) == 0  # the fast path still answers
+    assert capsys.readouterr().err == ""
+
+
+def test_a_retargeted_symlink_is_not_a_removed_file_in_checkpoints(make_repo) -> None:
+    import os
+
+    from repoviz import checkpoints as cp
+
+    repo = make_repo({"build/assets/a.css": "a {}\n", "build/other/b.css": "b {}\n", "app.py": "x = 1\n"})
+    os.symlink("build/assets", Path(repo.path, "assets"))
+    os.symlink("app.py", Path(repo.path, "entry.py"))
+    repo.commit("links")
+    Path(repo.path, "entry.py").unlink()
+    os.symlink("build/other/b.css", Path(repo.path, "entry.py"))  # retargeted before the session: to a file
+    r = Repository(repo.path)
+    session = r.state.start_session(r.git, r.root, "wave")
+    assert "entry.py" not in session.overrides  # the baseline does not record a link as a deleted file
+    Path(repo.path, "assets").unlink()
+    os.symlink("build/other", Path(repo.path, "assets"))  # retargeted during the session: to a directory
+    Path(repo.path, "app.py").write_text("x = 2\n")
+    meta, created = cp.create(r.state, r.git, r.root, session)
+    assert created and [c["path"] for c in meta["changed"]] == ["app.py"]  # links are not files: never "removed"

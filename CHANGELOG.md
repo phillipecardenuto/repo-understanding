@@ -539,6 +539,47 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Fixed
 
+Fifteen problems found by a deep review of the work since the last one
+(3448f7f..e643f2c), each with a regression test:
+
+- `repoviz gate --hook-input` failed open: an error exited 1, which Claude Code
+  does not treat as blocking, so `git push` went through whenever the gate could
+  not check the review. It now exits 2 and says why.
+- A single `[tool.uv.index]` table (instead of `[[tool.uv.index]]`), or a
+  non-table `tool.*` entry, in `pyproject.toml` crashed the whole review. The
+  single table now counts as an index.
+- Coverage reports:
+  - a malformed `coverage-final.json` crashed every review; any unreadable
+    report is now listed with the reason instead;
+  - a UTF-16 `coverage.xml` got past the entity-declaration guard; any internal
+    DTD subset is now refused by the XML parser itself, whatever the encoding;
+  - a Go profile with huge line ranges could stall a review; profiles are read
+    up to 2,000,000 line marks, and the review says so;
+  - an entry for a file outside the repository could match a repository file
+    by its name alone and make untested lines look covered;
+  - the live app kept serving a cached review after the (git-ignored) report
+    was regenerated.
+- Parallel agents (fleet):
+  - the calling line and signatures in overlap items were not redacted (they
+    reach `repoviz fleet --json` and static reports);
+  - one worktree that could not be opened hid the whole fleet; its row now says
+    why;
+  - the other worktrees' state used Python's per-process `hash()` in cache
+    keys;
+  - opening another worktree from parallel requests could leak duplicate git
+    processes;
+  - every review reload ran `git status` in every other worktree (now reused
+    for 2 s), and `repoviz fleet --risk` read every worktree again for each
+    review (now once).
+- Checkpoints: pruning an old checkpoint kept a file created and then deleted
+  as "removed" (it now disappears) and a file deleted and re-created as
+  "added" (now "modified"); a retargeted tracked symlink was recorded as a
+  deleted file by checkpoints but not by the session baseline (both skip links
+  now, as every source does).
+- `repoviz session start --label note` printed a bogus usage error from the
+  hook fast path, which now only takes `session checkpoint` and
+  `session note`, and never prints.
+
 - Command targets: `gunicorn -b 0.0.0.0:8000 app.wsgi:application` resolved the
   bind address instead of `app.wsgi:application`; quoted specs
   (`gunicorn "app:create_app()"`) and dotted modules without a callable are

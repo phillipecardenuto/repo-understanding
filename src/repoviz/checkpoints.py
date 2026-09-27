@@ -156,6 +156,8 @@ def _capture(state: StateStore, git: Git, root: Path, session: Session) -> dict[
                 continue
             if stat.S_ISDIR(st.st_mode):  # a submodule whose checked-out commit moved: recorded separately
                 continue
+            if stat.S_ISLNK(st.st_mode):  # never a file for repoviz (no source reads one): as the baseline does
+                continue
             if not stat.S_ISREG(st.st_mode):
                 overrides[path] = None
                 continue
@@ -327,6 +329,15 @@ def create(state: StateStore, git: Git, root: Path, session: Session, *, label: 
         return meta, True
 
 
+def _merged_status(earlier: str, later: str) -> str | None:
+    """A file's status over two consecutive steps; ``None`` when the two cancel out (added, then removed)."""
+    if earlier == "added":
+        return None if later == "removed" else "added"
+    if earlier == "removed" and later == "added":
+        return "modified"  # it existed before and exists after
+    return later
+
+
 def _prune(directory: Path, tl: dict[str, Any], limit: int) -> bool:
     """Keep ``limit`` checkpoints: drop the oldest automatic ones first; a dropped checkpoint's changes are folded
     into the next one, so the timeline still adds up."""
@@ -339,9 +350,12 @@ def _prune(directory: Path, tl: dict[str, Any], limit: int) -> bool:
         for c in after.get("changed", []):
             if c["path"] in merged:
                 earlier = merged[c["path"]]
+                status = _merged_status(earlier["status"], c["status"])
+                if status is None:  # created, then deleted again: nothing changed across the two steps
+                    del merged[c["path"]]
+                    continue
                 both = {k: (earlier.get(k) or 0) + (c.get(k) or 0) if earlier.get(k) is not None and c.get(k)
                         is not None else None for k in ("added", "removed")}
-                status = "added" if earlier["status"] == "added" and c["status"] != "removed" else c["status"]
                 merged[c["path"]] = {**c, **both, "status": status}
             else:
                 merged[c["path"]] = c

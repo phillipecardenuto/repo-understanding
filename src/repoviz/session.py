@@ -192,6 +192,8 @@ class StateStore:
                 if path in overrides:
                     continue
                 p = root / path
+                if p.is_symlink():  # never a file for repoviz (no source reads one): checkpoints skip it too
+                    continue
                 if p.is_dir():  # a submodule whose checked-out commit moved: recorded separately
                     continue
                 if p.is_file() and not p.is_symlink():

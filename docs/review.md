@@ -1043,7 +1043,9 @@ repoviz never installs hooks. Pick the ones you want:
   `--hook-input` reads the hook's JSON from stdin. Only commands that run
   `git push` are gated (also `git -C dir push`). A closed gate exits 2, which
   blocks the command and shows the reasons to the agent. Otherwise the hook
-  prints nothing.
+  prints nothing. It fails closed: when the review cannot be checked (an
+  unknown target, a broken `.repoviz.toml`, any error), it also exits 2 and
+  says why, since Claude Code lets a command through on any other exit code.
 
 - **Git pre-push hook** (`.git/hooks/pre-push`, executable):
 

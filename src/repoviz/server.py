@@ -62,6 +62,8 @@ ASSETS = {
 LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
 #: The browser went away mid-request (page reload, tab closed, cancelled fetch): nothing to answer, nothing to report.
 CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+#: Seconds a review reuses the other worktrees' state (git status in each of them) before reading it again.
+OTHERS_TTL = 2.0
 FAVICON = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" '
            b'fill="#4f46e5"/><circle cx="9" cy="10" r="4" fill="#fff"/><circle cx="23" cy="10" r="4" fill="#fff"/>'
            b'<circle cx="16" cy="23" r="4" fill="#fff"/><path d="M9 10L16 23L23 10" stroke="#fff" stroke-width="2" '
@@ -127,6 +129,8 @@ class AppState:
         self._reviews = _Lru(6)
         self._auto_checkpoint: tuple[str, float] = ("", 0.0)  # (activity etag, monotonic time) of the last try
         self._worktrees: dict[str, AppState] = {}  # other worktrees of this repository, opened on demand
+        self._worktree_lock = threading.Lock()  # opening one: never twice for the same path (no leaked processes)
+        self._others: tuple[float, tuple[Any, ...]] | None = None  # other worktrees' state, reused briefly
         if auto_session and repo.is_git and repo.current_session() is None:
             repo.state.start_session(repo.git, repo.root, label="started with repoviz serve")
 
@@ -143,15 +147,36 @@ class AppState:
             return hit
         from .fleet import list_worktrees
 
-        known = {w.path for w in list_worktrees(self.repo.git)[0]} if self.repo.git is not None else set()
-        if path not in known:
-            raise ApiError(403, "not a worktree of this repository")
-        try:
-            opened = AppState(Repository(path), parent=self)
-        except (RepositoryError, OSError) as exc:
-            raise ApiError(400, str(exc)) from exc
+        with self._worktree_lock:  # parallel first requests (bundle, activity…) open it once
+            with self.cache_lock:
+                hit = self._worktrees.get(path)
+            if hit is not None:
+                return hit
+            known = {w.path for w in list_worktrees(self.repo.git)[0]} if self.repo.git is not None else set()
+            if path not in known:
+                raise ApiError(403, "not a worktree of this repository")
+            try:
+                opened = AppState(Repository(path), parent=self)
+            except (RepositoryError, OSError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            with self.cache_lock:
+                self._worktrees[path] = opened
+            return opened
+
+    def others_state(self) -> tuple[Any, ...]:
+        """``fleet.others_state``, reused for :data:`OTHERS_TTL` seconds: a review reload does not run
+        ``git status`` in every other worktree each time."""
+        from .fleet import others_state
+
+        now = time.monotonic()
         with self.cache_lock:
-            return self._worktrees.setdefault(path, opened)
+            hit = self._others
+        if hit is not None and now - hit[0] < OTHERS_TTL:
+            return hit[1]
+        value = others_state(self.repo)
+        with self.cache_lock:
+            self._others = (now, value)
+        return value
 
     def fleet(self, query: dict[str, str]) -> dict[str, Any]:
         """Every worktree of the repository, and where their work overlaps (fleet.py)."""
@@ -287,7 +312,7 @@ class AppState:
         return [t.to_dict() for t in review_targets(self.repo)]
 
     def review(self, query: dict[str, str]) -> bytes:
-        from .fleet import others_state
+        from .coverage import reports_stamp
         from .review import build_review, resolve_target, scope_for
 
         try:
@@ -299,11 +324,12 @@ class AppState:
             commit = (query.get("commit") or "").strip() or None  # one step of the range, reviewed on its own
             sources = (self.repo.open_source(target.base), self.repo.open_source(target.target))
             # other worktrees' work shows as overlap signals in a review of this working tree (fleet.py)
-            others = others_state(self.repo) if target.target == "WORKTREE" and not commit else ()
+            others = self.others_state() if target.target == "WORKTREE" and not commit else ()
             key = (target.key, target.base, target.target, sources[0].revision_id, sources[1].revision_id,
                    tuple(scope.allowed), tuple(scope.protected), tuple(scope.expected), self.repo.config.fingerprint(),
                    commit, others,
-                   self.repo.git.head() if self.repo.git else None)  # commits and uncommitted work depend on HEAD
+                   self.repo.git.head() if self.repo.git else None,  # commits and uncommitted work depend on HEAD
+                   reports_stamp(self.repo.root, self.repo.config))  # a re-run coverage report (usually git-ignored)
             with self.cache_lock:
                 body = self._reviews.get(key)
             if body is None:

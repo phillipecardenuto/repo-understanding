@@ -4327,7 +4327,7 @@
       const cov = f.coverage;
       if (cov) {  // an existing coverage report, read: which changed lines a test ran (coverage.py)
         const missing = cov.fresh ? cov.executable - cov.covered : 0;
-        this.fileEl.appendChild(h("h4", null, "Coverage ", h("span", { class: "faint", text: `— from ${cov.report} (${fmtTime(cov.report_time * 1000)}); repoviz reads it, never runs tests` })));
+        this.fileEl.appendChild(h("h4", null, "Coverage ", h("span", { class: "faint", text: `— from ${cov.report} (${fmtTime(cov.report_time * 1000)}); repoviz reads it, never runs tests` + (cov.report_note ? ` · ${cov.report_note}` : "") })));
         this.fileEl.appendChild(!cov.fresh
           ? h("div", { class: "notice warn" }, iconEl("alert"), " The report is older than this file's last change, so it cannot tell whether the new lines run. Re-run your test suite with coverage to refresh it.")
           : !cov.executable ? h("div", { class: "muted", text: "No changed line is executable code according to the report." })

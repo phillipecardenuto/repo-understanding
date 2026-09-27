@@ -159,6 +159,36 @@ def test_coverage_reports_are_parsed_safely_and_bounded(make_repo) -> None:
     rev = build_review(r, resolve_target(r, "all"))  # the review goes on, and says why the report was not used
     assert "entity declarations" in rev["coverage"]["reports"][0]["error"]
     assert not [f for f in rev["findings"] if f["kind"] == "changed-lines-uncovered"]
+    # the same bomb in UTF-16 (expat reads that too): still refused, whatever the encoding
+    Path(repo.path, "coverage.xml").write_bytes(bomb.replace('version="1.0"', 'version="1.0" encoding="UTF-16"')
+                                                .encode("utf-16-le"))
+    utf16 = coverage.parse(Path(repo.path, "coverage.xml"), "coverage.xml", 10**6)
+    assert utf16.files == {} and "entity declarations are not supported" in (utf16.error or "")
+    # malformed JSON structures and profiles: listed with the reason, never a crash
+    Path(repo.path, "coverage.xml").unlink()
+    odd = Path(repo.path, "coverage/coverage-final.json")
+    odd.parent.mkdir()
+    odd.write_text('{"app/calc.py": {"statementMap": {"0": {"start": 5}, "1": 7, "2": {"start": {"line": 5}}}, "s": {"2": 1}}}')
+    ist = coverage.parse(odd, "coverage-final.json", 10**6)
+    assert ist.error is None and ist.files == {"app/calc.py": {5: True}}  # the valid entry still counts
+    odd.write_text('{"a.js": {"statementMap": {"0": {"start": {"line": {"x": 1}}}}, "s": []}}')
+    assert coverage.parse(odd, "coverage-final.json", 10**6).error is None
+    odd.write_text('{"a.js": {"statementMap": {"0": {"start": {"line": 3}}}}, "s": {"0": 1}}')
+    monkey = coverage.parse_istanbul
+    try:  # any unexpected failure inside a parser is reported, not raised
+        coverage.parse_istanbul = lambda data, report: (_ for _ in ()).throw(KeyError("boom"))
+        assert "cannot read it: KeyError" in (coverage.parse(odd, "coverage-final.json", 10**6).error or "")
+    finally:
+        coverage.parse_istanbul = monkey
+    odd.unlink()
+    # a Go profile whose blocks span huge ranges: bounded work, and it says it read only part
+    go = Path(repo.path, "cover.out")
+    go.write_text("mode: set\n" + "app/calc.go:1.1,100000000.2 1 1\n" * 2_000)
+    t0 = time.time()
+    prof = coverage.parse(go, "cover.out", 50 * 10**6)
+    assert time.time() - t0 < 10 and prof.note and "read in part" in prof.note
+    assert sum(len(v) for v in prof.files.values()) <= coverage.MAX_GO_LINES
+    go.unlink()
     # too large: ignored, with a note (never read)
     Path(repo.path, "coverage.xml").write_text("SF:app/calc.py\n" + "DA:1,1\n" * 200_000)
     big = coverage.parse(Path(repo.path, "coverage.xml"), "coverage.xml", 1_000_000)

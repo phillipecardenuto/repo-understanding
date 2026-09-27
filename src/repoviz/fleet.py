@@ -17,6 +17,7 @@ Read-only: files are read from disk and from Git objects; nothing is executed or
 
 from __future__ import annotations
 
+import contextvars
 import datetime as _dt
 import re
 import time
@@ -27,6 +28,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from . import classify
 from .gitutil import Git, GitError, probe_repository
+from .ids import stable_hash
+from .redact import redact
 from .session import StateStore
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -248,6 +251,23 @@ def _symbols(path: str, text: str | None) -> dict[str, dict[str, Any]] | None:
     return None
 
 
+#: Sides already read during one ``fleet()`` run, so each worktree's review (``--risk``) reuses them instead of
+#: reading every other worktree again (N reviews × N worktrees).
+_SHARED: contextvars.ContextVar[dict[tuple[str, str | None, str | None], "Side"] | None] = \
+    contextvars.ContextVar("repoviz_fleet_sides", default=None)
+
+
+def _side(wt: Worktree, default: str | None, default_sha: str | None) -> tuple["Side", bool]:
+    """(side, owned): a side shared by the running ``fleet()``, or a new one the caller must close."""
+    shared = _SHARED.get()
+    if shared is None:
+        return side_of(wt, default, default_sha), True
+    key = (wt.path, default, default_sha)
+    if key not in shared:
+        shared[key] = side_of(wt, default, default_sha)
+    return shared[key], False
+
+
 def side_of(wt: Worktree, default: str | None, default_sha: str | None) -> Side:
     git = Git(wt.path)
     head = wt.head or git.head()
@@ -359,9 +379,9 @@ def compare(a: Side, b: Side) -> list[dict[str, Any]]:
         for path, line, text, name in _calls(y, sigs):
             s = sigs[name]
             out.append({"kind": "overlap-contract", "changed_by": who, "path": s["path"], "symbol": s["symbol"],
-                        "line": s["line"], "before": s["before"], "after": s["after"],
-                        "delta": signature_delta(s["before"], s["after"]), "call_path": path,
-                        "call_line": line, "call": text})
+                        "line": s["line"], "before": redact(s["before"]), "after": redact(s["after"]),
+                        "delta": redact(signature_delta(s["before"], s["after"])), "call_path": path,
+                        "call_line": line, "call": redact(text)})  # code: never a credential in the output
     out.sort(key=lambda o: KINDS.index(o["kind"]))
     return out
 
@@ -407,8 +427,8 @@ def _row(repo: "Repository", side: Side, default: str | None, repo_for: Callable
         from .review import build_review, resolve_target
         from .verdict import current, view
 
-        wrepo = repo_for(wt.path)
-        try:
+        try:  # one worktree that cannot be read (removed meanwhile, a broken session) never hides the others
+            wrepo = repo_for(wt.path)
             if judged:
                 target = resolve_target(wrepo, judged)
                 v = wrepo.state.load_verdict(target.key)
@@ -419,8 +439,8 @@ def _row(repo: "Repository", side: Side, default: str | None, repo_for: Callable
             if with_risk and side.files:
                 risk = build_review(wrepo, resolve_target(wrepo, row["wave"]))["risk"]
                 row["risk"] = {k: risk.get(k) for k in ("level", "score", "path")}
-        except (ValueError, GitError) as exc:
-            row["error"] = str(exc)[:200]
+        except Exception as exc:
+            row["error"] = redact(f"{exc}" or type(exc).__name__)[:200]
     return row
 
 
@@ -444,6 +464,7 @@ def fleet(repo: "Repository", *, with_risk: bool = False,
     wts, notes = list_worktrees(repo.git)
     default, default_sha = default_of(repo)
     sides = [side_of(w, default, default_sha) for w in wts]
+    token = _SHARED.set({(s.worktree.path, default, default_sha): s for s in sides})
     try:
         rows = [_row(repo, s, default, open_repo, with_risk) for s in sides]
         pairs = []
@@ -455,7 +476,9 @@ def fleet(repo: "Repository", *, with_risk: bool = False,
                     pairs.append({"a": a.worktree.path, "b": b.worktree.path, "counts": dict(Counter(o["kind"] for o in items)),
                                   "items": items[:MAX_ITEMS], "more": max(0, len(items) - MAX_ITEMS)})
     finally:
-        for s in sides:
+        shared = _SHARED.get() or {}
+        _SHARED.reset(token)
+        for s in {id(x): x for x in [*sides, *shared.values()]}.values():
             s.git.close()
         for path, r in opened.items():
             if r is not repo:
@@ -473,20 +496,21 @@ def overlaps_with_others(repo: "Repository") -> list[dict[str, Any]]:
     if me is None or len(wts) < 2:
         return []
     default, default_sha = default_of(repo)
-    mine = side_of(me, default, default_sha)
-    sides = [mine]
+    mine, owned = _side(me, default, default_sha)
+    close = [mine] if owned else []
     out: list[dict[str, Any]] = []
     try:
         if mine.files:
             for w in wts:
                 if w.current:
                     continue
-                other = side_of(w, default, default_sha)
-                sides.append(other)
+                other, owned = _side(w, default, default_sha)
+                if owned:
+                    close.append(other)
                 if other.files:
                     out += [{**o, "other": w.to_dict()} for o in compare(mine, other)]
     finally:
-        for s in sides:
+        for s in close:
             s.git.close()
     return out
 
@@ -520,7 +544,7 @@ def others_state(repo: "Repository") -> tuple[Any, ...]:
             stamp = []
         finally:
             git.close()
-        out.append((str(path), rec["head"], rec["branch"], hash(tuple(stamp))))
+        out.append((str(path), rec["head"], rec["branch"], stable_hash(*map(repr, stamp))))  # stable across processes
     return tuple(out)
 
 

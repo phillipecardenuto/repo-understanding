@@ -909,12 +909,18 @@ def cmd_gate(args: argparse.Namespace) -> int:
             return EXIT_OK
         if args.repo == "." and isinstance(hook.get("cwd"), str) and hook["cwd"]:
             args.repo = hook["cwd"]
-    repo = _open(args)
     try:
+        repo = _open(args)
         target = resolve_target(repo, args.target)
         res = gate(repo, target, require=args.require, all_reviewed=args.require_all_reviewed,
                    max_open=args.max_open)
-    except ValueError as exc:
+    except Exception as exc:
+        if args.hook_input:  # fail closed: only exit 2 blocks the push, and an unchecked push is not approved
+            sys.stderr.write(f"repoviz gate: the review could not be checked ({type(exc).__name__}: {exc}); "
+                             "the push is blocked until it can be.\n")
+            return 2
+        if not isinstance(exc, (ValueError, RepositoryError, GitError, ConfigError)):
+            raise
         print(f"repoviz: gate: {exc}", file=sys.stderr)
         return EXIT_ERROR
     if args.json:
