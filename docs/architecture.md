@@ -95,10 +95,57 @@ and the manifest analyzer's entry points are linked to Python callables.
 | `python` | – | modules, containment (packages/namespace packages), symbols + call index, entry points, dependencies (+ grimp cross-check) |
 | `javascript` | – | modules, symbols + call index, dependencies |
 | `go` | – | modules, symbols, dependencies |
+| `jvm` | – | modules (Java and Kotlin; package folders), symbols, entry points, dependencies (imports, same-package uses, fully qualified names; externals mapped to Maven/Gradle artifacts). See [below](#java-and-kotlin) |
 | `runtime` | – | calls: containers the code starts and services it calls (`invokes-container`, `talks-to`); finalize: their service-to-service copies |
 | `interfaces` | – | calls: HTTP routes, background tasks and environment variables, and the code that calls, enqueues or reads them |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
 | `metrics` | – | finalize (last): size, complexity, fan-in / fan-out, hotspots, rolled up to folders (see [data-model.md](data-model.md#health-metrics)) |
+
+### Java and Kotlin
+
+The `jvm` analyzer reads text only (`analyzers/textscan.py` blanks comments and
+string contents with one regular expression per language, and braces give the
+nesting), so it never needs a JDK or a build.
+
+- **Modules.** One per file: `package` + file name (`com.acme.web.OrderController`).
+  A folder whose files declare one package becomes a `package` node with that name.
+- **Resolution.** An index of the top-level types (and Kotlin top-level functions
+  and properties) of every package. `import a.b.C.Inner` and `import static
+  a.b.C.m` resolve to the file of `a.b.C`. `import a.b.*` links only the types of
+  `a.b` the file uses. Java and Kotlin need no import for their own package, so
+  a type (or, in Kotlin, a function call) of the same package used in the code is
+  an `imports` edge too, with `same_package: true` and construct `same-package`
+  (confidence 0.85, 0.7 for a function name). A fully qualified name in code
+  (`com.acme.util.Strings.join(…)`) is construct `qualified-name`. When several
+  files declare a name (two Maven modules, Kotlin multiplatform `expect` /
+  `actual`), the one sharing the longest path with the importing file wins, then
+  `commonMain`.
+- **External packages.** `java.*`, the JDK's `javax.*` packages, `jdk.*`,
+  `kotlin.*`, `android.*` and Kotlin/Native `platform.*` are standard (named by
+  their first two segments). Others are matched to a declared Maven / Gradle
+  artifact: the longest shared prefix with its groupId (at least two segments),
+  then the words of the artifactId found in the package
+  (`com.fasterxml.jackson.databind` → `jackson-databind`, `kotlinx.coroutines` →
+  `kotlinx-coroutines-core`). A tie or no match names the external by its first
+  three package segments (`org.junit.jupiter`).
+- **Broken imports.** A missing type from a package that exists in the repository
+  is `unresolved-internal-import` (a *Broken import* signal when new). Names that
+  build tools generate into the project's packages are not: `R`, `BuildConfig`,
+  `Dagger…`, `Hilt_…`, `AutoValue_…`, `Q…` (QueryDSL), `…_` (JPA metamodel),
+  `…Binding`, `…Proto`, `…OuterClass`, `…Grpc`, `…MapperImpl`, `…Builder`. Other
+  imports under the repository's own package root that match nothing are counted,
+  not reported.
+- **Symbols.** Classes, interfaces, enums, records, annotations and Kotlin
+  objects (nested too), methods, constructors and Kotlin functions (extension
+  functions keep their receiver), with a signature (`(String filter, int page) ->
+  List<Order>`, `(o: Order): String`) and `public` (Java `public` / `protected`,
+  Kotlin anything but `private` / `internal`). Overloads carry their parameter
+  types in the name (`list(String, int)`). Members of anonymous classes, enum
+  constant bodies and local classes are not symbols.
+- **Not done.** No call graph (the Activity tab uses import impact), no
+  `unwired-module` check (frameworks load Java classes by annotation), and Kotlin
+  type aliases are not resolved. Build scripts (`build.gradle.kts`) are
+  configuration, not modules.
 
 ### Python imports through `sys.path` edits
 

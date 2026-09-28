@@ -2226,3 +2226,34 @@ def test_guidance_valid_at_the_time_of_a_past_wave(make_repo) -> None:
     assert shown(f"{first}..{shas[0]}") == []  # before it was written
     repo.write({"app/a.py": "A = 9\n"})
     assert shown("all") == []  # now: retired
+
+
+def test_java_changes_get_the_same_review_signals(make_repo) -> None:
+    from test_analyzers import JAVA_APP
+
+    repo = make_repo({**JAVA_APP, ".repoviz.toml": '[[contracts]]\nname = "Web on top"\ntype = "layers"\n'
+                      'layers = ["com.acme.shop.web", "com.acme.shop.core", "com.acme.shop.util"]\n'})
+    base = "app/src/main/java/com/acme/shop"
+    repo.write({
+        # util now reaches up into core (a layer violation), and core into util: a new cycle
+        f"{base}/util/Money.java": "package com.acme.shop.util;\nimport com.acme.shop.core.Order;\n"
+                                   "public final class Money {\n    public static String format(long c, String cur) "
+                                   "{ return \"\" + c; }\n    static Order none() { return null; }\n}\n",
+        f"{base}/core/Order.java": "package com.acme.shop.core;\n\nimport com.acme.shop.util.Money;\n\n"
+                                   "public record Order(String id, long cents) {\n    public Order {\n    }\n"
+                                   "    String shown() { return Money.format(cents, \"EUR\"); }\n}\n",
+    })
+    repo.delete(f"{base}/util/Strings.java")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    kinds = {(f["kind"], f["path"].rsplit("/", 1)[-1]) for f in report["findings"] if f.get("path")}
+    assert ("contract-broken", "Money.java") in kinds
+    assert ("unresolved-internal-import", "OrderController.java") in kinds  # Strings is gone but still imported
+    assert ("public-api-removed", "Strings.java") in kinds
+    assert any(f["kind"] == "new-cycle" for f in report["findings"])
+    pkg = sorted(f["detail"].split(" (")[0] for f in report["findings"] if f["kind"] == "new-package-dependency")
+    assert pkg == ["com.acme.shop.core now depends on com.acme.shop.util",  # package names, not folder paths
+                   "com.acme.shop.util now depends on com.acme.shop.core"]
+    money = next(f for f in report["files"] if f["path"].endswith("Money.java"))
+    fmt = next(k for k in money["symbols"] if k["name"] == "format")
+    assert (fmt["signature_before"], fmt["signature"]) == ("(long c) -> String", "(long c, String cur) -> String")

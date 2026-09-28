@@ -48,6 +48,7 @@ def _codecs() -> dict[str, Codec]:
         "git-churn": same,  # {path: {...}}: plain JSON already
         "metrics": same,  # size and whitespace complexity of one non-Python file (metrics.py)
         "interfaces": same,  # routes, tasks, consumers of one file (interfaces.py): plain JSON already
+        "jvm": same,  # one Java or Kotlin file (analyzers/jvm.py): plain JSON already
     }
 
 

@@ -17,6 +17,7 @@ from .git import GitAnalyzer
 from .golang import GoAnalyzer
 from .interfaces import InterfacesAnalyzer
 from .javascript import JavaScriptAnalyzer
+from .jvm import JvmAnalyzer
 from .manifest import ManifestAnalyzer
 from .metrics import MetricsAnalyzer
 from .python import PythonAnalyzer
@@ -30,6 +31,7 @@ _REGISTRY: list[type[Analyzer]] = [
     PythonAnalyzer,
     JavaScriptAnalyzer,
     GoAnalyzer,
+    JvmAnalyzer,
     RuntimeAnalyzer,
     InterfacesAnalyzer,
     CallFlowAnalyzer,

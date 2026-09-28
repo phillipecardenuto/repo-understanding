@@ -1605,6 +1605,7 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
                     component_of: Any, base_src: Any = None) -> None:
     nodes = diff.nodes
     b_index = base.node_index()
+    t_index: dict[str, Any] | None = None
     external_uses = {(b_index[e.source_id].metadata.get("component_id"), e.target_id)
                      for e in base.dependency_edges if e.source_id in b_index and e.target_id in b_index
                      and "external" in b_index[e.target_id].tags}
@@ -1680,8 +1681,15 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
                 and not e.metadata.get("test_only"):
             src_pkg, dst_pkg = src_path.rsplit("/", 1)[0], dst.node.path.rsplit("/", 1)[0]
             if not _package_dependency_exists(base, src_pkg, dst_pkg):
+                t_index = t_index if t_index is not None else target.node_index()
+
+                def label(folder: str) -> str:  # a Java / Kotlin package by its name, not its long folder path
+                    n = t_index.get(make_id("dir", f"path:dir:{folder}"))
+                    return n.metadata["jvm_package"] if n is not None and n.metadata.get("jvm_package") else folder
+
                 add(Finding("new-package-dependency", "architecture", "low", "New dependency between packages",
-                            f"{src_pkg} now depends on {dst_pkg} ({dep['source']} → {dep['target']})", loc_path,
+                            f"{label(src_pkg)} now depends on {label(dst_pkg)} ({dep['source']} → {dep['target']})",
+                            loc_path,
                             loc_line, ev.excerpt if ev else None, component=component_of(src_path)[1],
                             suggestion="Check the layering: should this package know about that one?"),
                     key=f"{src_pkg}->{dst_pkg}")

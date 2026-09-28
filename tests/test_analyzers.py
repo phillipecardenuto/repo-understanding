@@ -278,6 +278,182 @@ def test_go_imports(make_repo) -> None:
     assert snap.find(qualified_name="example.com/app/internal/store.Open") is not None
 
 
+# --------------------------------------------------------------------------- Java / Kotlin
+
+JAVA_APP = {
+    "app/pom.xml": """<project><groupId>com.acme</groupId><artifactId>shop</artifactId><version>1</version><dependencies>
+<dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId></dependency>
+<dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
+<dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-annotations</artifactId></dependency>
+<dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
+</dependencies></project>
+""",
+    "app/src/main/java/com/acme/shop/web/OrderController.java": """package com.acme.shop.web;
+
+import com.acme.shop.core.*;
+import com.acme.shop.util.Strings;
+import static com.acme.shop.util.Money.format;
+import com.google.common.collect.ImmutableList;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.List;
+// import com.acme.shop.core.Ghost;
+
+/** Serves orders. import com.acme.Fake; */
+public class OrderController {
+    private final OrderService service = new OrderService();
+    private static final String S = "import com.acme.shop.util.Nope; Unused";
+    private static final String BLOCK = \"\"\"
+        Unused text block
+        \"\"\";
+
+    public OrderController() { }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public List<Order> list(int page) throws java.io.IOException {
+        return ImmutableList.of();
+    }
+
+    public List<Order> list(String filter, int page) {
+        return Strings.isBlank(filter) ? list(page) : List.of();
+    }
+
+    public static void main(String[] args) {
+        new ObjectMapper();
+        Runnable r = new Runnable() { public void run() { } };
+        com.acme.shop.util.Money.format(1);
+    }
+
+    private static <T extends Comparable<T>> T max(T a, T b) { return a; }
+}
+""",
+    "app/src/main/java/com/acme/shop/core/Order.java":
+        "package com.acme.shop.core;\n\npublic record Order(String id, long cents) {\n    public Order {\n    }\n}\n",
+    "app/src/main/java/com/acme/shop/core/OrderService.java": """package com.acme.shop.core;
+
+import com.acme.shop.util.Ghost;
+import com.acme.shop.util.R;
+
+public class OrderService {
+    Order find(String id) { return new Order(id, 0); }
+    interface Listener { void onOrder(Order o); }
+    enum State { NEW { @Override String label() { return "n"; } }, PAID; String label() { return name(); } }
+}
+""",
+    "app/src/main/java/com/acme/shop/core/Unused.java": "package com.acme.shop.core;\nclass Unused {}\n",
+    "app/src/main/java/com/acme/shop/util/Strings.java":
+        "package com.acme.shop.util;\npublic final class Strings { public static boolean isBlank(String s) { return s == null; } }\n",
+    "app/src/main/java/com/acme/shop/util/Money.java":
+        "package com.acme.shop.util;\npublic final class Money { public static String format(long c) { return \"\" + c; } }\n",
+    "app/src/test/java/com/acme/shop/core/OrderServiceTest.java":
+        "package com.acme.shop.core;\nimport org.junit.jupiter.api.Test;\nclass OrderServiceTest { @Test void finds() { new OrderService(); } }\n",
+    "lib/build.gradle.kts": 'plugins { kotlin("jvm") }\ndependencies {\n    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")\n}\n',
+    "lib/src/main/kotlin/com/acme/lib/Util.kt": """package com.acme.lib
+
+import kotlinx.coroutines.launch
+import com.acme.shop.core.Order
+
+/* block /* nested */ comment */
+fun formatOrder(o: Order): String = "order ${o.id}"
+
+fun String.shout(): String = uppercase()
+fun Int.shout(): Int = this * 2
+
+const val VERSION = "1"
+
+data class Point(val x: Int, val y: Int)
+
+class Registry<T : Any>(private val name: String) : Iterable<T> {
+    private val items = mutableListOf<T>()
+    fun add(item: T) { items += item }
+    override fun iterator(): Iterator<T> = items.iterator()
+    companion object {
+        fun empty(): Registry<String> = Registry("empty")
+    }
+    internal fun size() = items.size
+}
+
+fun main() { println(formatOrder(Order("1", 2))) }
+""",
+    "lib/src/main/kotlin/com/acme/lib/Use.kt": "package com.acme.lib\n\nobject Use {\n    fun run() = Registry.empty().add(VERSION)\n}\n",
+}
+
+
+def test_java_imports_resolve_to_files_and_externals_to_declared_artifacts(make_repo) -> None:
+    repo = make_repo(JAVA_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    ctl = "com.acme.shop.web.OrderController"
+    got = {t: e for (s, t), e in imports.items() if s == ctl}
+    # explicit, static and fully qualified imports, and only the types of a wildcard import the file uses
+    assert got["com.acme.shop.util.Strings"].evidence[0].construct == "import"
+    assert got["com.acme.shop.util.Money"].evidence[0].construct == "static-import"
+    assert got["com.acme.shop.core.OrderService"].evidence[0].construct == "import-on-demand"
+    assert "com.acme.shop.core.Order" in got and "com.acme.shop.core.Unused" not in got  # not in comments/strings
+    # externals: the declared artifact (jackson-databind, not jackson-annotations), else the JDK package
+    assert got["com.google.guava:guava"].metadata["external"]
+    assert "com.fasterxml.jackson.core:jackson-databind" in got and "com.fasterxml.jackson.core:jackson-annotations" not in got
+    assert "stdlib" in snap.find(qualified_name="java.util").tags
+    assert not any("Ghost" in n or "Fake" in n or "Nope" in n for e in got.values() for n in e.metadata["imported_names"])
+    # types of the same package need no import
+    same = imports[("com.acme.shop.core.OrderService", "com.acme.shop.core.Order")]
+    assert same.metadata["same_package"] and same.evidence[0].construct == "same-package"
+    test_edge = imports[("com.acme.shop.core.OrderServiceTest", "org.junit.jupiter:junit-jupiter")]
+    assert test_edge.metadata["test_only"]
+    # a folder of one package is that package; entry points
+    assert snap.find(path="app/src/main/java/com/acme/shop/core").qualified_name == "com.acme.shop.core"
+    assert snap.find(path="app/src/main/java/com/acme/shop/web/OrderController.java").metadata["entry_kind"] == \
+        "java main method"
+    # a missing type of an existing package is a broken import; a generated one (R) is not
+    broken = [d for d in snap.diagnostics if d.code == "unresolved-internal-import"]
+    assert [(d.path.rsplit("/", 1)[-1], d.line) for d in broken] == [("OrderService.java", 3)]
+
+
+def test_java_symbols_overloads_and_what_is_not_a_declaration(make_repo) -> None:
+    repo = make_repo(JAVA_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    syms = {n.qualified_name: n for n in snap.symbols if n.language == "java"}
+    ctl = "com.acme.shop.web.OrderController"
+    assert syms[f"{ctl}.list(int)"].metadata["signature"] == "(int page) -> List<Order>"
+    assert syms[f"{ctl}.list(String, int)"].start_line == 26  # overloads carry their parameter types
+    assert syms[f"{ctl}.list(int)"].start_line == 21  # the annotation line belongs to the method
+    assert syms[f"{ctl}.OrderController"].metadata["kind"] == "constructor"
+    assert syms[f"{ctl}.max"].metadata["public"] is False and syms[f"{ctl}.main"].metadata["public"]
+    assert f"{ctl}.run" not in syms  # a method of an anonymous class
+    assert syms["com.acme.shop.core.Order"].metadata["kind"] == "record"
+    assert syms["com.acme.shop.util.Strings.isBlank"].metadata["public"]
+    # an interface method is public, but not in a package-private interface
+    assert syms["com.acme.shop.core.OrderService.Listener.onOrder"].metadata["public"] is False
+    assert "com.acme.shop.core.OrderService.State.label" in syms
+    assert not any(q.endswith(".NEW") or q.endswith("State.NEW.label") for q in syms)  # enum constant bodies
+    assert syms["com.acme.shop.core.OrderService"].end_line == 10
+
+
+def test_kotlin_functions_objects_and_multiplatform_imports(make_repo) -> None:
+    repo = make_repo(JAVA_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    assert ("com.acme.lib.Util", "com.acme.shop.core.Order") in imports  # Kotlin importing Java
+    assert ("com.acme.lib.Util", "org.jetbrains.kotlinx:kotlinx-coroutines-core") in imports  # by artifact words
+    use = imports[("com.acme.lib.Use", "com.acme.lib.Util")]  # Registry and VERSION: same package
+    assert use.metadata["same_package"] and set(use.metadata["imported_names"]) >= {"com.acme.lib.Registry"}
+    assert snap.find(path="lib/build.gradle.kts").category != "module"  # a build script is configuration
+    syms = {n.qualified_name: n for n in snap.symbols if n.language == "kotlin"}
+    assert (syms["com.acme.lib.shout(Int.)"].start_line, syms["com.acme.lib.shout(Int.)"].end_line) == (10, 10)
+    assert syms["com.acme.lib.formatOrder"].metadata["signature"] == "(o: Order): String"
+    assert syms["com.acme.lib.Registry.Companion.empty"].component_type == "method"
+    assert syms["com.acme.lib.Registry.size"].metadata["public"] is False  # internal
+    assert syms["com.acme.lib.Point"].end_line == 14 and syms["com.acme.lib.Use"].metadata["kind"] == "object"
+    assert snap.find(path="lib/src/main/kotlin/com/acme/lib/Util.kt").metadata["entry_kind"] == "kotlin main function"
+
+
+def test_jvm_parse_cache_round_trip(make_repo) -> None:
+    repo = make_repo(JAVA_APP)
+    first = Repository(repo.path).snapshot("HEAD")
+    again = Repository(repo.path).snapshot("HEAD")  # a new process reads the parse results from disk
+    assert sorted(e.id for e in first.dependency_edges) == sorted(e.id for e in again.dependency_edges)
+    assert sorted(n.id for n in first.symbols) == sorted(n.id for n in again.symbols)
+
+
 # --------------------------------------------------------------------------- pipeline
 
 
@@ -660,3 +836,13 @@ def test_whitespace_complexity_and_code_lines_for_other_languages() -> None:
     assert metrics.text_metrics(go, "go")["complexity"] == 1 + 2 + 1  # tabs are whole levels
     assert metrics.sloc(["x = 1", "", "   # note", "y = 2  # trailing"], "python") == 2
     assert metrics.bars(3) == "▮▮▮▯" and metrics.bars(0) == "▯▯▯▯"
+
+
+def test_jvm_package_roots_keep_sibling_libraries_external() -> None:
+    from repoviz.analyzers.jvm import _import_package, _roots
+
+    assert _roots({"com.google.common.base", "com.google.common.collect", "com.google.thirdparty.publicsuffix"}) == \
+        {"com.google.common", "com.google.thirdparty.publicsuffix"}  # com.google.errorprone stays external
+    assert _roots({"org.apache.commons.lang3", "org.apache.commons.lang3.builder"}) == {"org.apache.commons.lang3"}
+    assert _import_package("kotlinx.coroutines.launch", False) == "kotlinx.coroutines"  # a top-level function
+    assert _import_package("a.b.Outer.Inner", False) == "a.b" and _import_package("a.b", True) == "a.b"

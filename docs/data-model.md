@@ -53,7 +53,7 @@ language. Keys with `null` or empty values are omitted. `schema_version` is `1`.
 | `direct` | `false` for aggregated edges (`metadata.level`, `underlying_edges`, `underlying_count`) |
 | `cycle_ids` | cycles this edge participates in |
 | `confidence` | 0–1: 1.0 for resolved static imports, lower for dynamic imports, heuristic JS resolution, `self` calls… |
-| `metadata` | `type_checking_only`, `conditional_only`, `lazy_only`, `dynamic_only`, `test_only`, `external`, `imported_names`, `scope`, `spec`, `confirmed_by`, `via` (`sys.path`: resolved only through a `sys.path` edit) and `sys_path_edit` (its `file:line`) … |
+| `metadata` | `type_checking_only`, `conditional_only`, `lazy_only`, `dynamic_only`, `test_only`, `external`, `imported_names`, `scope`, `spec`, `confirmed_by`, `via` (`sys.path`: resolved only through a `sys.path` edit) and `sys_path_edit` (its `file:line`), `same_package` (Java / Kotlin: a type of the same package used without an import) … |
 
 ## Submodules
 
@@ -253,7 +253,8 @@ snapshot.** The live app asks `GET /api/owners` for names, which follows
 
 `path`, `start_line`, `end_line`, `construct` (`import`, `from-import`,
 `relative-from-import`, `dynamic-import`, `call`, `manifest-dependency`, `FROM`,
-`COPY`, `console-script` …), `analyzer`, optional `excerpt`.
+`COPY`, `console-script`; for Java and Kotlin `static-import`, `import-on-demand`,
+`same-package`, `qualified-name` …), `analyzer`, optional `excerpt`.
 
 When deciding whether evidence *changed*, only `(path, construct, normalized
 excerpt)` is compared: line numbers shift with every edit above them.
