@@ -214,8 +214,20 @@ show_authors = "live"   # the default: the live app only (a file's owners in its
 ```
 
 With the default, a static report contains no author name at all: not the
-owners, not the authors of the recent commits it lists, and not those of a
-review's commits.
+owners, not the authors of the recent commits it lists, not those of a
+review's commits, and not who added [standing guidance](#standing-guidance).
+
+## Standing guidance
+
+Guidance that outlives one review (`repoviz guidance`, or the *Guidance*
+section of the live app's details panel; see
+[review.md](review.md#standing-guidance)) is kept in
+`<state dir>/repos/<repository>/guidance.json`, next to the parse cache, with
+owner-only permissions. Every linked worktree of the repository shares it. It
+is never written into the repository: to keep it in version control, commit the
+output of `repoviz guidance export` (for example as a section of `AGENTS.md`)
+and load it elsewhere with `repoviz guidance import FILE`. At most 500 entries
+are active; a text is cut at 2,000 characters.
 
 ## Parse cache
 

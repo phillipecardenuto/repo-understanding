@@ -413,6 +413,7 @@ Credential-like values are always redacted in excerpts and diffs.
 | `overlap-symbol` | high | coordination | another worktree changes the same function, method or class (Python, JavaScript, TypeScript). Example: `Same code changed in another worktree — search is also changed by worktree wt-a (branch agent/a)` at `app/search.py:1`. See [Parallel agents](#parallel-agents-worktrees) |
 | `overlap-contract` | high | coordination | one worktree changes a function's signature while another one's new code calls it; reported on both sides. Example: `Calls a function another worktree is changing — worktree wt-a (branch agent/a) changes the signature of search (app/search.py) from (q, limit=10) to (q, *, limit=10, offset=0), and this wave calls it here` at `app/api.py:5` |
 | `overlap-file` | medium | coordination | another worktree changes the same file, but not the same definition (or in a language repoviz does not parse for definitions) |
+| `guidance-frozen-touched` | medium | scope | a file under standing guidance of kind *frozen* changed; one signal per entry and file. Example: `Frozen area changed — legacy/old.py is in an area the reviewers froze (legacy/): “scheduled for removal; do not extend”` at `legacy/old.py`, suggestion "Revert this change, or ask the reviewer to retire the guidance first." See [Standing guidance](#standing-guidance) |
 
 ### Coverage reports
 
@@ -916,7 +917,79 @@ Where notes are stored:
 Either way, **Copy prompt** or **Download .md** exports them.
 
 The prompt lists your notes first, then, optionally, untriaged signals at or
-above a chosen severity, and restates the allowed and protected scope.
+above a chosen severity, and restates the allowed and protected scope. When
+standing guidance covers a file with notes or signals, it ends with a reminder
+(see below).
+
+### Standing guidance
+
+A note belongs to one review. Some advice belongs to an area of the code and
+holds wave after wave: "`app/storage` must stay synchronous", "never call the
+ML containers from routes", "`legacy/` is frozen". Record it once as
+**standing guidance**:
+
+```bash
+repoviz guidance add component:storage "must stay synchronous"
+repoviz guidance add "path:legacy/" "scheduled for removal; do not extend" --kind frozen
+repoviz guidance add symbol:app.routes "never call the ML containers directly" --kind context
+repoviz guidance list                    # --all adds retired entries, --json for scripts
+repoviz guidance retire 3f9c2a1b7d40     # the id from list
+```
+
+- **Kinds.** *Rule* (book icon): follow it here. *Context* (speech bubble): good
+  to know. *Frozen* (lock icon, dashed outline): any change here raises
+  `guidance-frozen-touched` (medium, can be disabled like any signal).
+- **Selectors.** `component:<name>` (the component the review shows, or its id),
+  `path:<glob>` (same globs as the scope; a folder such as `legacy/` covers
+  everything in it) or `symbol:<qualified name>` (a module or package, or a class
+  or function and what is inside it). Without a prefix, text with `/` or a
+  wildcard is a path, a dotted name a symbol, and a bare word matches a
+  component, a top-level folder or a top-level module of that name.
+- **Where it shows.**
+  - The **details panel** of a component, folder, file or symbol has a
+    *Guidance* section with what covers it. In the live app you can add
+    (the selector is proposed from what you clicked), edit and retire there.
+  - On the AI Review tab, the **file card** of each file it covers shows it, and
+    **Standing guidance…** on the card adds one without leaving the review.
+  - The **feedback prompt** adds, for files that have notes or signals:
+    *Reminder for `app/storage`: must stay synchronous.* or *`legacy/` is
+    frozen: scheduled for removal.*
+  - `repoviz mcp` includes it in `architecture_overview`, and
+    `where_does_this_go` gives the guidance for a path before the agent edits it
+    (see [mcp.md](mcp.md)).
+- **History.** Retiring does not delete: an entry is valid from the commit it
+  was added at to the commit it was retired at, both included. A past wave
+  (`session:<id>`, a commit range) is reviewed with the guidance that was valid
+  at its end commit; the working tree and a running session use what is active
+  now.
+- **Export and import.** `repoviz guidance export` prints a Markdown section to
+  paste into `AGENTS.md` / `CLAUDE.md`, so agents read it *before* working
+  (`--format json` for tools). `repoviz guidance import FILE` loads either form
+  back, skipping entries already there, so a team can keep the list in version
+  control if it wants to. The Markdown looks like this:
+
+  ```markdown
+  <!-- repoviz guidance v1 -->
+  ## Architecture guidance
+
+  Standing guidance from code review (repoviz). Follow it when you change these areas.
+
+  ### `component:storage`
+
+  - **Rule:** must stay synchronous
+
+  ### `path:legacy/`
+
+  - **Frozen:** scheduled for removal; do not extend
+  ```
+
+- **Storage and privacy.** `guidance.json` in the repository's state directory
+  (shared by its worktrees, owner-only permissions), never in the repository.
+  Each entry records its author (`--author`, else Git `user.name`). Like commit
+  authors, names follow `[privacy] show_authors`: by default only the live app
+  shows them; with `true`, reports, `repoviz guidance list` and the JSON export
+  do too. Reviews, the prompt and MCP answers never carry them. Text is redacted
+  like notes. A static report shows the guidance read-only.
 
 ## The verdict and the gate
 

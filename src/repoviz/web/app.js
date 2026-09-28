@@ -83,6 +83,8 @@
     async impact(si, id) { return blastRadius(si, id, null, 200); }
     /* Author names are in a report only when it was built with [privacy] show_authors = true. */
     async owners() { return this.data.owners || { shown: false, owners: {} }; }
+    /* Standing guidance as it was when the report was built: read-only here. */
+    async guidance() { return this.data.guidance || { entries: [], writable: false }; }
     async comparison(id) {
       const c = this.data.comparisons.find((x) => x.id === id) || this.data.comparisons[0];
       return c;
@@ -145,6 +147,8 @@
     verdict(payload) { return this.post("/api/review/verdict", payload); }
     saveReviewed(key, reviewed) { return this.post("/api/review/reviewed", { key, reviewed }); }
     fleet(risk) { return this.get("/api/fleet" + (risk ? "?risk=1" : "")); }
+    guidance() { return this.get("/api/guidance"); }  // shared by every worktree of the repository
+    saveGuidance(payload) { return this.post("/api/guidance", payload); }
     owners() {  // once per worktree: the authors of each file (unless [privacy] show_authors = false)
       this.ownersBy = this.ownersBy || new Map();
       if (!this.ownersBy.has(this.worktree)) this.ownersBy.set(this.worktree, this.get("/api/owners").catch(() => ({ shown: false, owners: {} })));
@@ -1884,6 +1888,99 @@
     return [h("h4", { text: "Health" }), h("dl", { class: "kv health" }, rows)];
   }
 
+  /* Standing guidance (#20): notes on a component, a path or a qualified name that outlive one review.  The
+     matcher mirrors guidance.py; the live app adds, edits and retires entries, a static report only shows them. */
+  const GUIDANCE_KINDS = [["rule", "Rule"], ["context", "Context"], ["frozen", "Frozen"]];
+  const GUIDANCE_LABEL = Object.fromEntries(GUIDANCE_KINDS);
+  const GUIDANCE_ICON = { rule: "book", context: "comment", frozen: "lock" };
+  const GUIDANCE_FILE = /\.(py|pyi|js|jsx|mjs|cjs|ts|tsx|go|rs|java|kt|rb|php|c|h|cc|cpp|hpp|cs|swift|md|rst|txt|toml|json|ya?ml|cfg|ini|sh|sql|html|css|lock)$/i;
+  function parseSelector(text) {
+    const raw = String(text || "").trim();
+    for (const kind of ["component", "path", "symbol"]) if (raw.startsWith(kind + ":")) return [kind, raw.slice(kind.length + 1).trim()];
+    if (raw.includes("/") || /[*?[]/.test(raw) || GUIDANCE_FILE.test(raw)) return ["path", raw];
+    return [raw.includes(".") ? "symbol" : "name", raw];
+  }
+  const guidanceLabel = (sel) => { const [k, v] = parseSelector(sel); return k === "component" ? "component " + v : v; };
+  const underName = (name, prefix) => !!name && (name === prefix || name.startsWith(prefix + "."));
+  function guidanceMatches(selector, facts) {
+    const [kind, value] = parseSelector(selector);
+    if (!value) return false;
+    const path = facts.path || "", module = facts.module || "";
+    if (kind === "component") return value === facts.component || value === facts.component_id;
+    if (kind === "path") return (facts.paths || [path]).some((p) => p && globMatch(p, value));
+    if (kind === "symbol") return underName(module, value) || (facts.symbols || []).some((x) => underName(x, value));
+    return value === facts.component || (path.includes("/") && path.split("/")[0] === value) || module.split(".")[0] === value;
+  }
+  /* What a selector can match on a node: its path (a folder: also what is inside it), component, module and name. */
+  function nodeFacts(idx, n) {
+    let mod = n;
+    for (let i = 0; mod && mod.category === "symbol" && i < 64; i++) mod = idx.nodes.get(mod.parent_id);
+    const compId = hasTag(n, "component") ? n.id : meta(n).component_id, comp = compId ? idx.nodes.get(compId) : null;
+    const folder = n.category !== "module" && n.category !== "symbol", path = n.path || "";
+    return { path, paths: folder && path ? [path, path + "/\u2026"] : [path], component: comp ? comp.qualified_name : null,
+      component_id: compId || null, module: mod ? mod.qualified_name : null, symbols: n.category === "symbol" ? [n.qualified_name] : [] };
+  }
+  function defaultSelector(n) {
+    if (hasTag(n, "component") && n.component_type !== "repository") return "component:" + n.qualified_name;
+    if (n.category === "symbol") return "symbol:" + n.qualified_name;
+    if (n.category === "module") return "path:" + n.path;
+    return n.path ? `path:${n.path}/` : "";
+  }
+  /* One entry: kind (icon + word, never colour alone), text, what it applies to, since when, by whom. */
+  function guidanceItem(app, e, onChange) {
+    const status = h("span", { class: "faint small", role: "status" });
+    const li = h("li", { class: `guidance-item kind-${e.kind}${e.retired_at ? " retired" : ""}` },
+      h("div", null, iconEl(GUIDANCE_ICON[e.kind] || "book"), " ", pill(GUIDANCE_LABEL[e.kind] || e.kind, "guidance-" + e.kind), " ", h("span", { class: "guidance-text", text: e.text })),
+      h("div", { class: "faint small" }, "on ", h("span", { class: "mono", text: guidanceLabel(e.selector) }),
+        e.created_at ? ` · since ${e.created_at.slice(0, 10)}` : "", e.author ? ` · by ${e.author}` : "", e.retired_at ? ` · retired ${e.retired_at.slice(0, 10)}` : ""));
+    if (onChange && !e.retired_at) li.appendChild(h("div", { class: "group" },
+      h("button", { class: "btn small", type: "button", onclick: () => { $$(".guidance-form", li).forEach((x) => x.remove()); li.appendChild(guidanceForm(app, e, onChange)); } }, "✎ Edit"),
+      h("button", { class: "btn small", type: "button", title: "Stop applying it from now on (past reviews keep showing it)",
+        onclick: () => app.api.saveGuidance({ action: "retire", id: e.id }).then(onChange, (err) => { status.textContent = " " + err.message; }) }, "Retire"), status));
+    return li;
+  }
+  /* Add (entry without id: a collapsed "Add guidance" form) or edit an entry; onSaved gets the new list. */
+  function guidanceForm(app, entry, onSaved, summary) {
+    const editing = !!entry.id;
+    const sel = h("input", { type: "text", class: "mono", value: entry.selector || "", "aria-label": "Applies to",
+      placeholder: "component:<name>, path:<glob> or symbol:<qualified name>" });
+    const kind = select(GUIDANCE_KINDS, entry.kind || "rule", () => {});
+    kind.setAttribute("aria-label", "Kind");
+    const text = h("textarea", { rows: 2, "aria-label": "Guidance", placeholder: "e.g. must stay synchronous · never call the ML containers from routes · frozen: scheduled for removal" });
+    text.value = entry.text || "";
+    const status = h("span", { class: "faint small", role: "status" });
+    const save = () => {
+      status.textContent = " saving…";
+      app.api.saveGuidance({ action: editing ? "edit" : "add", id: entry.id, selector: sel.value, kind: kind.value, text: text.value })
+        .then((res) => { status.textContent = " saved"; onSaved(res); }, (err) => { status.textContent = " " + err.message; });
+    };
+    const body = h("div", { class: "note-form guidance-form" },
+      h("label", { class: "muted" }, "Applies to ", sel), h("label", { class: "muted" }, "Kind ", kind), text,
+      h("div", { class: "faint small", text: "Rule: to follow here · Context: good to know · Frozen: any change here is a signal. Shown on the file cards of later reviews and in the feedback prompt." }),
+      h("div", { class: "group" }, h("button", { class: "btn small primary", type: "button", onclick: save }, editing ? "Save" : "Add guidance"),
+        editing ? h("button", { class: "btn small", type: "button", onclick: () => body.remove() }, "Cancel") : null, status));
+    return editing ? body : h("details", { class: "guidance-add" }, h("summary", null, summary || "＋ Add guidance for this area…"), body);
+  }
+  /* The Guidance section of the details panel: what covers the node, retired entries folded away, and the form. */
+  function guidanceSection(app, idx, n) {
+    if (!app.api.guidance || hasTag(n, "external") || n.component_type === "repository") return null;
+    const box = h("div", { class: "guidance-section" }, h("h4", { text: "Guidance" }), h("div", { class: "faint", text: "loading…" }));
+    const draw = (res) => {
+      const facts = nodeFacts(idx, n), all = (res.entries || []).filter((e) => guidanceMatches(e.selector, facts));
+      const active = all.filter((e) => !e.retired_at), retired = all.filter((e) => e.retired_at);
+      box.innerHTML = "";
+      put(box, h("h4", null, `Guidance (${active.length}) `, h("span", { class: "faint", text: "— standing notes for this area, shown on later reviews" })),
+        active.length ? h("ul", { class: "plain guidance-list" }, active.map((e) => guidanceItem(app, e, res.writable ? draw : null)))
+          : h("div", { class: "faint", text: "No guidance covers this yet." }),
+        retired.length ? h("details", { class: "guidance-retired" }, h("summary", null, `${retired.length} retired (past reviews still show ${retired.length === 1 ? "it" : "them"})`),
+          h("ul", { class: "plain guidance-list" }, retired.map((e) => guidanceItem(app, e, null)))) : null,
+        res.writable ? guidanceForm(app, { selector: defaultSelector(n) }, draw)
+          : h("div", { class: "faint small", text: "Read-only in this report: add, edit and retire guidance in the live app (repoviz serve) or with repoviz guidance add." }));
+    };
+    app.api.guidance().then(draw, (err) => { box.lastChild.textContent = "Guidance unavailable: " + err.message; });
+    return box;
+  }
+
   /* Links that "why" explains with chains (import or call chains); other links carry their own evidence. */
   const WHY_RELS = new Set(["imports", "calls"]);
   class DetailsPanel {
@@ -1909,6 +2006,7 @@
         [h("dt", { text: "id" }), h("dd", { class: "mono faint", text: n.id })]));
       const hl = healthSection(this.app, n);
       if (hl) put(this.el, hl);
+      put(this.el, guidanceSection(this.app, idx, n));
       const m = metaTable(n.metadata);
       if (m) put(this.el, h("h4", { text: "Metadata" }), m);
       if (n.before && Object.keys(n.before).length) put(this.el, h("h4", { text: "Before" }), metaTable(n.before));
@@ -3579,7 +3677,9 @@
       this.loadedAt = Date.now();
       if (!r) { this.statusEl.textContent = ""; this.showEmpty("No review in this report", "There were no changes to review when this report was generated."); return; }
       // others_key: other worktrees' work, which shows as overlap signals here (live app)
-      const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope), (r.commits || {}).head || "", r.others_key || ""].join("|");
+      // and the standing guidance that applies (added, edited or retired since)
+      const sig = [r.target.key, r.base.revision_id, r.head.revision_id, JSON.stringify(r.scope), (r.commits || {}).head || "", r.others_key || "",
+        JSON.stringify((r.guidance || []).map((g) => [g.id, g.kind, g.text, g.selector]))].join("|");
       if (prev && prev.sig === sig) {
         if (JSON.stringify(r.verdict || null) !== JSON.stringify(this.verdict || null)) { this.verdict = r.verdict || null; this.drawVerdict(); }
         if (announce) this.statusEl.textContent = `${r.base.label} → ${r.head.label} · up to date`;
@@ -4245,9 +4345,21 @@
           f.risk.factors.length ? h("ul", { class: "plain" }, f.risk.factors.map((x) => h("li", null, h("span", { class: "mono", text: `+${x.points}` }), " " + x.text))) : null) : null,
         healthLine(f.health),
         h("div", { class: "muted", text: [f.previous_path ? "↦ moved from " + f.previous_path : null, f.component ? "component " + f.component : null, f.language, f.lines_added !== null && f.lines_added !== undefined ? `+${f.lines_added} −${f.lines_removed} lines` : null, f.config_kind ? "config: " + f.config_kind : null].filter(Boolean).join(" · ") }),
+        (f.guidance || []).length ? h("div", { class: "guidance-card" }, h("div", { class: "muted" }, iconEl("book"), " Standing guidance for this area ",
+          h("span", { class: "faint", text: "— from earlier reviews; it goes into the feedback prompt when this file has notes or signals" })),
+          h("ul", { class: "plain guidance-list" }, f.guidance.map((g) => h("li", { class: `guidance-item kind-${g.kind}` },
+            iconEl(GUIDANCE_ICON[g.kind] || "book"), " ", pill(GUIDANCE_LABEL[g.kind] || g.kind, "guidance-" + g.kind), " ", h("span", { class: "guidance-text", text: g.text }),
+            h("span", { class: "faint small" }, " · on ", h("span", { class: "mono", text: g.label })))))) : null,
         h("div", { class: "group actions" },
           h("button", { class: "btn small", onclick: () => this.addNote({ path: f.path, verdict: "should-not-touch", comment: `${f.path} should not have been modified in this task; revert it.` }) }, iconEl("lock"), " Should not be touched"),
           h("button", { class: "btn small", onclick: (ev) => this.noteForm(ev.target.closest(".actions"), { path: f.path }, "improve") }, "✎ Note on this file…"),
+          this.app.api.saveGuidance ? h("button", { class: "btn small", title: "A note that outlives this review: shown whenever later waves touch this area", onclick: (ev) => {
+            const row = ev.target.closest(".actions");
+            $$(".guidance-add", row.parentNode).forEach((x) => x.remove());
+            const form = guidanceForm(this.app, { selector: f.component ? "component:" + f.component : "path:" + f.path }, () => this.load(true), "Standing guidance");
+            form.open = true;
+            row.after(form);
+          } }, iconEl("book"), " Standing guidance…") : null,
           f.module_id && this.app.snapshotIndex.nodes.has(f.module_id) ? h("button", { class: "btn small", onclick: () => this.app.focusDependencies(f.module_id) }, "Show dependencies") : null));
       if (f.kind === "submodule") { this.drawSubmodule(f); return; }
       // Key changes: which functions / classes changed and how much, then constants and settings (before → after).
@@ -4569,6 +4681,7 @@
           "Key changes also list **values**: constants, settings-class defaults and configuration keys, before → after (`MAX_IMAGES: 20 → 200`). A safety setting switched the risky way (debug on, TLS verification off, a timeout removed, CORS `*`) carries a **⚠** pill and a *Safety setting weakened* signal. Secret-looking names show `•••`.",
           "**What kind of file it is.** Under the risk line, the card says what the file was *before* the change: **hotspot (top 5%)** (complex and often changed), **high fan-in (used by 42 modules)** or **single owner** (one author made all its recent commits: ask them). These feed the risk score's churn factor.",
           "**Coverage.** When a coverage report already exists (coverage.xml, lcov.info, coverage-final.json, cover.out, jacoco.xml…), the card says how many changed executable lines a test ran, and the diff marks them **●** (run) or **○** (not run). The header shows the wave's **patch coverage**. A report older than a file's last change cannot say, and the card asks you to re-run the tests with coverage (repoviz never runs them).",
+          "**Standing guidance for this area** appears on the card of a file that guidance covers (icon and word: Rule, Context, Frozen), so reviewers stop repeating themselves wave after wave. A **Frozen** area that changed also raises the signal *Frozen area changed*. **Standing guidance…** on the card adds one from here (live app); `repoviz guidance export` prints it all as a Markdown section for `AGENTS.md` / `CLAUDE.md`.",
           "**API changes.** A file that defines HTTP routes or background tasks, or reads environment variables, lists what changed in them: routes and tasks added or removed (with a task's parameters before → after), and variables it now reads or no longer reads. Signals follow them across services: a route removed while the frontend still calls it, a task whose `.delay()` callers pass the old arguments, a variable no Compose file, env file, Dockerfile or Kubernetes manifest sets.",
           "Click any diff line to leave a note on it. **✓ Reviewed & next** (or `m`) records your progress; a mark expires if the agent changes the file again.",
           "Submodules get their own card: commits between the old and new pointer, uncommitted edits, and the files changed inside, each reviewable like any other file. When the old or new commit is missing from the local clone (a shallow `git submodule update --depth 1`), the card gives the exact `git -C <submodule> fetch …` command to copy (repoviz never fetches). Nested submodules (a submodule's own submodules, up to 3 levels) appear by their full path, as their own component."] },
@@ -4581,6 +4694,7 @@
         { h: "6. Send feedback" },
         { ul: ["**Feedback for the agent** turns your notes into a numbered, `file:line`-referenced prompt grouped as Revert / Fix / Complete / Improve / Answer.",
           "Optionally include untriaged signals at or above a severity (the prompt then also lists the riskiest files, medium or high, to double-check), then **Copy prompt** or **Download .md**.",
+          "When a file with notes or signals is covered by standing guidance, the prompt ends with a reminder: *Reminder for `app/storage`: must stay synchronous.*",
           "In the live app, notes are saved in the state directory (shared with `repoviz review --format prompt`). In a static report they stay in your browser."] },
         { h: "7. Give a verdict" },
         { ul: ["The **Verdict** bar at the end of the tab closes the loop: **Approve**, **Request changes** or **Reject**, with an optional summary and your name. The verdict then shows as a banner at the top of the tab.",
@@ -4620,6 +4734,7 @@
           "**Show modules / files** and **symbols** add detail. **Churn hotspots** highlights files that change often in recent history, a good place to look for fragile code.",
           "**Colour by** (Structure and Dependencies) paints every node by one health metric: **hotspot** (complexity × churn, ranked: the complex files that keep changing), **churn** (recent commits), **complexity** (cyclomatic for Python, indentation-based *whitespace complexity* for other languages), **fan-in** (modules that import it) or **ownership** (the share of recent commits by one author). Each node's label shows the level as bars (`▮▮▮▯`) with its value, and the border thickens with the level, so it reads without colour; the legend lists the scale. A folder or component shows its files added up (its hottest file, for hotspots).",
           "Click a node for its **Health**: code lines, complexity and its worst function, fan-in / fan-out and instability, hotspot rank, recent commits with a sparkline over time (`▁▃█`), and how concentrated its ownership is. Author names appear only in the live app (never in a report unless `[privacy] show_authors = true`; never with `show_authors = false`). `repoviz metrics` lists the same in a terminal.",
+          "**Guidance** (in the details of a component, folder, file or symbol) holds standing notes that outlive one review: a **Rule** (book icon) to follow there, **Context** (speech bubble) that is good to know, or **Frozen** (lock icon, dashed outline): any change there is a signal. In the live app, **＋ Add guidance for this area** proposes a selector (`component:storage`, `path:legacy/`, `symbol:app.storage.save`) you can edit; **Edit** and **Retire** act on one entry. Retired guidance stays for the past reviews it applied to. A static report shows it read-only.",
           "**Click a hotspot** to see *what* keeps changing there: a **Code changes** panel opens under the graph with the file's last commits and the diff of the latest one, or of its uncommitted edits (every changed line has a `+` or `−` marker). Pick another commit to see its diff. **Esc** or **×** closes the panel; the graph keeps its zoom and selection. In the live app any other file has a **Show code changes** button in its details; a report includes the latest change of the busiest hotspots only.",
           "**The header chips** count what the repository holds, each apart: code components, services, submodules, external packages and entry points. Click one to open its view. `repoviz discover` prints the same numbers.",
           "**Git submodules** are separate repositories. When checked out, they are analyzed with the rest: a submodule is a group holding its own code (double-click to drill in). Its line shows the pinned commit, files and languages, `⬇ N behind` its remote (from the local remote-tracking branch: repoviz never fetches), `↦ moved` when it is checked out at another commit, and `✎ N uncommitted` for local edits. One that is not analyzed says why: not checked out, excluded in `[submodules]`, or too large. The **submodules** chip in the header opens the table of their states.",

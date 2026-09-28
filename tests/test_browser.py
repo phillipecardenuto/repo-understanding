@@ -1585,3 +1585,72 @@ def test_live_details_name_a_files_owners(page, make_repo) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_guidance_in_details_on_the_review_card_and_read_only_in_reports(page, make_repo, tmp_path: Path) -> None:
+    from test_review import GUIDED_APP
+
+    from repoviz import guidance
+
+    repo = make_repo(GUIDED_APP)
+    guidance.add(Repository(repo.path), "app/storage", "must stay synchronous", "rule", author="Rev")
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    details = "#tab-structure .split > .card"
+    try:
+        page.goto(f"http://127.0.0.1:{srv.server_address[1]}/#tab=structure")
+        page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+        page.check("#tab-structure label.check:has-text('modules / files') input")
+        page.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+        page.click(f"#tab-structure g.node[data-node-id='{page.evaluate(NODE_OF, 'app/storage/db.py')}']")
+        section = page.locator(f"{details} .guidance-section")
+        section.locator("h4:has-text('Guidance (1)')").wait_for(timeout=10_000)
+        assert "Rule must stay synchronous" in " ".join(section.inner_text().split())  # the kind in words
+        assert "on app/storage" in section.inner_text() and "by Rev" in section.inner_text()
+        # add one for this file: the form proposes the file's path
+        section.locator("summary:has-text('Add guidance')").click()
+        assert section.locator("input[aria-label='Applies to']").input_value() == "path:app/storage/db.py"
+        section.locator("select[aria-label='Kind']").select_option("frozen")
+        section.locator("textarea[aria-label='Guidance']").fill("frozen while the migration runs")
+        section.locator("button:has-text('Add guidance')").click()
+        section.locator("h4:has-text('Guidance (2)')").wait_for(timeout=10_000)
+        frozen = section.locator(".guidance-item.kind-frozen")
+        assert frozen.locator(".rvi-lock").count() == 1 and "Frozen" in frozen.inner_text()  # icon and word
+        # retire the rule: it folds away, still listed for past reviews
+        section.locator(".guidance-item.kind-rule button:has-text('Retire')").click()
+        section.locator("h4:has-text('Guidance (1)')").wait_for(timeout=10_000)
+        assert "1 retired" in section.inner_text()
+        # a later wave changes the file: its card shows the guidance, the frozen area raises a signal
+        repo.write({"app/storage/db.py": "def save(x):\n    return [x]\n"})
+        page.click("nav [data-tab='review']")
+        page.wait_for_selector("#tab-review .files-split table tbody tr", timeout=60_000)
+        page.click("#tab-review .files-split table tbody tr:has-text('app/storage/db.py')")
+        card = page.locator("#tab-review .guidance-card")
+        card.wait_for(timeout=10_000)
+        assert "frozen while the migration runs" in card.inner_text() and "must stay synchronous" not in card.inner_text()
+        assert "Frozen area changed" in page.inner_text("#tab-review")
+        # standing guidance straight from the card: the review reloads with it
+        page.click("#tab-review button:has-text('Standing guidance…')")
+        form = page.locator("#tab-review details.guidance-add[open]")
+        form.locator("textarea").fill("keep the return type")
+        form.locator("button:has-text('Add guidance')").click()
+        page.wait_for_function("() => (document.querySelector('#tab-review .guidance-card') || {}).textContent"
+                               ".includes('keep the return type')", timeout=30_000)
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    # a static report shows the same guidance, read-only
+    report = tmp_path / "guided.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    static = page  # another origin (file://): a fresh page load
+    static.goto(report.as_uri() + "#tab=structure")
+    static.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    static.check("#tab-structure label.check:has-text('modules / files') input")
+    static.wait_for_function(ALL_RENDERED, arg="structure", timeout=60_000)
+    static.click(f"#tab-structure g.node[data-node-id='{static.evaluate(NODE_OF, 'app/storage/db.py')}']")
+    section = static.locator(f"{details} .guidance-section")
+    section.locator("h4:has-text('Guidance (2)')").wait_for(timeout=10_000)
+    assert "Read-only in this report" in section.inner_text() and section.locator("button, summary:has-text('Add')").count() == 0
+    assert "by Rev" not in section.inner_text()  # no author names in a report by default
+    assert static.errors == []  # type: ignore[attr-defined]

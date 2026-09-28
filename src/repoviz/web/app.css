@@ -404,3 +404,17 @@ table.diff td.mk .cov.run { color: var(--added); }
 .fetch-hint { margin: 6px 0; }
 .fetch-hint .group { align-items: center; margin-top: 4px; }
 .fetch-hint code { overflow-wrap: anywhere; }
+
+/* Standing guidance (#20): the kind is an icon and a word; frozen also gets a heavier, dashed outline. */
+.guidance-list { margin: 4px 0; }
+.guidance-item { padding: 4px 0; border-bottom: 1px solid var(--border); }
+.guidance-item:last-child { border-bottom: 0; }
+.guidance-item.retired .guidance-text { text-decoration: line-through; color: var(--muted); }
+.pill.guidance-frozen { color: var(--modified); border-color: var(--modified); border-style: dashed; border-width: 2px; font-weight: 600; }
+.pill.guidance-rule { color: var(--accent); border-color: var(--accent); }
+.guidance-card { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.guidance-card:has(.kind-frozen) { border-left-style: dashed; border-left-color: var(--modified); }
+.guidance-form label { display: flex; gap: 6px; align-items: center; }
+.guidance-form input[type="text"] { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+.guidance-add > summary, .guidance-retired > summary { cursor: pointer; color: var(--accent); margin: 4px 0; }
+.guidance-retired > summary { color: var(--muted); }

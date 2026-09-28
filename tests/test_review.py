@@ -2147,3 +2147,82 @@ def test_file_cards_say_hotspot_high_fan_in_and_single_owner_and_feed_the_risk(m
     assert "complexity × churn hotspot (top 5%)" in factors["app/core.py"]["churn"]
     assert "single owner: one author made all 3 of the last 300 commits" in factors["app/solo.py"]["churn"]
     assert "Cy Solo" not in json.dumps(report)  # counts and shares only
+
+
+# ---------------------------------------------------------------- standing guidance (#20)
+
+GUIDED_APP = {"app/__init__.py": "", "app/storage/__init__.py": "", "app/storage/db.py": "def save(x):\n    return x\n",
+              "app/api.py": "from app.storage.db import save\n\n\ndef get():\n    return save(1)\n",
+              "legacy/old.py": "X = 1\n"}
+
+
+def test_guidance_shows_on_later_waves_their_prompt_and_frozen_areas(make_repo) -> None:
+    from repoviz import guidance
+
+    repo = make_repo(GUIDED_APP)
+    r = Repository(repo.path)
+    guidance.add(r, "app/storage", "must stay synchronous", "rule", author="Rev")
+    guidance.add(r, "legacy/", "legacy is frozen", "frozen")
+    guidance.add(r, "app.api", "routes never call the ML containers directly", "context")
+    old = guidance.add(r, "app/storage", "old advice", "rule")
+    guidance.retire(r, old["id"])
+    # a later wave touches two of these areas
+    repo.write({"app/storage/db.py": "def save(x):\n    print(x)\n    return x\n", "legacy/old.py": "X = 2\n"})
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    files = {f["path"]: f for f in report["files"]}
+    assert [(g["kind"], g["text"]) for g in files["app/storage/db.py"]["guidance"]] == [("rule", "must stay synchronous")]
+    frozen = [f for f in report["findings"] if f["kind"] == "guidance-frozen-touched"]
+    assert [(f["path"], f["severity"], f["category"]) for f in frozen] == [("legacy/old.py", "medium", "scope")]
+    assert "legacy is frozen" in frozen[0]["detail"]
+    prompt = feedback_markdown(report, [])
+    assert "- Reminder for `app/storage`: must stay synchronous" in prompt  # db.py has a signal (print)
+    assert "- `legacy/` is frozen: legacy is frozen" in prompt
+    assert "ML containers" not in prompt and "old advice" not in prompt  # app/api.py unchanged; retired
+    # the frozen signal can be turned off like any other
+    Path(repo.path, ".repoviz.toml").write_text('[review]\ndisabled_checks = ["guidance-frozen-touched"]\n')
+    r = Repository(repo.path)
+    assert not [f for f in build_review(r, resolve_target(r, "all"))["findings"] if f["kind"] == "guidance-frozen-touched"]
+
+
+def test_guidance_selectors_component_glob_and_qualified_name() -> None:
+    from repoviz import guidance
+
+    db = {"path": "app/storage/db.py", "component": "app", "component_id": "cmp_1", "module": "app.storage.db",
+          "symbols": ["app.storage.db.save"]}
+    assert guidance.normalize_selector("app/storage") == "path:app/storage"
+    assert guidance.normalize_selector("setup.py") == "path:setup.py"  # a file name, not a qualified name
+    assert guidance.normalize_selector("app.storage.db") == "symbol:app.storage.db"
+    hits = [s for s in ("app/storage", "app/**/*.py", "*.sql", "component:app", "component:cmp_1", "component:web",
+                        "app.storage", "symbol:app.storage.db.save", "symbol:app.storage.db.load", "app", "storage")
+            if guidance.matches(s, db)]
+    assert hits == ["app/storage", "app/**/*.py", "component:app", "component:cmp_1", "app.storage",
+                    "symbol:app.storage.db.save", "app"]
+    moved = {"path": "src/db.py", "previous_path": "app/storage/db.py"}
+    assert guidance.matches("app/storage", moved)  # moved out of the area: still its guidance
+
+
+def test_guidance_valid_at_the_time_of_a_past_wave(make_repo) -> None:
+    from repoviz import guidance
+
+    repo = make_repo({"app/a.py": "A = 0\n"})
+    shas = []
+    for i in range(1, 5):
+        if i == 3:
+            e = guidance.add(Repository(repo.path), "app/", "careful here")  # valid from the 2nd commit
+        if i == 4:
+            guidance.retire(Repository(repo.path), e["id"])  # valid until the 3rd one, included
+        repo.write({"app/a.py": f"A = {i}\n"})
+        shas.append(repo.commit(f"c{i}"))
+
+    def shown(spec: str) -> list[str]:
+        r = Repository(repo.path)
+        return [g["text"] for g in build_review(r, resolve_target(r, spec))["guidance"]]
+
+    assert shown(f"{shas[0]}..{shas[1]}") == ["careful here"]
+    assert shown(f"{shas[1]}..{shas[2]}") == ["careful here"]  # the wave that ended when it was retired
+    assert shown(f"{shas[2]}..{shas[3]}") == []  # after it was retired
+    first = repo.git("rev-list", "--max-parents=0", "HEAD").strip()
+    assert shown(f"{first}..{shas[0]}") == []  # before it was written
+    repo.write({"app/a.py": "A = 9\n"})
+    assert shown("all") == []  # now: retired

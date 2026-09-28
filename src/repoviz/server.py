@@ -313,6 +313,7 @@ class AppState:
 
     def review(self, query: dict[str, str]) -> bytes:
         from .coverage import reports_stamp
+        from .guidance import stamp as guidance_stamp
         from .review import build_review, resolve_target, scope_for
 
         try:
@@ -329,7 +330,8 @@ class AppState:
                    tuple(scope.allowed), tuple(scope.protected), tuple(scope.expected), self.repo.config.fingerprint(),
                    commit, others,
                    self.repo.git.head() if self.repo.git else None,  # commits and uncommitted work depend on HEAD
-                   reports_stamp(self.repo.root, self.repo.config))  # a re-run coverage report (usually git-ignored)
+                   reports_stamp(self.repo.root, self.repo.config),  # a re-run coverage report (usually git-ignored)
+                   guidance_stamp(self.repo))  # standing guidance added, edited or retired
             with self.cache_lock:
                 body = self._reviews.get(key)
             if body is None:
@@ -428,6 +430,34 @@ class AppState:
                                 max_items=_int(query.get("max_items"), 100, 500))
         except (QueryError, RepositoryError, GitError) as exc:
             raise ApiError(400, str(exc)) from exc
+
+    def guidance(self) -> dict[str, Any]:
+        """Standing guidance (guidance.py): every entry, retired ones included (they explain past waves)."""
+        from . import guidance
+
+        return {"entries": guidance.shown(self.repo, guidance.load(self.repo), "live"), "kinds": list(guidance.KINDS),
+                "writable": True}
+
+    def save_guidance(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Add, edit or retire one entry: ``{action, id?, selector?, text?, kind?}``."""
+        from . import guidance
+
+        action = body.get("action")
+        try:
+            with (self.parent or self).write_lock:  # one file for every worktree of the repository
+                if action == "add":
+                    entry = guidance.add(self.repo, body.get("selector"), body.get("text"), body.get("kind") or "rule",
+                                         author=str(body.get("author") or ""))
+                elif action == "edit":
+                    entry = guidance.edit(self.repo, str(body.get("id") or ""), selector=body.get("selector"),
+                                          text=body.get("text"), kind=body.get("kind"))
+                elif action == "retire":
+                    entry = guidance.retire(self.repo, str(body.get("id") or ""))
+                else:
+                    raise ApiError(400, "action must be add, edit or retire")
+        except guidance.GuidanceError as exc:
+            raise ApiError(400, str(exc)) from exc
+        return {"entry": guidance.shown(self.repo, [entry], "live")[0], **self.guidance()}
 
     def notes(self, query: dict[str, str]) -> dict[str, Any]:
         key = query.get("key") or ""
@@ -609,6 +639,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, st.comparisons())
                 elif path == "/api/owners":
                     self._json(200, st.owners())
+                elif path == "/api/guidance":
+                    self._json(200, st.guidance())
                 elif path == "/api/path":
                     self._json(200, st.why(self._query()))
                 elif path == "/api/impact":
@@ -661,6 +693,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, st.save_scope(body))
                 elif path == "/api/plan/parse":
                     self._json(200, st.parse_plan(body))
+                elif path == "/api/guidance":
+                    self._json(200, st.save_guidance(body))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:

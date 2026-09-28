@@ -1024,3 +1024,86 @@ def test_author_names_stay_out_of_reports_unless_asked_and_metrics_cli(make_repo
     assert main(["metrics", "-C", repo.path, "--authors", "--json", "--sort", "churn"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["rows"][0]["path"] == "app/core.py" and out["rows"][0]["owners"][0] == ["Ana Quillfeather", 5]
+
+
+def test_guidance_api_cli_export_import_and_read_only_report(make_repo, capsys, monkeypatch) -> None:
+    from test_review import GUIDED_APP
+
+    from repoviz import guidance
+
+    repo = make_repo(GUIDED_APP)
+    r = Repository(repo.path)
+    srv = create_server(r, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        add = {"action": "add", "selector": "component:storage", "text": "must stay  synchronous", "kind": "rule",
+               "author": "Rev Quillfeather"}
+        assert request(srv, "POST", "/api/guidance", body=add, headers={})[0] == 403  # no X-Repoviz header
+        assert request(srv, "GET", "/api/guidance", headers={})[0] == 403
+        status, _, body = request(srv, "POST", "/api/guidance", body=add)
+        res = json.loads(body)
+        assert status == 200 and res["writable"] and res["entry"]["text"] == "must stay synchronous"
+        assert res["entry"]["author"] == "Rev Quillfeather"  # the live app names authors by default
+        gid = res["entry"]["id"]
+        status, _, body = request(srv, "POST", "/api/guidance",
+                                  body={"action": "add", "selector": "legacy/", "text": "frozen", "kind": "frozen"})
+        assert status == 200 and json.loads(body)["entry"]["selector"] == "path:legacy/"
+        status, _, body = request(srv, "POST", "/api/guidance", body={"action": "edit", "id": gid, "text": "sync only"})
+        assert status == 200 and json.loads(body)["entry"]["text"] == "sync only"
+        for bad in ({"action": "add", "selector": "", "text": "x"}, {"action": "add", "selector": "a", "text": " "},
+                    {"action": "add", "selector": "a", "text": "x", "kind": "law"}, {"action": "retire", "id": "nope"},
+                    {"action": "drop"}):
+            status, _, body = request(srv, "POST", "/api/guidance", body=bad)
+            assert status == 400 and json.loads(body)["error"], bad
+        status, _, body = request(srv, "POST", "/api/guidance", body={"action": "retire", "id": gid})
+        entries = json.loads(body)["entries"]
+        assert status == 200 and [bool(e.get("retired_at")) for e in entries] == [True, False]
+        status, _, body = request(srv, "POST", "/api/guidance", body={"action": "edit", "id": gid, "text": "again"})
+        assert status == 400  # retired guidance stays as it was
+        status, _, body = request(srv, "GET", "/api/guidance")
+        assert status == 200 and len(json.loads(body)["entries"]) == 2  # retired entries too (past waves)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    store = Path(r.parse_cache_dir) / guidance.FILE_NAME
+    assert store.stat().st_mode & 0o077 == 0  # owner-only, in the state directory
+    assert not list(Path(repo.path).rglob("guidance.json"))  # never in the repository
+    # the static report shows it read-only, without author names unless [privacy] show_authors = true
+    bundle = build_bundle(Repository(repo.path), include_reviews=False)
+    assert bundle["guidance"]["writable"] is False and len(bundle["guidance"]["entries"]) == 2
+    assert "Quillfeather" not in render_static_html(bundle)
+    # CLI: export, then import into another repository, round-trips (and a second import adds nothing)
+    assert main(["guidance", "-C", repo.path, "add", "symbol:app.api.get", "keep", "it", "thin"]) == 0
+    assert main(["guidance", "-C", repo.path, "list"]) == 0
+    out = capsys.readouterr().out
+    assert "[Rule] app.api.get: keep it thin" in out and "sync only" not in out  # retired: only with --all
+    assert main(["guidance", "-C", repo.path, "list", "--all", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)["entries"]
+    assert len(listed) == 3 and not any("author" in e for e in listed)  # CLI output follows the report rule
+    md = Path(repo.path).parent / "guidance.md"
+    assert main(["guidance", "-C", repo.path, "export", "-o", str(md)]) == 0
+    text = md.read_text()
+    assert text.startswith(guidance.MARKER) and "### `path:legacy/`" in text and "- **Frozen:** frozen" in text
+    assert "sync only" not in text  # retired entries are not exported
+    other = make_repo(GUIDED_APP)
+    assert main(["guidance", "-C", other.path, "import", str(md)]) == 0
+    assert "imported 2 entries" in capsys.readouterr().err
+    assert main(["guidance", "-C", other.path, "import", str(md)]) == 0
+    assert "imported 0 entries, 2 already there" in capsys.readouterr().err
+    assert main(["guidance", "-C", other.path, "export"]) == 0
+    assert capsys.readouterr().out == text  # the same section
+    assert main(["guidance", "-C", other.path, "export", "--format", "json"]) == 0
+    exported = json.loads(capsys.readouterr().out)
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("not guidance"))
+    assert main(["guidance", "-C", other.path, "import", "-"]) == 1  # neither the Markdown nor the JSON form
+    assert "no guidance found" in capsys.readouterr().err
+    third = make_repo(GUIDED_APP)
+    jf = Path(third.path).parent / "g.json"
+    jf.write_text(json.dumps(exported))
+    assert main(["guidance", "-C", third.path, "import", str(jf)]) == 0
+    assert sorted((e["selector"], e["kind"], e["text"]) for e in guidance.load(Repository(third.path))) == \
+        sorted((e["selector"], e["kind"], e["text"]) for e in exported["entries"])
+    assert main(["guidance", "-C", third.path, "add", "only-a-selector"]) == 2
+    assert main(["guidance", "-C", third.path, "retire", "nope"]) == 1

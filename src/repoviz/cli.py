@@ -17,6 +17,7 @@ Examples::
     repoviz gate                          # before a push: exit 3 unless a fresh verdict approves the work
     repoviz fleet                         # parallel agents: every worktree, and where their work overlaps
     repoviz metrics --sort hotspot        # code health: complexity × churn hotspots, fan-in, ownership
+    repoviz guidance add component:storage "must stay synchronous"   # standing guidance for later waves
     repoviz activity
     repoviz why app.routes app.db         # which imports make the routes depend on the database?
     repoviz impact app.services.images.list_images   # what may break if it changes
@@ -974,6 +975,77 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_guidance(args: argparse.Namespace) -> int:
+    """``repoviz guidance``: standing guidance on components, paths and qualified names (list, add, edit, retire,
+    export, import).  It lives in the state directory, never in the repository."""
+    from . import guidance
+
+    repo = _open(args)
+    rest = list(args.args)
+    try:
+        if args.action == "list":
+            entries = [e for e in guidance.load(repo) if args.all or not e.get("retired_at")]
+            entries = guidance.shown(repo, entries, "report")
+            _write(json.dumps({"entries": entries}, indent=1) if args.json else format_guidance_text(entries),
+                   args.output)
+        elif args.action == "add":
+            if len(rest) < 2:
+                print("repoviz: usage: repoviz guidance add SELECTOR TEXT [--kind rule|context|frozen]",
+                      file=sys.stderr)
+                return EXIT_USAGE
+            entry = guidance.add(repo, rest[0], " ".join(rest[1:]), args.kind or "rule", author=args.author)
+            print(f"added {entry['id']}: {guidance.KIND_LABEL[entry['kind']].lower()} for "
+                  f"{guidance.label_of(entry['selector'])}", file=sys.stderr)
+        elif args.action in ("edit", "retire"):
+            if len(rest) != 1 or args.action == "edit" and all(
+                    v is None for v in (args.selector, args.text, args.kind)):
+                print(f"repoviz: usage: repoviz guidance {args.action} ID"
+                      + (" [--selector S] [--text T] [--kind K]" if args.action == "edit" else ""), file=sys.stderr)
+                return EXIT_USAGE
+            if args.action == "retire":
+                entry = guidance.retire(repo, rest[0])
+            else:
+                entry = guidance.edit(repo, rest[0], selector=args.selector, text=args.text, kind=args.kind)
+            print(f"{'edited' if args.action == 'edit' else 'retired'} {entry['id']}", file=sys.stderr)
+        elif args.action == "export":
+            entries = guidance.load(repo)
+            if args.format == "json":  # author names only where [privacy] show_authors = true
+                _write(json.dumps({"version": 1, "entries": guidance.shown(repo, entries, "report")}, indent=1),
+                       args.output)
+            else:
+                _write(guidance.export_markdown(entries), args.output)
+        else:  # import
+            if len(rest) != 1:
+                print("repoviz: usage: repoviz guidance import FILE (- reads stdin)", file=sys.stderr)
+                return EXIT_USAGE
+            try:
+                text = sys.stdin.read() if rest[0] == "-" else Path(rest[0]).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                print(f"repoviz: cannot read {rest[0]}: {exc}", file=sys.stderr)
+                return EXIT_ERROR
+            res = guidance.import_entries(repo, text, author=args.author)
+            print(f"imported {res['added']} entr{'y' if res['added'] == 1 else 'ies'}"
+                  + (f", {res['skipped']} already there or retired" if res["skipped"] else ""), file=sys.stderr)
+    except guidance.GuidanceError as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def format_guidance_text(entries: list[dict[str, Any]]) -> str:
+    from .guidance import KIND_LABEL, label_of
+
+    if not entries:
+        return "No standing guidance. Add some with `repoviz guidance add SELECTOR TEXT` (or in the live app).\n"
+    out = [f"Standing guidance ({len(entries)}):"]
+    for e in entries:
+        state = f"retired {e['retired_at'][:10]}" if e.get("retired_at") else f"since {str(e.get('created_at'))[:10]}"
+        by = f", by {e['author']}" if e.get("author") else ""
+        out.append(f"  {e['id']}  [{KIND_LABEL.get(e.get('kind'), e.get('kind'))}] {label_of(e['selector'])}: "
+                   f"{e['text']}  ({state}{by})")
+    return "\n".join(out) + "\n"
+
+
 def format_review_markdown(report: dict[str, Any]) -> str:
     s = report["summary"]
     lines = [f"### AI change review: {report['target']['label']}", "",
@@ -1272,6 +1344,24 @@ def build_parser() -> argparse.ArgumentParser:
                    "(only when [privacy] show_authors = true)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_metrics)
+
+    p = sub.add_parser("guidance", parents=[common],
+                       help="standing guidance on components, paths or qualified names: shown on later reviews, in "
+                       "the feedback prompt and, for frozen areas, as a signal (kept in the state directory)")
+    p.add_argument("action", choices=("list", "add", "edit", "retire", "export", "import"), nargs="?", default="list")
+    p.add_argument("args", nargs="*", metavar="ARG",
+                   help="add: SELECTOR TEXT (component:<name>, path:<glob> or symbol:<qualified name>); edit, "
+                   "retire: ID; import: FILE (- reads stdin)")
+    p.add_argument("--kind", choices=("rule", "context", "frozen"),
+                   help="add, edit: rule (the default), context, or frozen (changing the area is a signal)")
+    p.add_argument("--selector", help="edit: the new selector")
+    p.add_argument("--text", help="edit: the new text")
+    p.add_argument("--author", default="", help="add, import: who gives the guidance (default: Git user.name)")
+    p.add_argument("--all", action="store_true", help="list: include retired entries")
+    p.add_argument("--format", choices=("md", "json"), default="md",
+                   help="export: a Markdown section for AGENTS.md / CLAUDE.md (default), or JSON")
+    p.add_argument("--json", action="store_true", help="list: machine-readable output")
+    p.set_defaults(func=cmd_guidance)
 
     p = sub.add_parser("gate", parents=[common],
                        help="exit 3 unless a fresh verdict approves the review (run it before a push: pre-push hook, "

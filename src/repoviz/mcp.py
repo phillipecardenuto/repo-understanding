@@ -77,14 +77,16 @@ TOOLS: dict[str, dict[str, Any]] = {
     "architecture_overview": {
         "title": "Architecture overview",
         "description": "The repository at a glance: languages, projects, components and the imports between them, "
-                       "entry points, the architecture contracts (layers…) and whether they pass, import cycles.",
+                       "entry points, the architecture contracts (layers…) and whether they pass, import cycles, "
+                       "and the reviewers' standing guidance (rules, context, frozen areas).",
         "inputSchema": {"type": "object", "properties": {"max_items": _items()}},
     },
     "where_does_this_go": {
         "title": "Where does this go?",
         "description": "Where a file, directory or symbol sits (or would sit, for a new file): component, project, "
                        "layer and what that layer may and may not import, the contracts that apply, the scope "
-                       "verdict (allowed, protected, out of scope) and whether it is a test or an entry point.",
+                       "verdict (allowed, protected, out of scope), the reviewers' standing guidance for it (frozen "
+                       "means do not edit) and whether it is a test or an entry point.",
         "inputSchema": {"type": "object", "properties": {"target": _TARGET}, "required": ["target"]},
     },
     "impact": {
@@ -557,6 +559,9 @@ class McpServer:
         }
         if contracts is None:
             data["contracts_note"] = "no contracts configured ([[contracts]] in .repoviz.toml)"
+        standing = self._guidance()
+        if standing:  # what the reviewers want kept in mind in these areas (repoviz guidance)
+            data["guidance"] = [{"selector": e["selector"], "kind": e["kind"], "text": e["text"]} for e in standing][:k]
         failing = sum(1 for c in data["contracts"] if c["status"] == "fail")
         summary = (f"{data['repository']['name']}: {len(comps)} components, {len(snap.modules)} modules"
                    + (f", languages {', '.join(str(lang['language']) for lang in data['repository']['languages'][:3])}"
@@ -564,6 +569,12 @@ class McpServer:
                    + (f"; {len(data['contracts'])} contracts, {failing} failing" if data["contracts"] else "")
                    + (f"; {data['import_cycles']} import cycles" if data["import_cycles"] else "") + ".")
         return summary, data
+
+    def _guidance(self) -> list[dict[str, Any]]:
+        """Active standing guidance (guidance.py), without author names."""
+        from . import guidance
+
+        return [e for e in guidance.load(self.repo) if not e.get("retired_at")]
 
     def where_does_this_go(self, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         from .review import _first_match, _sensitive_kind
@@ -613,12 +624,25 @@ class McpServer:
         }
         if new:
             data["note"] = "new file: placed by its directory" + (f" ({anchor.path or '.'})" if anchor else "")
+        from .guidance import matches
+
+        folder = not new and node is not None and node.category not in (CATEGORY_MODULE, CATEGORY_SYMBOL)
+        facts = {"path": path, "paths": [path, f"{path}/\u2026"] if folder and path else None,  # a folder: inside too
+                 "component": data["component"], "component_id": comp.id if comp is not None else None,
+                 "module": qname, "symbols": [node.qualified_name] if node is not None and
+                 node.category == CATEGORY_SYMBOL else []}
+        rules_here = [{"selector": e["selector"], "kind": e["kind"], "text": e["text"]} for e in self._guidance()
+                      if matches(e["selector"], facts)][:MAX_ITEMS]
+        if rules_here:
+            data["guidance"] = rules_here
         parts = [f"{path or text}" + (" (new file)" if new else ""),
                  f"component {data['component']}" if data["component"] else "no component",
                  f"layer {layer['layer']!r}" if layer else None,
                  {"protected": "PROTECTED: do not edit", "out-of-scope": "out of scope: ask before editing",
                   "allowed": "in scope", "unscoped": None}[verdict],
-                 f"{len(rules)} contract rule(s)" if rules else None]
+                 f"{len(rules)} contract rule(s)" if rules else None,
+                 ("FROZEN: do not edit" if any(g["kind"] == "frozen" for g in rules_here) else
+                  f"{len(rules_here)} guidance note(s)") if rules_here else None]
         return "; ".join(p for p in parts if p) + ".", data
 
     def impact(self, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:

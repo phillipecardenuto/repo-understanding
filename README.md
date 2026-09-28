@@ -23,6 +23,7 @@ implementation waves, and for understanding any codebase. It answers questions l
 | What are the key changes in a module, and do they look right? | **AI Review** → change cards (symbols, signatures, values, diff) |
 | What should I tell the agent to fix, complete or revert? | **AI Review** → notes → feedback prompt, `repoviz review --format prompt` |
 | Has a human approved this wave? May the agent push? | **AI Review** → verdict, `repoviz review --wait`, `repoviz gate` |
+| How do I stop repeating the same advice wave after wave ("`app/storage` stays synchronous", "`legacy/` is frozen")? | a node's **Guidance** (live app), the file card, `repoviz guidance` |
 | Several agents in parallel worktrees: what is each doing, and where do they clash? | **Activity & Flow** → Parallel agents, header **Worktree** picker, `repoviz fleet` |
 | Did a change break another service: a route still called, a task's callers, an unset environment variable? | **AI Review** → signals and the card's *API changes*, **Dependencies** → API lines |
 | What modules, packages, components and services exist? How are they organised? | **Structure** tab, `repoviz discover` |
@@ -68,6 +69,7 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz review [TARGET] [--format text\|markdown\|prompt\|json\|sarif\|github\|pr-comment] [--fail-on …] [--commit SHA] [--by-commit] [--from-report FILE]` | Review agent work: current session, past wave (`session:<id>`), `branch`, `last-commit` or any range. `--commit` reviews one of its commits alone; `--by-commit` groups the text output by commit. `sarif`, `github` (inline annotations) and `pr-comment` are for CI; `--from-report` re-renders a saved JSON report without analysing again. |
 | `repoviz review --wait [--open] [--timeout 30m] [--format json]` | For agents: block until the reviewer submits a verdict in the live app, then print it with the notes and the feedback prompt. Exit 0 approve, 2 request changes, 3 reject, 4 timeout. |
 | `repoviz fleet [--json] [--risk]` | Parallel agents: every Git worktree of the repository (branch, commits ahead, uncommitted files, session, verdict, optionally risk) and where their work overlaps: the same symbol, a changed signature the other one calls, the same file. |
+| `repoviz guidance [list\|add SELECTOR TEXT\|edit ID\|retire ID\|export\|import FILE] [--kind rule\|context\|frozen]` | Standing guidance on a component, path or qualified name: shown on the file cards of later reviews and in their feedback prompt; `frozen` areas raise a signal when changed. `export` prints a Markdown section for `AGENTS.md` / `CLAUDE.md` (`--format json` too); `import` loads it back. |
 | `repoviz metrics [--sort hotspot] [--by component] [--json]` | Code health, top first: code lines, complexity (cyclomatic for Python, whitespace for other languages), fan-in / fan-out, complexity × churn hotspots and ownership (counts only; `--authors` prints names when `[privacy] show_authors = true`). |
 | `repoviz gate [TARGET] [--require approve\|any] [--require-all-reviewed] [--max-open SEVERITY] [--json] [--hook-input]` | Before a push: exit 3 unless a fresh verdict approves the work (and, optionally, every file is marked reviewed and no signal is left without a note). `--hook-input` makes it a Claude Code `PreToolUse` hook that blocks `git push`. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
@@ -476,6 +478,32 @@ repoviz fleet --risk     # also each wave's risk (slower: it reviews every workt
 - **Speed.** Five worktrees of a Flask-sized repository take about 0.4 s.
 
 See [docs/review.md](docs/review.md#parallel-agents-worktrees).
+
+### Standing guidance
+
+Some advice outlives a wave. Record it once, on a component, a path or a
+qualified name, and every later review of that area shows it:
+
+```bash
+repoviz guidance add component:storage "must stay synchronous"
+repoviz guidance add "path:legacy/" "scheduled for removal" --kind frozen
+repoviz guidance export >> AGENTS.md    # a Markdown section agents read before they work
+```
+
+- **Where it shows.** The file card of each changed file it covers, the
+  feedback prompt ("Reminder for `app/storage`: must stay synchronous.") when
+  that file has notes or signals, and the MCP tools `architecture_overview` and
+  `where_does_this_go`.
+- **Frozen areas.** A change under `--kind frozen` guidance raises
+  `guidance-frozen-touched` (medium).
+- **In the live app**, the details panel of a component, folder, file or symbol
+  has a *Guidance* section to add, edit and retire entries, and a review's file
+  card has **Standing guidance…**. A static report shows them read-only.
+- **History.** Retiring keeps the entry: a past wave is reviewed with the
+  guidance that was valid then. It is stored in the state directory, never in
+  the repository; `repoviz guidance import FILE` loads an export back.
+
+See [docs/review.md](docs/review.md#standing-guidance).
 
 ### Let the agent ask first: the MCP server
 

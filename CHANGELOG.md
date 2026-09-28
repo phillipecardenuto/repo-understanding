@@ -6,6 +6,29 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Standing guidance that persists across waves** ([#20](https://github.com/phillipecardenuto/repo-understanding/issues/20)).
+  - `repoviz guidance add SELECTOR TEXT [--kind rule|context|frozen]` records
+    advice on a component (`component:storage`), a path glob
+    (`path:legacy/`) or a qualified name (`symbol:app.storage.save`);
+    `list`, `edit`, `retire`, `export` and `import` manage it. It lives in
+    `guidance.json` in the state directory (shared by worktrees, owner-only),
+    never in the repository.
+  - Later reviews show it on the file card of every changed file it covers,
+    and the feedback prompt adds "Reminder for `app/storage`: must stay
+    synchronous." when such a file has notes or signals. A change under
+    `frozen` guidance raises the new signal `guidance-frozen-touched`
+    (medium, can be disabled).
+  - Retiring keeps the entry with the commit it ended at: a past wave is
+    reviewed with the guidance that was valid at its end.
+  - `repoviz guidance export` prints a Markdown section for `AGENTS.md` /
+    `CLAUDE.md` (or JSON); `import` loads either back without duplicates.
+  - Live app: a *Guidance* section in the details panel (add with a proposed
+    selector, edit, retire; kinds as icon and word) and **Standing guidance…**
+    on a review's file card. `POST /api/guidance` is guarded like every other
+    write. A static report shows guidance read-only, without author names by
+    default (`[privacy] show_authors`).
+  - `repoviz mcp`: `architecture_overview` lists the active guidance and
+    `where_does_this_go` gives the guidance for a path (`FROZEN: do not edit`).
 - **Submodule edge cases: the exact fetch for missing history, and nested submodules** ([#15](https://github.com/phillipecardenuto/repo-understanding/issues/15)).
   - When an update's old or new commit is missing from a submodule's clone
     (a shallow `git submodule update --depth 1`), the review says which one

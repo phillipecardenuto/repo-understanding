@@ -375,6 +375,7 @@ Server endpoints:
 | `GET /api/file/changes?path=[&commit=SHA\|WORKTREE]` | one file's last commits (newest first) and the diff of one of them (by default its uncommitted edits, else its latest commit); used by the Structure tab's *Code changes* drawer |
 | `GET /api/fleet[?risk=1]` | parallel agents (`fleet.py`): every worktree of the repository and the overlaps between their waves |
 | `GET /api/review/targets`, `/api/review?id=\|base=&target=[&mode=merge-base\|exact][&commit=SHA\|WORKTREE]`, `/api/review/notes?key=` | AI review (`mode`: since the two diverged, or the exact difference; `commit`: one step of the range, reviewed alone) |
+| `GET /api/guidance`, `POST /api/guidance` (`{action: add\|edit\|retire, id?, selector?, text?, kind?}`) | standing guidance (`guidance.py`): every entry, retired ones included; one file for all the worktrees, written under the server's first write lock |
 | `POST /api/session/start`, `/api/session/end`, `/api/session/scope`, `/api/session/checkpoint`, `/api/plan/parse`, `/api/review/notes`, `/api/review/verdict`, `/api/review/reviewed` | state changes (`/api/plan/parse` only reads); the review (`GET /api/review`) carries the verdict, with `stale`, and the reviewed marks |
 
 Every `/api/*` request may carry `X-Repoviz-Worktree: <URL-encoded path>`, the

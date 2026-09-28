@@ -245,6 +245,18 @@ class Git:
         except GitError:
             return None
 
+    def is_ancestor(self, a: str, b: str) -> bool | None:
+        """Whether commit ``a`` is ``b`` or one of its ancestors; ``None`` when Git cannot tell (missing objects,
+        not a commit id)."""
+        if not (_SHA.fullmatch(a or "") and _SHA.fullmatch(b or "")):
+            return None
+        try:
+            proc = subprocess.run(["git", *self.safe_config, "merge-base", "--is-ancestor", a, b], cwd=self.root,
+                                  env=_env(), capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return True if proc.returncode == 0 else False if proc.returncode == 1 else None
+
     def close(self) -> None:
         self._blobs.close()
 

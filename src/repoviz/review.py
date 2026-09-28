@@ -772,6 +772,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         _overlap_findings(add, repo, changed_set, component_of)
     if not set(API_KINDS) <= disabled:
         _api_findings(add, base_snap, target_snap, changed_set, component_of)
+    guidance_report = _guidance_findings(add, repo, target_src, files, path_to_node)
     coupling = _coupling_for(repo, target)
     if coupling is not None:
         # One commit alone: the companion may be in another commit of the wave, so only mark partners as changed.
@@ -841,6 +842,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "files": files,
         "plan": plan_report,
         "coverage": coverage_report,
+        "guidance": guidance_report,
         "findings": [f.to_dict() for f in findings],
         "flow": flow.to_dict(),
         "new_dependencies": diff.new_dependencies,
@@ -1393,6 +1395,50 @@ def _changes(o: dict[str, Any]) -> str:
     from .fleet import short_signatures
 
     return short_signatures(o)
+
+
+def _reviewed_sha(src: Any) -> str | None:
+    """The commit a reviewed state stands for, when it is a past one (a commit, a finished session's end);
+    ``None`` for the working tree, the index or a running session: now."""
+    if getattr(src, "kind", None) == "commit":
+        return getattr(src, "sha", None)
+    if getattr(src, "kind", None) == "session-end":
+        return getattr(getattr(src, "base", None), "sha", None)
+    return None
+
+
+def _guidance_findings(add: Any, repo: "Repository", target_src: Any, files: list[dict[str, Any]],
+                       path_to_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Standing guidance (guidance.py) valid for the reviewed state: on the file cards of the files it covers,
+    ``guidance-frozen-touched`` for a frozen area, and the list the feedback prompt reminds of."""
+    from . import guidance
+
+    entries = guidance.load(repo)
+    if not entries:
+        return []
+    valid = guidance.valid_at(repo, entries, _reviewed_sha(target_src))
+    if not valid:
+        return []
+    facts = []
+    for entry in files:
+        node = path_to_node.get(entry["path"])
+        facts.append({"path": entry["path"], "previous_path": entry.get("previous_path"),
+                      "component": entry.get("component"), "component_id": entry.get("component_id"),
+                      "module": node.qualified_name if node is not None and node.category == CATEGORY_MODULE else None,
+                      "symbols": [x.get("qualified_name") for x in entry.get("symbols") or []]})
+    report = guidance.for_review(valid, facts)
+    by_path = {f["path"]: f for f in files}
+    for g in report:
+        shown = {k: g[k] for k in ("id", "kind", "text", "selector", "label")}
+        for path in g["files"]:
+            by_path[path].setdefault("guidance", []).append(shown)
+            if g["kind"] == "frozen":
+                add(Finding("guidance-frozen-touched", "scope", "medium", "Frozen area changed",
+                            f"{path} is in an area the reviewers froze ({g['label']}): “{g['text']}”", path,
+                            component=by_path[path].get("component"),
+                            suggestion="Revert this change, or ask the reviewer to retire the guidance first."),
+                    key=f"{g['id']}:{path}")
+    return report
 
 
 def _overlap_findings(add: Any, repo: "Repository", changed: set[str], component_of: Any) -> None:
@@ -2201,6 +2247,16 @@ def feedback_markdown(report: dict[str, Any], notes: list[dict[str, Any]], *, in
                              + (f" Suggestion: {f['suggestion']}" if f.get("suggestion") else ""))
                 if f.get("excerpt"):
                     lines += ["   ```", "   " + f["excerpt"], "   ```"]
+    # standing guidance on the areas the prompt talks about (a note or a signal on one of its files)
+    mentioned = {x.get("path") for x in notes if x.get("path")} | {
+        f.get("path") for f in report.get("findings", []) if f.get("path")}
+    reminders = [g for g in report.get("guidance") or [] if mentioned & set(g.get("files") or [])]
+    if reminders:
+        lines += ["", "## Standing guidance for these areas", ""]
+        for g in reminders:
+            where = g["label"] if g["label"].startswith("component ") else f"`{g['label']}`"
+            lines.append(f"- {where} is frozen: {g['text']}" if g["kind"] == "frozen"
+                         else f"- Reminder for {where}: {g['text']}")
     risky = [t for t in (report.get("risk") or {}).get("top", []) if t["level"] in ("high", "medium")]
     if include_findings and risky:
         lines += ["", "## Riskiest files (double-check them)", ""]

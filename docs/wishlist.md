@@ -57,7 +57,7 @@ Labels:
 | [#13](https://github.com/phillipecardenuto/repo-understanding/issues/13) | Cross-service contract changes: HTTP routes, background tasks, env vars · **✓ done** | P2 | L |
 | [#14](https://github.com/phillipecardenuto/repo-understanding/issues/14) | Constant and configuration value changes, before → after · **✓ done** | P2 | S |
 | [#15](https://github.com/phillipecardenuto/repo-understanding/issues/15) | Submodule edge cases: fetch hint for missing history, nested submodules · **✓ done** | P3 | S |
-| [#20](https://github.com/phillipecardenuto/repo-understanding/issues/20) | Standing guidance on components, exported as agent context | P3 | S |
+| [#20](https://github.com/phillipecardenuto/repo-understanding/issues/20) | Standing guidance on components, exported as agent context · **✓ done** | P3 | S |
 | [#35](https://github.com/phillipecardenuto/repo-understanding/issues/35) | Review any branch against any other branch (since they diverged, or exact) · **✓ done** | P1 | M |
 
 ### Architecture rules and integrations
@@ -123,7 +123,7 @@ Labels:
 6. **Next:** the other P2 items in number order: #7 (checkpoints), #8
    (plan vs actual), #9 (verdict and gate), #10 (parallel agents), #12
    (coverage reports), #13 (cross-service contracts) and #30 (health metrics),
-   done; then the P3 items #15 (done), #20, #26, #32 and #33.
+   done; then the P3 items #15 and #20 (done), then #26, #32 and #33.
 
 ## Dependencies between items
 

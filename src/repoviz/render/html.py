@@ -290,6 +290,11 @@ def build_bundle(repo: Repository, *, comparisons: list[Comparison] | None = Non
     }
     if mode == "static" and show_authors(repo.config, "report"):  # names in a report only when asked for
         bundle["owners"] = {"shown": True, "owners": owner_names(repo)}
+    if mode == "static":  # standing guidance, read-only here (the live app adds and retires it)
+        from .. import guidance
+
+        bundle["guidance"] = {"entries": guidance.shown(repo, guidance.load(repo), "report"),
+                              "kinds": list(guidance.KINDS), "writable": False}
     bundle.update(_worktrees(repo, mode))
     if embed_snapshot:
         snap = compact_snapshot(snapshot.to_dict())

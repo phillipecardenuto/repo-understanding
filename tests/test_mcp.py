@@ -239,3 +239,25 @@ def test_shortest_paths() -> None:
     assert shortest_paths(["a"], ["x"], adj) == []  # x imports a, not the other way round
     assert shortest_paths(["a", "b"], ["d"], adj) == [["b", "d"]]  # the shortest from any start
     assert shortest_paths(["a"], ["e"], adj, max_depth=2) == []
+
+
+def test_standing_guidance_reaches_agents(make_repo) -> None:
+    from repoviz import guidance
+
+    repo = make_repo(APP)
+    repo.commit("app")
+    r = Repository(repo.path)
+    guidance.add(r, "app/services/**", "services never call the database directly", "rule", author="Rev Quillfeather")
+    guidance.add(r, "app/models/", "the models are frozen until the migration lands", "frozen")
+    gone = guidance.add(r, "app/services/**", "old advice", "rule")
+    guidance.retire(r, gone["id"])
+    server = _server(repo)
+    overview = _data(_call(server, "architecture_overview"))
+    assert [(g["kind"], g["text"]) for g in overview["guidance"]] == [
+        ("rule", "services never call the database directly"), ("frozen", "the models are frozen until the migration lands")]
+    res = _call(server, "where_does_this_go", target="app/models")
+    assert "FROZEN: do not edit" in res["content"][0]["text"]
+    assert [g["kind"] for g in _data(res)["guidance"]] == ["frozen"]
+    here = _data(_call(server, "where_does_this_go", target="app/services/new_thing.py"))  # a file not written yet
+    assert [g["text"] for g in here["guidance"]] == ["services never call the database directly"]
+    assert "Quillfeather" not in json.dumps(overview) + json.dumps(here)  # no author names for agents
