@@ -21,6 +21,7 @@ from .javascript import JavaScriptAnalyzer
 from .jvm import JvmAnalyzer
 from .manifest import ManifestAnalyzer
 from .metrics import MetricsAnalyzer
+from .php import PhpAnalyzer
 from .python import PythonAnalyzer
 from .runtime import RuntimeAnalyzer
 from .rust import RustAnalyzer
@@ -36,6 +37,7 @@ _REGISTRY: list[type[Analyzer]] = [
     JvmAnalyzer,
     DotnetAnalyzer,
     RustAnalyzer,
+    PhpAnalyzer,
     RuntimeAnalyzer,
     InterfacesAnalyzer,
     CallFlowAnalyzer,

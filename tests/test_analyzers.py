@@ -736,6 +736,74 @@ def test_rust_symbols_lifetimes_and_impls(make_repo) -> None:
     assert "shop_core::orders::tests::loads" in syms
 
 
+# --------------------------------------------------------------------------- PHP
+
+PHP_APP = {
+    'app/Http/Controllers/Controller.php': '<?php\nnamespace App\\Http\\Controllers;\nabstract class Controller { }\n',
+    'app/Http/Controllers/OrderController.php': '<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Http\\Controllers;\n\nuse App\\Models\\{Order, Customer as Client};\nuse App\\Services\\PriceService;\nuse function App\\Support\\money;\nuse Illuminate\\Http\\Request;\nuse GuzzleHttp\\Client as Http;\nuse App\\Models\\Ghost;\nuse Exception;\n// use App\\Models\\Invoice;  (a comment)\n# use App\\Models\\Refund;\n\n/** Orders. "use App\\Models\\Fake;" */\n#[\\Attribute]\nclass OrderController extends Controller implements \\JsonSerializable\n{\n    use \\App\\Support\\Loggable;\n\n    public function __construct(private readonly PriceService $prices) {}\n\n    public function show(Request $request, int $id): ?Order\n    {\n        $order = Order::find($id);\n        $client = new Client();\n        $msg = <<<EOT\n        new Invoice() in a heredoc\n        EOT;\n        try { money(1); } catch (Exception | \\RuntimeException $e) { }\n        return $order instanceof Order ? $order : null;\n    }\n\n    protected function secret(): string { return \'new App\\Models\\Nope()\'; }\n\n    public function jsonSerialize(): mixed { return []; }\n}\n',
+    'app/Models/Customer.php': '<?php\nnamespace App\\Models;\nclass Customer { }\n',
+    'app/Models/Order.php': '<?php\nnamespace App\\Models;\n\nuse Illuminate\\Database\\Eloquent\\Model;\n\nclass Order extends Model\n{\n    public function customer(): Customer { return new Customer(); }\n    public static function find(int $id): ?self { return null; }\n}\n',
+    'app/Services/PriceService.php': '<?php\nnamespace App\\Services;\n\nuse Monolog\\Logger;\n\ninterface Priced { public function price(): int; }\n\nfinal class PriceService implements Priced\n{\n    public function __construct(private ?Logger $log = null) {}\n    public function price(): int { return \\App\\Support\\money(2); }\n}\n',
+    'app/Support/Loggable.php': '<?php\nnamespace App\\Support;\ntrait LoggableAlias { }\n',
+    'app/Support/helpers.php': '<?php\nnamespace App\\Support;\n\nfunction money(int $cents): string { return (string) $cents; }\n\ntrait Loggable { public function log(string $m): void {} }\n',
+    'composer.json': '{\n  "name": "acme/shop", "type": "project",\n  "require": {"php": "^8.2", "laravel/framework": "^11.0", "monolog/monolog": "^3.0", "guzzlehttp/guzzle": "^7.8"},\n  "require-dev": {"phpunit/phpunit": "^10.5"},\n  "autoload": {"psr-4": {"App\\\\": "app/"}, "files": ["app/Support/helpers.php"]},\n  "autoload-dev": {"psr-4": {"Tests\\\\": "tests/"}}\n}\n',
+    'composer.lock': '{"packages": [\n  {"name": "laravel/framework", "autoload": {"psr-4": {"Illuminate\\\\": "src/Illuminate/"}}},\n  {"name": "monolog/monolog", "autoload": {"psr-4": {"Monolog\\\\": "src/Monolog"}}},\n  {"name": "guzzlehttp/guzzle", "autoload": {"psr-4": {"GuzzleHttp\\\\": "src/"}}}\n ], "packages-dev": [{"name": "phpunit/phpunit", "autoload": {"classmap": ["src/"]}}]}\n',
+    'legacy/boot.php': "<?php\ninclude 'config.php';\nfunction boot() { return true; }\n",
+    'legacy/config.php': "<?php\n$config = ['debug' => false];\n",
+    'public/index.php': '<?php\nrequire __DIR__.\'/../vendor/autoload.php\';\nrequire_once __DIR__ . \'/../legacy/boot.php\';\n$app = new \\App\\Http\\Controllers\\OrderController(new \\App\\Services\\PriceService());\n?>\n<html><body><?= "use App\\Models\\Html;" ?> new Invisible() </body></html>\n',
+    'tests/Feature/OrderTest.php': '<?php\nnamespace Tests\\Feature;\nuse PHPUnit\\Framework\\TestCase;\nuse App\\Models\\Order;\nclass OrderTest extends TestCase { public function test_find(): void { $this->assertNull(Order::find(1)); } }\n',
+}
+
+
+BS = "\\"  # PHP names are backslash-separated
+
+
+def php(name: str) -> str:
+    return name.replace("/", BS)
+
+
+def test_php_names_resolve_through_imports_namespaces_and_psr4(make_repo) -> None:
+    repo = make_repo(PHP_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    ctl = php("App/Http/Controllers/OrderController")
+    got = {t: e for (s, t), e in imports.items() if s == ctl}
+    # use (grouped, aliased), use function, the same namespace (extends Controller); a trait in the class body
+    assert got[php("App/Models/Order")].evidence[0].construct == "use"
+    assert php("App/Models/Customer") in got and php("App/Services/PriceService") in got
+    assert got[php("App/Support/helpers")].metadata["imported_names"] == [php("App/Support/money")]
+    assert got[php("App/Http/Controllers/Controller")].metadata["same_package"]
+    # externals: the package composer.lock says provides the namespace; one-segment names are PHP's own
+    assert "laravel/framework" in got and "guzzlehttp/guzzle" in got and "stdlib" in snap.find(qualified_name="php").tags
+    assert (php("Tests/Feature/OrderTest"), "phpunit/phpunit") in imports  # by name: no PSR-4 in the lock
+    assert (php("App/Services/PriceService"), "monolog/monolog") in imports
+    # nothing from comments, strings, heredocs or the HTML around <?php ?>
+    assert not any(w in t for t in got for w in ("Invoice", "Refund", "Fake", "Nope", "Html", "Invisible"))
+    # fully qualified names and require / include of literal paths
+    index = {t: e.evidence[0].construct for (s, t), e in imports.items() if s == "index"}
+    assert index == {ctl: "qualified-name", php("App/Services/PriceService"): "qualified-name", "boot": "require"}
+    assert ("boot", "config") in imports
+    assert snap.find(path="public/index.php").metadata["entry_kind"] == "php front controller"
+    # a class under the project's PSR-4 prefix whose file is missing is a broken import
+    broken = [(d.path, d.line) for d in snap.diagnostics if d.code == "unresolved-internal-import"]
+    assert broken == [("app/Http/Controllers/OrderController.php", 12)]
+    assert snap.find(path="app/Models").qualified_name == php("App/Models")
+
+
+def test_php_symbols_and_signatures(make_repo) -> None:
+    repo = make_repo(PHP_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    syms = {n.qualified_name: n for n in snap.symbols if n.language == "php"}
+    ctl = php("App/Http/Controllers/OrderController")
+    assert syms[f"{ctl}::show"].metadata["signature"] == "(Request $request, int $id): ?Order"
+    assert (syms[f"{ctl}::show"].start_line, syms[f"{ctl}::show"].end_line) == (25, 34)
+    assert syms[f"{ctl}::secret"].metadata["public"] is False
+    assert syms[php("App/Services/Priced")].metadata["kind"] == "interface"
+    assert syms[php("App/Support/Loggable")].metadata["kind"] == "trait"
+    assert syms[php("App/Support/money")].component_type == "function"
+    assert "boot" in syms  # a function outside any namespace
+
+
 # --------------------------------------------------------------------------- pipeline
 
 

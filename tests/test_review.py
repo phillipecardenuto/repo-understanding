@@ -2314,3 +2314,30 @@ def test_contract_patterns_understand_rust_paths() -> None:
     assert matches("shop::orders::store", None, "shop::orders") and not matches("shop::orders_x", None, "shop::orders")
     assert unit_of("shop::orders::store::disk", None, "shop::orders::*") == "shop::orders::store"
     assert matches("app.routes.v1", None, "app.routes")  # dotted names as before
+
+
+def test_php_changes_get_the_same_review_signals(make_repo) -> None:
+    from test_analyzers import PHP_APP, php
+
+    repo = make_repo({**PHP_APP, ".repoviz.toml": '[[contracts]]\nname = "Models below services"\ntype = "layers"\n'
+                      'layers = ["App\\\\Services", "App\\\\Models"]\n'})
+    repo.write({
+        # a model reaches up into the services (a layer violation) while the services use no model: no cycle yet,
+        # but the controller -> service -> model loop closes through PriceService
+        "app/Models/Customer.php": "<?php\nnamespace App\\Models;\nuse App\\Services\\PriceService;\n"
+                                   "class Customer { public function price(PriceService $p, int $n): int { return 1; } }\n",
+        "app/Services/PriceService.php": PHP_APP["app/Services/PriceService.php"].replace(
+            "use Monolog\\Logger;", "use Monolog\\Logger;\nuse App\\Models\\Customer;").replace(
+            "public function price(): int { return \\App\\Support\\money(2); }",
+            "public function price(): int { return (new Customer())->price($this, 2); }"),
+    })
+    repo.delete("app/Models/Order.php")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    kinds = {(f["kind"], f["path"].rsplit("/", 1)[-1]) for f in report["findings"] if f.get("path")}
+    assert ("contract-broken", "Customer.php") in kinds
+    assert ("public-api-removed", "Order.php") in kinds
+    assert ("unresolved-internal-import", "OrderController.php") in kinds  # App\Models\Order is gone
+    assert any(f["kind"] == "new-cycle" for f in report["findings"])
+    pkg = [f["detail"].split(" (")[0] for f in report["findings"] if f["kind"] == "new-package-dependency"]
+    assert php("App/Models now depends on App/Services") in pkg  # namespaces, not folder paths

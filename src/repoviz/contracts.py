@@ -57,7 +57,7 @@ def matches(q: str, path: str | None, pattern: str) -> bool:
         return bool(path) and globs.match(path, pattern if pattern.startswith("/") else "/" + pattern)
     if _is_glob(pattern):
         return fnmatch.fnmatchcase(q, pattern)
-    return q == pattern or q.startswith((pattern + ".", pattern + "/", pattern + "::"))  # :: for Rust
+    return q == pattern or q.startswith((pattern + ".", pattern + "/", pattern + "::", pattern + "\\"))  # Rust, PHP
 
 
 def unit_of(q: str, path: str | None, pattern: str) -> str | None:
@@ -67,6 +67,8 @@ def unit_of(q: str, path: str | None, pattern: str) -> str | None:
     p = pattern.strip()
     if p.endswith("::*") and not _is_glob(p[:-3]):  # Rust: crate::module::*
         prefix, key, sep = p[:-3], q, "::"
+    elif p.endswith("\\*") and not _is_glob(p[:-2]):  # PHP: App\Http\*
+        prefix, key, sep = p[:-2], q, "\\"
     elif p.endswith(".*") and "/" not in p and not _is_glob(p[:-2]):
         prefix, key, sep = p[:-2], q, "."
     elif p.endswith(("/*", "/**")) and not _is_glob(p.rstrip("*").rstrip("/")):
@@ -80,6 +82,8 @@ def unit_of(q: str, path: str | None, pattern: str) -> str | None:
 def _join(container: str, layer: str) -> str:
     if "::" in container:
         return f"{container}::{layer}"
+    if "\\" in container:
+        return f"{container}\\{layer}"
     return f"{container.rstrip('/')}/{layer}" if "/" in container else f"{container}.{layer}"
 
 
@@ -529,11 +533,15 @@ def suggest_layers(snapshot: RepositorySnapshot) -> str:
     names = {nid: g.name(nid) for nid in g.modules()}
 
     def parts(q: str) -> list[str]:
-        return q.split("/") if "/" in q else (q.split("::") if "::" in q else q.split("."))
+        for sep in ("/", "::", "\\"):
+            if sep in q:
+                return q.split(sep)
+        return q.split(".")
 
     groups: dict[str, str] = {}
     for depth in (1, 2, 3, 4):
-        groups = {nid: ("/" if "/" in q else "::" if "::" in q else ".").join(parts(q)[:depth]) for nid, q in names.items()
+        groups = {nid: next((s for s in ("/", "::", "\\") if s in q), ".").join(parts(q)[:depth])
+                  for nid, q in names.items()
                   if len(parts(q)) > depth}
         if len(set(groups.values())) >= 3:
             break

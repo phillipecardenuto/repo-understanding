@@ -20,7 +20,7 @@ def _blank(s: str) -> str:
     return " " * len(s) if "\n" not in s else "".join("\n" if c == "\n" else " " for c in s)
 
 
-def mask_pair(text: str, tokens: Pattern[str] = JVM_TOKENS) -> tuple[str, str]:
+def mask_pair(text: str, tokens: Pattern[str] = JVM_TOKENS, comments: tuple[str, ...] = ("//", "/*")) -> tuple[str, str]:
     """``(code, nocomment)``: ``code`` has comments and the insides of literals blanked (a string keeps its quote
     characters), ``nocomment`` only has comments blanked.  Both keep every offset and newline."""
     code: list[str] = []
@@ -32,7 +32,7 @@ def mask_pair(text: str, tokens: Pattern[str] = JVM_TOKENS) -> tuple[str, str]:
             chunk = text[last:a]
             code.append(chunk)
             noc.append(chunk)
-        if s[0] == "/" and len(s) > 1 and s[1] in "/*":  # a comment
+        if s.startswith(comments):  # a comment
             blank = _blank(s)
             code.append(blank)
             noc.append(blank)

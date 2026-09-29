@@ -1686,7 +1686,7 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
                 def label(folder: str) -> str:  # a Java package or C# namespace by its name, not its folder path
                     n = t_index.get(make_id("dir", f"path:dir:{folder}"))
                     meta = n.metadata if n is not None else {}
-                    return meta.get("jvm_package") or meta.get("dotnet_namespace") or folder
+                    return meta.get("jvm_package") or meta.get("dotnet_namespace") or meta.get("php_namespace") or folder
 
                 add(Finding("new-package-dependency", "architecture", "low", "New dependency between packages",
                             f"{label(src_pkg)} now depends on {label(dst_pkg)} ({dep['source']} → {dep['target']})",

@@ -98,6 +98,7 @@ and the manifest analyzer's entry points are linked to Python callables.
 | `jvm` | – | modules (Java and Kotlin; package folders), symbols, entry points, dependencies (imports, same-package uses, fully qualified names; externals mapped to Maven/Gradle artifacts). See [below](#java-and-kotlin) |
 | `dotnet` | – | modules (C#; namespace folders), symbols, entry points, dependencies (usings resolved to the types used, enclosing namespaces, global usings, extension methods; externals mapped to NuGet packages). See [below](#c) |
 | `rust` | – | modules (the module tree of every crate), symbols, entry points, dependencies (use trees and paths resolved down the tree; externals mapped to Cargo dependencies). See [below](#rust) |
+| `php` | – | modules (namespace folders), symbols, entry points, dependencies (imports, class names in code, PSR-4, require / include; externals mapped to Composer packages). See [below](#php) |
 | `runtime` | – | calls: containers the code starts and services it calls (`invokes-container`, `talks-to`); finalize: their service-to-service copies |
 | `interfaces` | – | calls: HTTP routes, background tasks and environment variables, and the code that calls, enqueues or reads them |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
@@ -229,6 +230,47 @@ character literals, and `;` inside `[u8; 4]` ends nothing):
   (`Order::total`, `<Order as Display>::fmt`), with signatures. `pub` is public;
   `pub(crate)` and friends are not. `fn main` of a binary or example root is an
   entry point.
+
+### PHP
+
+The `php` analyzer blanks comments (`//`, `#`, `/* */`, but not `#[` attributes),
+strings, heredocs and nowdocs, and everything outside `<?php … ?>` / `<?= … ?>`
+(templates stay out), then follows PHP's name resolution:
+
+- **Modules.** One per `.php` file: namespace + file name
+  (`App\Http\Controllers\OrderController`). A folder whose files declare one
+  namespace becomes a `package` node with that name.
+- **Imports.** `use A\B\C;`, aliases, group uses (`use App\Models\{Order,
+  Customer as Client};`), `use function` and `use const`. A `use` of a class
+  links the file that declares it (construct `use`), even when unused, like a
+  Java import.
+- **Names in code.** Class names are read where only a class can stand: `new`,
+  `::`, `extends`, `implements`, `instanceof`, `catch`, parameter, return and
+  property types, attributes, and `use` of traits in a class body. An
+  unqualified name is an import, else a class of the current namespace
+  (`same-namespace`, `same_package: true`); `\A\B` is fully qualified
+  (`qualified-name`). Functions of the same namespace, or imported with `use
+  function`, are `function-call`.
+- **Finding the file.** The file that declares the class (names are
+  case-insensitive), else the project's Composer PSR-4 prefixes
+  (`autoload` and `autoload-dev`: `App\` → `app/`). `require` / `include` of a
+  literal path (`__DIR__ . '/x.php'`, or relative to the file) is `require`.
+- **External namespaces.** The package whose PSR-4 prefix covers the name in
+  `composer.lock` (`Illuminate\` → `laravel/framework`); else the declared
+  package whose vendor or name is the first segment (`Monolog` →
+  `monolog/monolog`, `GuzzleHttp` → `guzzlehttp/guzzle`), several of them told
+  apart by later segments (`Symfony\Component\HttpFoundation` →
+  `symfony/http-foundation`, `Psr\Http\Client` → `psr/http-client`); else the
+  first two segments. A one-segment name (`Exception`, `PDO`) is PHP's own.
+- **Broken imports.** A `use` of a class under one of the project's PSR-4
+  prefixes, whose folder exists but whose file does not, that no class
+  declares, that the file does not use as a namespace (`use GuzzleHttp\Psr7;`
+  then `Psr7\Utils::…`), and that no package could provide, is
+  `unresolved-internal-import`.
+- **Symbols.** Classes, interfaces, traits and enums, their methods, and
+  functions, with signatures (`(Request $request, int $id): ?Order`).
+  `private` and `protected` members are not public. An `index.php` in a web
+  root (`public/`, `web/`, `www/`…) is an entry point.
 
 ### Python imports through `sys.path` edits
 

@@ -39,6 +39,16 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   binary is an entry point; `mod x;` without a file is a broken import.
   Architecture contracts accept Rust paths (`shop_core::orders`,
   `crate::module::*`). ripgrep (110 files) takes 0.5 s, tokio (807 files) 1.2 s.
+- **PHP dependencies** (part of [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26)).
+  A `php` analyzer follows PHP name resolution: `use` imports (grouped,
+  aliased, `use function`), class names in code resolved through the imports or
+  the current namespace, fully qualified names, and `require` / `include` of
+  literal paths; classes resolve to their declaring file or through Composer
+  PSR-4 prefixes (`composer.json` records them now). External namespaces map to
+  packages through the PSR-4 prefixes in `composer.lock`. A class under the
+  project's PSR-4 prefix with no file is a broken import. Templates' HTML is
+  ignored. Architecture contracts accept `App\Http` names. koel (1,506 files)
+  takes 3.2 s, guzzle (137 files) 0.5 s.
 - **Standing guidance that persists across waves** ([#20](https://github.com/phillipecardenuto/repo-understanding/issues/20)).
   - `repoviz guidance add SELECTOR TEXT [--kind rule|context|frozen]` records
     advice on a component (`component:storage`), a path glob

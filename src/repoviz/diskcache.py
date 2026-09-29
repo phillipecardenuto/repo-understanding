@@ -51,6 +51,7 @@ def _codecs() -> dict[str, Codec]:
         "jvm": same,  # one Java or Kotlin file (analyzers/jvm.py): plain JSON already
         "dotnet": same,  # one C# file (analyzers/dotnet.py): plain JSON already
         "rust": same,  # one Rust file (analyzers/rust.py): plain JSON already
+        "php": same,  # one PHP file (analyzers/php.py): plain JSON already
     }
 
 

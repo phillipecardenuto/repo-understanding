@@ -996,6 +996,15 @@ def parse_composer(path: str, text: str, exists: Callable[[str], bool]) -> Manif
     for prefix, dirs in ((data.get("autoload") or {}).get("psr-4") or {}).items():
         for d in dirs if isinstance(dirs, list) else [dirs]:
             md.source_roots.append(_join(md.dir, d))
+    psr4: dict[str, list[str]] = {}  # namespace prefix -> folders (autoload and autoload-dev): the PHP analyzer
+    for section in ("autoload", "autoload-dev"):
+        for prefix, dirs in ((data.get(section) or {}).get("psr-4") or {}).items():
+            if isinstance(prefix, str):
+                for d in dirs if isinstance(dirs, list) else [dirs]:
+                    if isinstance(d, str):
+                        psr4.setdefault(prefix.strip("\\"), []).append(_join(md.dir, d).rstrip("/"))
+    if psr4:
+        md.metadata["psr4"] = psr4
     md.role = "application" if data.get("type") == "project" else "library"
     return md
 
