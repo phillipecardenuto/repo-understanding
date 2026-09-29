@@ -49,6 +49,17 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   project's PSR-4 prefix with no file is a broken import. Templates' HTML is
   ignored. Architecture contracts accept `App\Http` names. koel (1,506 files)
   takes 3.2 s, guzzle (137 files) 0.5 s.
+- **Ruby dependencies** (part of [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26)).
+  A `ruby` analyzer pairs each `end` with its opener (modifier `if` / `unless`
+  and endless methods open nothing) and links files through constants, the
+  way Rails and Zeitwerk load code: `User` inside `module Admin` resolves
+  through the lexical nesting to the file defining `Admin::User`.
+  `require_relative`, and `require` / `load` / `autoload` under `lib/`, `app/`,
+  `test/`, `spec/` and each gem's `lib/`, link files too; other requires map
+  to `Gemfile` / gemspec dependencies or the standard library. A
+  `require_relative` of a missing file is a broken import. Classes, modules and
+  methods (`User#save`, `User.find`) are symbols with parameters. Maybe (794
+  files) takes 0.7 s, Sinatra (147 files) 0.25 s.
 - **Standing guidance that persists across waves** ([#20](https://github.com/phillipecardenuto/repo-understanding/issues/20)).
   - `repoviz guidance add SELECTOR TEXT [--kind rule|context|frozen]` records
     advice on a component (`component:storage`), a path glob

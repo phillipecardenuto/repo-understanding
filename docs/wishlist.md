@@ -77,7 +77,7 @@ Labels:
 | [#22](https://github.com/phillipecardenuto/repo-understanding/issues/22) | System view from docker-compose: services linked to code, dev/prod merged, infrastructure separated · **✓ done** | P1 | L |
 | [#23](https://github.com/phillipecardenuto/repo-understanding/issues/23) | Runtime coupling edges: container images and service URLs in code · **✓ done** | P1 | M |
 | [#25](https://github.com/phillipecardenuto/repo-understanding/issues/25) | Python: imports through `sys.path` edits; requirements.txt-only apps as projects · **✓ done** | P2 | S |
-| [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26) | Import-level analyzers for Java/Kotlin, C#, Rust, Ruby, PHP, C/C++ · *in progress: Java/Kotlin, C#, Rust and PHP done* | P3 | L |
+| [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26) | Import-level analyzers for Java/Kotlin, C#, Rust, Ruby, PHP, C/C++ · *in progress: Java/Kotlin, C#, Rust, PHP and Ruby done* | P3 | L |
 
 ### User interface
 
@@ -124,7 +124,7 @@ Labels:
    (plan vs actual), #9 (verdict and gate), #10 (parallel agents), #12
    (coverage reports), #13 (cross-service contracts) and #30 (health metrics),
    done; then the P3 items #15 and #20 (done), then #26 (one language at a
-   time: Java/Kotlin, C#, Rust and PHP done, then Ruby, C/C++), #32 and #33.
+   time: Java/Kotlin, C#, Rust, PHP and Ruby done, then C/C++), #32 and #33.
 
 ## Dependencies between items
 

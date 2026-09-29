@@ -84,6 +84,7 @@ class _Open:
 @dataclass
 class _Scan:
     code: str
+    noc: str  # comments blanked, strings kept (default values in signatures)
     lines: LineIndex
     decls: list[dict[str, Any]] = field(default_factory=list)
     namespaces: list[str] = field(default_factory=list)
@@ -175,7 +176,7 @@ def _header(scan: _Scan, header: str, offset: int, parent: dict[str, Any] | None
         return None
     if ret.endswith("operator") or "operator" in ret.split():
         return None
-    params = squash(h[open_ + 1:-1])
+    params = squash(scan.noc[offset + open_ + 1:offset + len(h) - 1])  # string defaults kept
     public = bool({"public", "protected"} & mods) or parent["interface"]
     if "private" in mods:
         public = False
@@ -262,7 +263,7 @@ def parse_csharp(text: str) -> dict[str, Any]:
         a, b = m.span(1)
         body[a:b] = " " * (b - a)
     body_code = "".join(body)
-    scan = _Scan(code, lines)
+    scan = _Scan(code, noc, lines)
     _declarations(scan, file_ns)
     count = Counter((d["ns"], d["parent"], d["name"]) for d in scan.decls if d["params"] is not None)
     for d in scan.decls:
@@ -333,7 +334,7 @@ def _enclosing(ns: str) -> list[str]:
 
 class DotnetAnalyzer(Analyzer):
     name = "dotnet"
-    version = "1"  # bump when the parse result or the graph changes (part of the cache keys)
+    version = "2"  # bump when the parse result or the graph changes (part of the cache keys)
     languages = ("csharp",)
     capabilities = (CAP_MODULES, CAP_SYMBOLS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS)
 

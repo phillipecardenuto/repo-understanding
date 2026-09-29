@@ -99,6 +99,7 @@ and the manifest analyzer's entry points are linked to Python callables.
 | `dotnet` | – | modules (C#; namespace folders), symbols, entry points, dependencies (usings resolved to the types used, enclosing namespaces, global usings, extension methods; externals mapped to NuGet packages). See [below](#c) |
 | `rust` | – | modules (the module tree of every crate), symbols, entry points, dependencies (use trees and paths resolved down the tree; externals mapped to Cargo dependencies). See [below](#rust) |
 | `php` | – | modules (namespace folders), symbols, entry points, dependencies (imports, class names in code, PSR-4, require / include; externals mapped to Composer packages). See [below](#php) |
+| `ruby` | – | modules, symbols, entry points, dependencies (constants resolved through the lexical nesting, requires through the load paths; externals mapped to gems). See [below](#ruby) |
 | `runtime` | – | calls: containers the code starts and services it calls (`invokes-container`, `talks-to`); finalize: their service-to-service copies |
 | `interfaces` | – | calls: HTTP routes, background tasks and environment variables, and the code that calls, enqueues or reads them |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
@@ -271,6 +272,51 @@ strings, heredocs and nowdocs, and everything outside `<?php … ?>` / `<?= … 
   functions, with signatures (`(Request $request, int $id): ?Order`).
   `private` and `protected` members are not public. An `index.php` in a web
   root (`public/`, `web/`, `www/`…) is an entry point.
+
+### Ruby
+
+Ruby blocks close with `end`, so the `ruby` analyzer first blanks comments,
+`=begin … =end`, strings, heredocs (`<<~SQL … SQL`) and `%`-literals (`%w[]`,
+`%i[]`, `%r{}`…), then pairs each `end` with its opener: `class`, `module`,
+`def`, `do`, `begin`, `case`, and `if` / `unless` / `while` / `until` / `for`
+when they start a statement. The modifier forms (`return if x`, `x unless y`,
+`if:` hash keys, `while x do … end`) open nothing, and an endless method
+(`def total = …`) has no `end`.
+
+- **Modules.** One per `.rb` file, named after the class or module whose
+  conventional file it is (`app/models/admin/user.rb` → `Admin::User`), else
+  the one it defines, else the file name. `Gemfile`, `Rakefile` and gemspecs
+  are configuration, not modules.
+- **Constants.** Most Ruby code, and every Rails application (Zeitwerk
+  autoloading), reaches other files through constants, not `require`. A
+  constant in code (`User.find`, `Admin::Audit.log`, `::PriceService`, a
+  superclass) is looked up as Ruby does: the first segment through the lexical
+  nesting (`User` inside `module Admin` is `Admin::User` when the repository
+  defines it, else `User`), then the longest defined prefix
+  (`Admin::User::ROLES` → the file of `Admin::User`, or of `ROLES` when it is
+  assigned there). Classes, modules and constant assignments define names. The
+  edge goes to the defining file (construct `constant`). A namespace reopened
+  in many files (`module MyGem`) links only to its conventional file
+  (`my_gem.rb`), or to none.
+- **Requires.** `require_relative` resolves next to the file; `require`,
+  `load` and `autoload` resolve under the load paths: `lib/`, `app/`, `test/`,
+  `spec/` and the `lib/` of each gem of the repository (constructs `require`,
+  `require-relative`, `load`, `autoload`).
+- **External requires.** A path found nowhere is a gem: the `Gemfile` /
+  gemspec dependency named by its first segment, or by the whole path without
+  `/` and `_` (`active_support/core_ext` → `activesupport`); a known standard
+  library (`json`, `net/http`, `fileutils`…) is standard.
+- **Broken requires.** A `require_relative` of a missing file, or a `require`
+  of a missing file of the repository's own library (`shop_kit/money` when
+  `lib/shop_kit.rb` is here and no other gem is named `shop_kit`), is
+  `unresolved-internal-import`. Constants that resolve nowhere are not
+  reported: they may come from a gem.
+- **Symbols.** Classes and modules (nested too), methods (`User#save`),
+  singleton methods (`User.find` for `def self.find` and `class << self`) and
+  top-level functions, with their parameters (`(currency = "EUR")`). Methods
+  after `private` / `protected`, or declared `private def`, are not public. A
+  file with `if __FILE__ == $0` is an entry point. No call flow; `attr_*`,
+  `define_method` and metaprogramming are not read.
 
 ### Python imports through `sys.path` edits
 

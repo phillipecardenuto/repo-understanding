@@ -23,6 +23,7 @@ from .manifest import ManifestAnalyzer
 from .metrics import MetricsAnalyzer
 from .php import PhpAnalyzer
 from .python import PythonAnalyzer
+from .ruby import RubyAnalyzer
 from .runtime import RuntimeAnalyzer
 from .rust import RustAnalyzer
 
@@ -38,6 +39,7 @@ _REGISTRY: list[type[Analyzer]] = [
     DotnetAnalyzer,
     RustAnalyzer,
     PhpAnalyzer,
+    RubyAnalyzer,
     RuntimeAnalyzer,
     InterfacesAnalyzer,
     CallFlowAnalyzer,

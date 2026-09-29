@@ -214,7 +214,7 @@ def _kotlin_decls(scan: _Scan, header: str, offset: int, parent: dict[str, Any] 
             close = _close_paren(header, m.end() - 1)
             if close < 0:
                 continue
-            params = squash(header[m.end():close])
+            params = squash(scan.noc[offset + m.end():offset + close])  # string defaults kept
             tail = header[close + 1:seg_end]
             ret = re.match(r"\s*:\s*([^={\n]+)", tail)
             sig = f"({params})" + (f": {squash(ret.group(1))}" if ret else "")
@@ -293,6 +293,11 @@ def _declarations(scan: _Scan) -> None:
                     else "member"
             stack.append(_Open(kind, decl))
         boundary = pos
+    if scan.lang == "kotlin" and code[boundary + 1:].strip():  # declarations after the last brace: fun f() = 1
+        top = stack[-1] if stack else None
+        parent = top.decl if top is not None and top.kind == "type" else None
+        if top is None or parent is not None:
+            _kotlin_decls(scan, code[boundary + 1:], boundary + 1, parent, False)
     for d in scan.decls:  # unclosed (a truncated file): up to the end
         if d["end"] is None:
             d["end"] = len(code) - 1
@@ -422,7 +427,7 @@ def _import_package(name: str, star: bool) -> str:
 
 class JvmAnalyzer(Analyzer):
     name = "jvm"
-    version = "2"  # bump when the parse result or the graph changes (part of the cache keys)
+    version = "3"  # bump when the parse result or the graph changes (part of the cache keys)
     languages = LANGS
     capabilities = (CAP_MODULES, CAP_SYMBOLS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS)
 

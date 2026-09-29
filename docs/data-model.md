@@ -256,7 +256,8 @@ snapshot.** The live app asks `GET /api/owners` for names, which follows
 `COPY`, `console-script`; for Java and Kotlin `static-import`, `import-on-demand`,
 `same-package`, `qualified-name`; for C# `using`, `global-using`, `using-static`,
 `using-alias`, `same-namespace`, `extension-method`; for Rust `use`, `path`, `extern-crate`; for PHP `use`,
-`same-namespace`, `qualified-name`, `function-call`, `require` …), `analyzer`, optional `excerpt`.
+`same-namespace`, `qualified-name`, `function-call`, `require`; for Ruby `constant`, `require`,
+`require-relative`, `load`, `autoload` …), `analyzer`, optional `excerpt`.
 
 When deciding whether evidence *changed*, only `(path, construct, normalized
 excerpt)` is compared: line numbers shift with every edit above them.

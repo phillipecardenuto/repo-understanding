@@ -52,6 +52,7 @@ def _codecs() -> dict[str, Codec]:
         "dotnet": same,  # one C# file (analyzers/dotnet.py): plain JSON already
         "rust": same,  # one Rust file (analyzers/rust.py): plain JSON already
         "php": same,  # one PHP file (analyzers/php.py): plain JSON already
+        "ruby": same,  # one Ruby file (analyzers/ruby.py): plain JSON already
     }
 
 

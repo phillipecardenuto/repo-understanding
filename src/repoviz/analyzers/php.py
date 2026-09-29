@@ -99,6 +99,7 @@ class _Open:
 @dataclass
 class _Scan:
     code: str
+    noc: str  # comments blanked, strings kept (default values in signatures)
     lines: LineIndex
     decls: list[dict[str, Any]] = field(default_factory=list)
     namespaces: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, name)
@@ -127,7 +128,7 @@ def _header(scan: _Scan, header: str, offset: int, parent: dict[str, Any] | None
     close = _close(clean, f.end() - 1)
     if close < 0:
         return None
-    params = squash(clean[f.end():close])
+    params = squash(scan.noc[offset + f.end():offset + close])  # string defaults kept
     ret = re.match(r"\s*:\s*(\??[\w\\|&?]+)", clean[close + 1:])
     sig = f"({params})" + (f": {ret.group(1)}" if ret else "")
     mods = set(clean[:f.start()].split())
@@ -218,7 +219,7 @@ def parse_php(text: str) -> dict[str, Any]:
     """Everything the analyzer needs from one PHP file, as plain JSON."""
     code, noc = _mask(text)
     lines = LineIndex(text)
-    scan = _Scan(code, lines)
+    scan = _Scan(code, noc, lines)
     _declarations(scan)
 
     def ns_at(pos: int) -> str:
@@ -324,7 +325,7 @@ def _package_for(name: str, vendor: list[tuple[str, str]], declared: dict[str, s
 
 class PhpAnalyzer(Analyzer):
     name = "php"
-    version = "1"  # bump when the parse result or the graph changes (part of the cache keys)
+    version = "2"  # bump when the parse result or the graph changes (part of the cache keys)
     languages = ("php",)
     capabilities = (CAP_MODULES, CAP_SYMBOLS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS)
 

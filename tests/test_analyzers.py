@@ -804,6 +804,89 @@ def test_php_symbols_and_signatures(make_repo) -> None:
     assert "boot" in syms  # a function outside any namespace
 
 
+# --------------------------------------------------------------------------- Ruby
+
+RUBY_APP = {
+    'Gemfile': 'source "https://rubygems.org"\ngem "rails", "~> 7.1"\ngem "httparty"\ngem "shop_kit", path: "."\ngroup :test do\n  gem "rspec-rails"\nend\n',
+    'app/controllers/admin/orders_controller.rb': 'module Admin\n  class OrdersController < ApplicationController\n    before_action :authorize, if: :signed_in?\n\n    def index\n      @orders = Order.recent\n      Audit.log(@orders) unless @orders.empty?\n      render json: ::PriceService.new.quote(1)\n    end\n\n    private def authorize\n      head :forbidden unless User::ROLES.include?(:admin)\n    end\n  end\nend\n',
+    'app/models/admin/audit.rb': 'module Admin\n  class Audit\n    def self.log(record)\n      Order::STATES.each { |s| s }\n      User.new\n    end\n  end\nend\n',
+    'app/models/admin/user.rb': 'module Admin\n  class User\n    ROLES = %i[admin].freeze\n  end\nend\n',
+    'app/models/application_record.rb': 'class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n',
+    'app/models/customer.rb': 'class Customer < ApplicationRecord\n  has_many :orders\n  def vip? = orders.count > 10\nend\n',
+    'app/models/order.rb': '# An order. Invoice is mentioned in a comment only.\nclass Order < ApplicationRecord\n  STATES = %w[new paid Refund].freeze\n  belongs_to :customer\n  has_many :lines, class_name: "OrderLine"\n\n  def total(currency = "EUR")\n    lines.sum(&:amount) if paid?\n  end\n\n  def self.recent(limit: 10) = where(state: "new").limit(limit)\n\n  def label\n    <<~TEXT\n      Order #{id} for Invoice\n    TEXT\n  end\n\n  private\n\n  def paid?\n    state == "paid"\n  end\nend\n',
+    'app/services/price_service.rb': 'require "json"\nrequire "net/http"\nrequire "httparty"\n\nclass PriceService\n  def quote(amount, rate: 1.0)\n    while amount > 100 do amount -= 1 end\n    ShopKit::Money.format(amount * rate)\n  end\nend\n',
+    'bin/report.rb': 'require_relative "../lib/shop_kit"\ndef main = puts(ShopKit::VERSION)\nmain if __FILE__ == $0\n',
+    'lib/shop_kit.rb': 'require "active_support/core_ext/string"\nrequire_relative "shop_kit/version"\nrequire "shop_kit/money"\n\nmodule ShopKit\n  class Error < StandardError; end\nend\n',
+    'lib/shop_kit/money.rb': 'module ShopKit\n  class Money\n    def self.format(cents)\n      raise Error, "negative" if cents.negative?\n      "#{cents / 100.0} #{VERSION}"\n    end\n  end\nend\n',
+    'lib/shop_kit/version.rb': 'module ShopKit\n  VERSION = "0.1.0"\nend\n',
+    'shop_kit.gemspec': 'Gem::Specification.new do |s|\n  s.name = "shop_kit"\n  s.add_dependency "activesupport"\nend\n',
+    'spec/models/order_spec.rb': 'require "rails_helper"\nRSpec.describe Order do\n  it { expect(Order.recent).to be_empty }\nend\n',
+    'spec/rails_helper.rb': 'require "spec_helper"\n',
+}
+
+
+def test_ruby_constants_requires_and_gems(make_repo) -> None:
+    repo = make_repo(RUBY_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    ctl = "Admin::OrdersController"
+    got = {t: e for (s, t), e in imports.items() if s == ctl}
+    # constants through the lexical nesting: Audit in module Admin is Admin::Audit, ::PriceService is absolute
+    assert got["Admin::Audit"].evidence[0].construct == "constant"
+    assert "Order" in got and "PriceService" in got
+    assert got["Admin::User"].metadata["imported_names"] == ["Admin::User::ROLES"]  # the file that defines ROLES
+    assert ("Order", "ApplicationRecord") in imports  # a superclass
+    assert ("ShopKit::Money", "ShopKit") in imports  # ShopKit::Error is defined in lib/shop_kit.rb
+    assert ("report", "ShopKit::VERSION") in imports  # a constant assignment names its file
+    # require_relative, require through the load paths (lib/, spec/), gems and the standard library
+    assert imports[("ShopKit", "ShopKit::Money")].evidence[0].construct == "require"
+    assert imports[("report", "ShopKit")].evidence[0].construct == "require-relative"
+    assert ("order_spec", "rails_helper") in imports
+    assert ("ShopKit", "activesupport") in imports and ("PriceService", "httparty") in imports
+    assert "stdlib" in snap.find(qualified_name="json").tags
+    # nothing from comments, heredocs or %w[] literals
+    assert not any(t in ("Invoice", "Refund") for (_s, t) in imports)
+    assert snap.find(path="bin/report.rb").metadata["entry_kind"] == "ruby script"
+    assert not [d for d in snap.diagnostics if d.code == "unresolved-internal-import"]
+    # a require of a missing file of the repository's own library is broken; a missing gem path is not
+    repo.write({"lib/shop_kit.rb": RUBY_APP["lib/shop_kit.rb"].replace('"shop_kit/money"', '"shop_kit/moneys"')
+                + 'require "httparty/request"\n'})
+    broken = [d for d in Repository(repo.path).snapshot("WORKTREE").diagnostics
+              if d.code == "unresolved-internal-import"]
+    assert [(d.path, d.line) for d in broken] == [("lib/shop_kit.rb", 3)]
+
+
+def test_ruby_blocks_methods_and_visibility(make_repo) -> None:
+    repo = make_repo(RUBY_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    syms = {n.qualified_name: n for n in snap.symbols if n.language == "ruby"}
+    # end pairs with its opener; modifiers (unless, if:, while … do … end) open nothing
+    assert (syms["Admin::OrdersController"].start_line, syms["Admin::OrdersController"].end_line) == (2, 14)
+    assert (syms["Admin::OrdersController#index"].start_line, syms["Admin::OrdersController#index"].end_line) == (5, 9)
+    assert (syms["PriceService#quote"].start_line, syms["PriceService#quote"].end_line) == (6, 9)
+    assert syms["Order#total"].metadata["signature"] == '(currency = "EUR")'
+    assert syms["Order.recent"].end_line == 11  # an endless singleton method
+    assert syms["Order#paid?"].metadata["public"] is False  # after `private`
+    assert syms["Admin::OrdersController#authorize"].metadata["public"] is False  # private def
+    assert syms["ShopKit::Money.format"].component_type == "method"
+    assert syms["Admin"].metadata["kind"] == "module"
+
+
+def test_signatures_keep_string_defaults(make_repo) -> None:
+    repo = make_repo({
+        "src/main/kotlin/app/Fmt.kt": 'package app\n\nclass Fmt {\n    fun show(unit: String = "EUR") = unit\n}\n\n'
+                                      'fun label(sep: String = ", ") = sep\n',
+        "Shop/Fmt.cs": 'namespace Shop;\npublic class Fmt\n{\n    public string Show(string unit = "EUR") => unit;\n}\n',
+        "src/Fmt.php": "<?php\nnamespace App;\nfunction show(string $unit = 'EUR'): string { return $unit; }\n",
+    })
+    snap = Repository(repo.path).snapshot("HEAD")
+    sig = {n.qualified_name: n.metadata.get("signature") for n in snap.symbols}
+    assert sig["app.Fmt.show"] == '(unit: String = "EUR")'
+    assert sig["app.label"] == '(sep: String = ", ")'  # a Kotlin function after the last brace
+    assert sig["Shop.Fmt.Show"] == '(string unit = "EUR") -> string'
+    assert sig["App\\show"] == "(string $unit = 'EUR'): string"
+
+
 # --------------------------------------------------------------------------- pipeline
 
 

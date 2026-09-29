@@ -2341,3 +2341,28 @@ def test_php_changes_get_the_same_review_signals(make_repo) -> None:
     assert any(f["kind"] == "new-cycle" for f in report["findings"])
     pkg = [f["detail"].split(" (")[0] for f in report["findings"] if f["kind"] == "new-package-dependency"]
     assert php("App/Models now depends on App/Services") in pkg  # namespaces, not folder paths
+
+
+def test_ruby_changes_get_the_same_review_signals(make_repo) -> None:
+    from test_analyzers import RUBY_APP
+
+    repo = make_repo({**RUBY_APP, ".repoviz.toml": '[[contracts]]\nname = "Library below the app"\ntype = "layers"\n'
+                      'layers = ["PriceService", "ShopKit"]\n'})
+    repo.write({
+        # the library reaches up into the application (a layer violation) while PriceService uses Money: a new cycle
+        "lib/shop_kit/money.rb": 'module ShopKit\n  class Money\n    def self.format(cents, currency)\n'
+                                 '      PriceService.new\n      "#{cents / 100.0} #{VERSION}"\n    end\n  end\nend\n',
+        "app/models/order.rb": RUBY_APP["app/models/order.rb"].replace(
+            '  def self.recent(limit: 10) = where(state: "new").limit(limit)\n', ""),
+    })
+    repo.delete("lib/shop_kit/version.rb")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    kinds = {(f["kind"], f["path"].rsplit("/", 1)[-1]) for f in report["findings"] if f.get("path")}
+    assert ("contract-broken", "money.rb") in kinds
+    assert ("public-api-removed", "order.rb") in kinds  # Order.recent
+    assert ("unresolved-internal-import", "shop_kit.rb") in kinds  # require_relative "shop_kit/version"
+    assert any(f["kind"] == "new-cycle" for f in report["findings"])
+    money = next(f for f in report["files"] if f["path"].endswith("shop_kit/money.rb"))
+    fmt = next(k for k in money["symbols"] if k["name"] == "format")
+    assert (fmt["signature_before"], fmt["signature"]) == ("(cents)", "(cents, currency)")
