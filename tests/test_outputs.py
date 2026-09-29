@@ -55,11 +55,11 @@ def test_changes_diagram_conventions(shop_repo) -> None:
     # Not colour alone: status words in labels, markers on edges, dashed purple cycle edges.
     assert "<small>added" in text and "<small>removed" in text
     assert '"+ new"' in text and '− removed' in text and "⟲ new cycle" in text
-    edge_lines = [l for l in text.splitlines() if re.match(r"\s+\w+ (-->|==>|-\.->)", l)]
-    link_styles = [l for l in text.splitlines() if l.strip().startswith("linkStyle")]
+    edge_lines = [ln for ln in text.splitlines() if re.match(r"\s+\w+ (-->|==>|-\.->)", ln)]
+    link_styles = [ln for ln in text.splitlines() if ln.strip().startswith("linkStyle")]
     assert len(edge_lines) == len(link_styles) and edge_lines
-    cycle_styles = [l for l in link_styles if "#7c3aed" in l]
-    assert cycle_styles and all("stroke-dasharray" in l for l in cycle_styles)
+    cycle_styles = [ln for ln in link_styles if "#7c3aed" in ln]
+    assert cycle_styles and all("stroke-dasharray" in ln for ln in cycle_styles)
 
 
 def test_other_views_render(shop_repo) -> None:
@@ -631,8 +631,8 @@ def test_old_cycles_the_change_does_not_touch_are_faint(make_repo) -> None:
     assert len(cyc) == 2 and all(e.cycle_existing and not e.cycle_introduced for e in cyc)
     text = mermaid.to_mermaid(view)
     assert text.count('"existing cycle"') == 2 and "⟲ cycle" not in text
-    faint = [l for l in text.splitlines() if "stroke-opacity:0.5" in l]
-    assert len(faint) == 2 and all("stroke-width:1px" in l and "stroke-dasharray:2 4" in l for l in faint)
+    faint = [ln for ln in text.splitlines() if "stroke-opacity:0.5" in ln]
+    assert len(faint) == 2 and all("stroke-width:1px" in ln and "stroke-dasharray:2 4" in ln for ln in faint)
     # Touching a member of the cycle brings back the strong style.
     repo.write({"app/tasks.py": "from app import routes\n\nZ = 2\n"})
     _comp, diff = Repository(repo.path).compare(mode="all")
@@ -1179,6 +1179,46 @@ def test_drift_job_can_be_cancelled(make_repo, monkeypatch) -> None:
             time.sleep(0.05)
             data = json.loads(request(srv, "GET", "/api/drift?sample=tags")[2])
         assert data["drift"]["measured_now"] == 3
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_drift_keeps_a_running_job_and_computes_one_at_a_time(make_repo, monkeypatch) -> None:
+    from test_changes_activity import drift_repo
+
+    import repoviz.drift as drift
+
+    repo = drift_repo(make_repo)
+    gate = threading.Event()
+    real = drift.measure
+
+    def slow(snap, contracts):
+        gate.wait(10)
+        return real(snap, contracts)
+
+    monkeypatch.setattr(drift, "measure", slow)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    get = lambda q: json.loads(request(srv, "GET", "/api/drift?" + q)[2])  # noqa: E731
+    try:
+        assert get("sample=tags")["status"] == "running"
+        # Compute again with the same settings: the running job goes on, nothing is cancelled
+        assert get("sample=tags&restart=1")["status"] == "running"
+        assert get("sample=tags")["status"] == "running"
+        # another sampling starts: the first one stops (one timeline at a time, no thread left behind)
+        assert get("sample=tags&limit=2&restart=1")["status"] == "running"
+        assert get("sample=tags")["status"] in ("cancelling", "cancelled")
+        gate.set()
+        deadline = time.time() + 30
+        while (data := get("sample=tags&limit=2"))["status"] != "done":
+            assert data["status"] == "running" and time.time() < deadline
+            time.sleep(0.05)
+        # the timeline pushed out starts again by itself once nothing else runs
+        while (data := get("sample=tags"))["status"] != "done":
+            assert data["status"] in ("cancelling", "cancelled", "running") and time.time() < deadline
+            time.sleep(0.05)
+        assert [p["label"] for p in data["drift"]["points"]] == ["v0.1", "v0.2", "v0.3", "v0.4"]
     finally:
         srv.shutdown()
         srv.server_close()

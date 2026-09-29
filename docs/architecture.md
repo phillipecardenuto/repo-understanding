@@ -529,9 +529,14 @@ edge records whether it is in a cycle in the base and in the target.
   time and returns its progress (`running`, done / total, the current point)
   on later calls, then the result. The page polls every 0.7 s, and no request
   waits for the work. `POST /api/drift/cancel` stops it between points.
-  `restart=1` starts a cancelled or failed one again. Points measured before a
-  cancel are already in the cache. Jobs are kept per sampling and point list
-  (at most 4).
+  `restart=1` starts a cancelled or failed one again; a running one goes on.
+  Points measured before a cancel are already in the cache. Jobs are kept per
+  sampling and point list (at most 4), and one runs at a time: starting
+  another stops the running one, which starts again by itself when its page
+  asks for it while nothing else runs. The sampled points are reused for 30 s
+  while the page polls (HEAD unchanged). Sampling costs one `for-each-ref`
+  for tags (with the commit dates) and, for *every N days*, a log read back
+  only as far as the points need.
 - **Reports.** `repoviz report --drift` embeds the document. `StaticApi.drift()`
   returns it, and a segment shows its details instead of a comparison.
 

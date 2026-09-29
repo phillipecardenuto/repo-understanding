@@ -58,6 +58,13 @@ def test_globs_stay_linear_and_tolerate_bad_classes() -> None:
     assert not globs.match("lib/a.py", "src/**/**/*.py")
     assert not globs.match("q", "[z-a]")  # invalid range: treated literally instead of raising
     assert time.perf_counter() - started < 1.0
+    # characters Python reads as set operations or a nested set are literal in a glob class (no FutureWarning)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert globs.match("a[b", "a[[]b") and globs.match("x&", "x[a&&b]") and not globs.match("x&", "x[a||b]")
+        assert globs.match("x-", "x[a--b]") and globs.match("x~", "x[~~]") and not globs.match("xb", "x[a-c]x")
 
 
 def test_secret_patterns_stay_linear() -> None:

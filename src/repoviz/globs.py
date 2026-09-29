@@ -55,7 +55,9 @@ def _compile_unsafe(pattern: str, subtree: bool) -> re.Pattern[str]:
             if j == -1:
                 out.append(re.escape(c))
             else:
-                body = pat[i + 1:j].replace("\\", "\\\\")
+                # literal inside the class: a backslash, and what Python would read as a nested set or a set
+                # operation (``[[]``, ``&&``, ``~~``, ``||``, ``--``; a FutureWarning, then another meaning)
+                body = re.sub(r"([\[&~|])", r"\\\1", pat[i + 1:j].replace("\\", "\\\\")).replace("--", r"\-\-")
                 if body.startswith("!"):
                     body = "^" + body[1:]
                 out.append(f"[{body}]")

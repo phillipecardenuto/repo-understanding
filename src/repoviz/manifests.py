@@ -76,6 +76,17 @@ class ManifestData:
 # --------------------------------------------------------------------------
 
 
+def _table(value: Any) -> dict[str, Any]:
+    """A mapping of a parsed manifest, or an empty one when the file holds something else there."""
+    return value if isinstance(value, dict) else {}
+
+
+def _strings(value: Any) -> list[str]:
+    """A list of strings of a parsed manifest (a lone string is a list of one; anything else is left out)."""
+    items = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    return [v for v in items if isinstance(v, str)]
+
+
 def _join(base_dir: str, rel: str) -> str:
     rel = rel.replace("\\", "/").strip()
     if rel.startswith("/"):
@@ -149,9 +160,9 @@ def _dict_source(dep: DeclaredDependency, spec: dict[str, Any], base: str) -> No
         dep.spec, dep.source = f"git+{spec['git']}" + (f"@{ref}" if ref else ""), "git"
     elif spec.get("url") or spec.get("file"):
         dep.spec, dep.source = str(spec.get("url") or spec.get("file")), "url"
-    elif spec.get("path"):
+    elif isinstance(spec.get("path"), str) and spec["path"]:
         dep.source = "path"
-        dep.spec = dep.spec or str(spec["path"])
+        dep.spec = dep.spec or spec["path"]
         dep.local_path = _join(base, spec["path"])
     for key in ("registry", "source", "index"):
         if isinstance(spec.get(key), str) and not dep.source:
@@ -274,7 +285,7 @@ def parse_pyproject(path: str, text: str, exists: Callable[[str], bool]) -> Mani
         if isinstance(pkg, dict) and pkg.get("from"):
             md.source_roots.append(_join(base, pkg["from"]))
     # PDM dev dependencies
-    for group, reqs in ((tool.get("pdm") or {}).get("dev-dependencies") or {}).items():
+    for reqs in ((tool.get("pdm") or {}).get("dev-dependencies") or {}).values():
         for req in reqs or []:
             if isinstance(req, str) and (d := parse_pep508(req, "dev", text, base)):
                 md.dependencies.append(d)
@@ -476,7 +487,7 @@ def parse_requirements(path: str, text: str, exists: Callable[[str], bool]) -> M
             continue
         if line.startswith(("-e ", "--editable")):
             target = line.split(None, 1)[1].strip() if " " in line else ""
-            if target.startswith((".", "/")) or target.startswith("file:"):
+            if target.startswith((".", "/", "file:")):
                 spec = target
                 target = re.sub(r"^file:(//)?", "", target).split("#", 1)[0]
                 md.dependencies.append(DeclaredDependency(posixpath.basename(target.rstrip("/")) or target, spec, scope,
@@ -710,14 +721,14 @@ def parse_cargo(path: str, text: str, exists: Callable[[str], bool]) -> Manifest
     except tomllib.TOMLDecodeError as exc:
         md.errors.append(f"invalid TOML: {exc}")
         return md
-    pkg = data.get("package") or {}
-    md.name = pkg.get("name")
-    v = pkg.get("version")
+    pkg = _table(data.get("package"))
+    name, v = pkg.get("name"), pkg.get("version")
+    md.name = name if isinstance(name, str) else None
     md.version = v if isinstance(v, str) else None
 
-    def add_table(table: dict[str, Any], scope: str, header: str) -> None:
+    def add_table(table: Any, scope: str, header: str) -> None:
         off = _section_offset(text, header)
-        for name, spec in (table or {}).items():
+        for name, spec in _table(table).items():
             dep = DeclaredDependency(name, scope=scope, line=find_line(text, name, off))
             if isinstance(spec, str):
                 dep.spec = spec
@@ -733,26 +744,28 @@ def parse_cargo(path: str, text: str, exists: Callable[[str], bool]) -> Manifest
     add_table(data.get("dependencies"), "runtime", r"^\[dependencies\]")
     add_table(data.get("dev-dependencies"), "dev", r"^\[dev-dependencies\]")
     add_table(data.get("build-dependencies"), "build", r"^\[build-dependencies\]")
-    for target, tdata in (data.get("target") or {}).items():
+    for tdata in _table(data.get("target")).values():
         for key, scope in (("dependencies", "runtime"), ("dev-dependencies", "dev")):
-            add_table((tdata or {}).get(key), scope, r"^\[target\.")
-    ws = data.get("workspace") or {}
-    md.workspace_members = [_join(base, m) for m in ws.get("members") or []]
-    md.workspace_exclude = [_join(base, m) for m in ws.get("exclude") or []]
-    ws_deps = ws.get("dependencies") or {}
+            add_table(_table(tdata).get(key), scope, r"^\[target\.")
+    ws = _table(data.get("workspace"))
+    md.workspace_members = [_join(base, m) for m in _strings(ws.get("members"))]
+    md.workspace_exclude = [_join(base, m) for m in _strings(ws.get("exclude"))]
+    ws_deps = _table(ws.get("dependencies"))
     if ws_deps:
         md.metadata["workspace_dependencies"] = {
-            k: (_join(base, v["path"]) if isinstance(v, dict) and v.get("path") else None) for k, v in ws_deps.items()}
-    for b in data.get("bin") or []:
-        if isinstance(b, dict) and b.get("name"):
-            md.entry_points.append(EntryPointDecl(b["name"], "cargo-bin", _join(base, b.get("path") or "src/main.rs"),
-                                                  "file", find_line(text, b["name"])))
+            k: (_join(base, v["path"]) if isinstance(v, dict) and isinstance(v.get("path"), str) else None)
+            for k, v in ws_deps.items()}
+    for b in data.get("bin") if isinstance(data.get("bin"), list) else []:
+        if isinstance(b, dict) and isinstance(b.get("name"), str) and b["name"]:
+            path = b.get("path") if isinstance(b.get("path"), str) else "src/main.rs"
+            md.entry_points.append(EntryPointDecl(b["name"], "cargo-bin", _join(base, path), "file",
+                                                  find_line(text, b["name"])))
     targets: list[list[str]] = []  # [kind, name, path]: crate roots declared with a path (the Rust analyzer)
     lib = data.get("lib")
     if isinstance(lib, dict) and isinstance(lib.get("path"), str):
         targets.append(["lib", str(lib.get("name") or md.name or ""), _join(base, lib["path"])])
     for kind in ("bin", "test", "example", "bench"):
-        for t in data.get(kind) or []:
+        for t in data.get(kind) if isinstance(data.get(kind), list) else []:
             if isinstance(t, dict) and isinstance(t.get("path"), str):
                 targets.append([kind, str(t.get("name") or ""), _join(base, t["path"])])
     if targets:
@@ -816,7 +829,7 @@ def parse_go_work(path: str, text: str, exists: Callable[[str], bool]) -> Manife
     md = ManifestData(path=path, kind="go.work", ecosystem="go")
     uses: list[str] = []
     for block in re.findall(r"^use\s*\(([^)]*)\)", text, re.M | re.S):
-        uses += [l.split("//")[0].strip() for l in block.splitlines() if l.split("//")[0].strip()]
+        uses += [ln.split("//")[0].strip() for ln in block.splitlines() if ln.split("//")[0].strip()]
     uses += [m.strip() for m in re.findall(r"^use\s+([^\s(]+)", text, re.M)]
     md.workspace_members = [_join(md.dir, u) for u in uses]
     return md
@@ -968,7 +981,7 @@ def parse_msbuild_project(path: str, text: str, exists: Callable[[str], bool]) -
             md.dependencies.append(DeclaredDependency(posixpath.splitext(posixpath.basename(target))[0], "", "runtime",
                                                       find_line(text, inc), local_path=posixpath.dirname(target),
                                                       raw=inc))
-    md.role = "application" if output in ("exe", "winexe") or sdk.endswith(".Web") or sdk.endswith(".Worker") else "library"
+    md.role = "application" if output in ("exe", "winexe") or sdk.endswith((".Web", ".Worker")) else "library"
     if output in ("exe", "winexe"):
         md.entry_points.append(EntryPointDecl(md.name, "dotnet-exe", path, "file"))
     md.source_roots.append(md.dir)
@@ -987,22 +1000,24 @@ def parse_composer(path: str, text: str, exists: Callable[[str], bool]) -> Manif
     except json.JSONDecodeError as exc:
         md.errors.append(f"invalid JSON: {exc}")
         return md
-    md.name, md.version = data.get("name"), data.get("version")
+    if not isinstance(data, dict):
+        md.errors.append("expected a JSON object")
+        return md
+    name, version = data.get("name"), data.get("version")
+    md.name = name if isinstance(name, str) else None
+    md.version = version if isinstance(version, str) else None
     for section, scope in (("require", "runtime"), ("require-dev", "dev")):
-        for name, spec in (data.get(section) or {}).items():
+        for name, spec in _table(data.get(section)).items():
             if name == "php" or name.startswith("ext-"):
                 continue
             md.dependencies.append(DeclaredDependency(name, str(spec), scope, find_line(text, f'"{name}"')))
-    for prefix, dirs in ((data.get("autoload") or {}).get("psr-4") or {}).items():
-        for d in dirs if isinstance(dirs, list) else [dirs]:
-            md.source_roots.append(_join(md.dir, d))
+    for dirs in _table(_table(data.get("autoload")).get("psr-4")).values():
+        md.source_roots.extend(_join(md.dir, d) for d in _strings(dirs))
     psr4: dict[str, list[str]] = {}  # namespace prefix -> folders (autoload and autoload-dev): the PHP analyzer
     for section in ("autoload", "autoload-dev"):
-        for prefix, dirs in ((data.get(section) or {}).get("psr-4") or {}).items():
-            if isinstance(prefix, str):
-                for d in dirs if isinstance(dirs, list) else [dirs]:
-                    if isinstance(d, str):
-                        psr4.setdefault(prefix.strip("\\"), []).append(_join(md.dir, d).rstrip("/"))
+        for prefix, dirs in _table(_table(data.get(section)).get("psr-4")).items():
+            for d in _strings(dirs):
+                psr4.setdefault(prefix.strip("\\"), []).append(_join(md.dir, d).rstrip("/"))
     if psr4:
         md.metadata["psr4"] = psr4
     md.role = "application" if data.get("type") == "project" else "library"
@@ -1270,7 +1285,7 @@ def parse_compose(path: str, text: str, exists: Callable[[str], bool]) -> Manife
             "image": str(svc["image"]) if svc.get("image") else None, "build_context": context,
             "dockerfile": dockerfile, "command": redact(command) if command else None,
             "entrypoint": redact(entrypoint) if entrypoint else None,
-            "depends_on": [d for d in _compose_list(svc.get("depends_on"))],
+            "depends_on": list(_compose_list(svc.get("depends_on"))),
             "line": _service_line(text, str(name)), "ports": [str(p) for p in svc.get("ports") or []],
             "volumes": _named_volumes(svc.get("volumes")), "networks": _compose_list(svc.get("networks")),
             "env_keys": sorted(env), "env_links": env_links(env), "env_files": _compose_list(svc.get("env_file")),

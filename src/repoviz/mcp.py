@@ -451,7 +451,7 @@ class McpServer:
                 return n
             if "/" in t or t.startswith("."):
                 raise ToolError(f"no file or directory {p!r} in the analyzed tree (excluded, ignored or new?)")
-        suffix = [n for name, ns in idx.by_name.items() if name.endswith("." + t) or name.endswith(":" + t)
+        suffix = [n for name, ns in idx.by_name.items() if name.endswith(("." + t, ":" + t))
                   for n in ns]
         if len(suffix) == 1:
             return suffix[0]
@@ -524,18 +524,18 @@ class McpServer:
                                           *(c for c in comp_of_module.values() if c is not None)]}.values(),
                        key=lambda n: n.qualified_name)
         counts: dict[str, int] = {}
-        for m, c in comp_of_module.items():
+        for c in comp_of_module.values():
             if c is not None:
                 counts[c.id] = counts.get(c.id, 0) + 1
         links: dict[tuple[str, str], int] = {}
-        for (s, t), _e in idx.import_edge.items():
+        for s, t in idx.import_edge:
             cs, ct = comp_of_module.get(s), comp_of_module.get(t)
             if cs is not None and ct is not None and cs.id != ct.id:
                 links[(cs.qualified_name, ct.qualified_name)] = links.get((cs.qualified_name, ct.qualified_name), 0) + 1
         external: dict[str, int] = {}
         for n in snap.nodes():
             if "external" in n.tags and "stdlib" not in n.tags:
-                external[n.qualified_name] = len({u for u in idx.users.get(n.id, {})})
+                external[n.qualified_name] = len(set(idx.users.get(n.id, {})))
         contracts = self._contracts_report()
         data: dict[str, Any] = {
             "repository": {"name": prof.get("name") or self.repo.name, "branch": prof.get("branch"),

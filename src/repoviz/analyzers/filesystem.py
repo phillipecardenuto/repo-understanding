@@ -43,7 +43,7 @@ class FilesystemAnalyzer(Analyzer):
 
     def _structure(self, ctx: AnalysisContext, b: SnapshotBuilder) -> None:
         prof = ctx.profile
-        supported = {l["language"] for l in prof.languages if l.get("supported")}
+        supported = {lang["language"] for lang in prof.languages if lang.get("supported")}
         dir_counts: dict[str, int] = {}
         for f in prof.included_files:
             parts = f.split("/")[:-1]

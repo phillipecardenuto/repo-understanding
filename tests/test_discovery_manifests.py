@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from repoviz.manifests import command_entry_target, parse_project_file
@@ -62,7 +63,7 @@ POLYGLOT = {
 def test_polyglot_discovery(make_repo) -> None:
     repo = make_repo(POLYGLOT)
     prof = Repository(repo.path).discover()
-    langs = {l["language"]: l for l in prof.languages}
+    langs = {lang["language"]: lang for lang in prof.languages}
     assert langs["python"]["supported"] and langs["typescript"]["supported"] and langs["go"]["supported"]
     assert not langs["haskell"]["supported"] and langs["rust"]["supported"]  # Rust has an analyzer since #26
     codes = {d.code for d in prof.diagnostics}
@@ -316,8 +317,6 @@ services:
 
 
 def test_compose_system_services(make_repo) -> None:
-    import json
-
     repo = make_repo(SYSTEM)
     r = Repository(repo.path)
     snap = r.snapshot("WORKTREE")
@@ -473,3 +472,34 @@ def test_versions_specs_and_bounds() -> None:
     for spec in ("^1.2", "~1.2", "1.2.3", "==2.0", "~=1.4", ">=1,<2", "=1.0"):
         assert not unbounded(spec, "npm") and not unbounded(spec, "python"), spec
     assert not unbounded("", "go")
+
+
+def test_manifests_with_odd_value_types_keep_what_is_valid() -> None:
+    """A field of an unexpected type is skipped, not the whole manifest ("parser failed")."""
+    def parse(path: str, text: str):
+        md = parse_project_file(path, text, lambda p: False)
+        assert md is not None and not any("parser failed" in e for e in md.errors), md.errors
+        return md
+
+    md = parse("Cargo.toml", '[package]\nname = 5\nversion = "1.0"\n[dependencies]\nserde = "1"\n'
+                             'local = { path = 3 }\n[workspace]\nmembers = "crates/a"\nexclude = [1, "x"]\n'
+                             '[workspace.dependencies]\nw = { path = 7 }\n[[test]]\nname = "t"\n'
+                             'path = "tests/t.rs"\n')
+    assert md.name is None and md.version == "1.0" and [d.name for d in md.dependencies] == ["serde", "local"]
+    assert md.workspace_members == ["crates/a"] and md.workspace_exclude == ["x"]
+    assert md.metadata["workspace_dependencies"] == {"w": None}
+    md = parse("Cargo.toml", 'bin = 5\npackage = "x"\ntarget = [1]\ndependencies = ["a"]\n'
+                             '[[example]]\nname = "e"\npath = "examples/e.rs"\n')
+    assert md.name is None and md.entry_points == [] and md.metadata["targets"] == [["example", "e", "examples/e.rs"]]
+    md = parse("Cargo.toml", '[package]\nname = "app"\n[[bin]]\nname = "app"\npath = 3\n[[bin]]\nname = 4\n')
+    assert [(e.name, e.target) for e in md.entry_points] == [("app", "src/main.rs")]
+
+    md = parse("composer.json", json.dumps({"name": ["x"], "require": ["a/b"], "require-dev": {"c/d": "^1"},
+                                            "autoload": {"psr-4": {"App\\": ["src/", 3], "Bad\\": {"x": 1}}},
+                                            "autoload-dev": "tests/"}))
+    assert md.name is None and [d.name for d in md.dependencies] == ["c/d"]
+    assert md.source_roots == ["src"] and md.metadata["psr4"] == {"App": ["src"]}
+    md = parse("composer.json", json.dumps({"name": "a/b", "autoload": ["src"]}))
+    assert md.name == "a/b" and md.source_roots == []
+    md = parse_project_file("composer.json", "[1, 2]", lambda p: False)
+    assert md is not None and md.errors == ["expected a JSON object"]

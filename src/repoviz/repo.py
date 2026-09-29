@@ -430,7 +430,7 @@ class Repository:
             return None
         try:
             if comp.target in ("WORKTREE", "INDEX", "WORKTREE-TRACKED"):
-                status = [e for e in self.git.status()]
+                status = list(self.git.status())
                 if comp.mode == "staged":
                     return sum(1 for e in status if e.staged)
                 if comp.mode == "unstaged":

@@ -60,11 +60,15 @@ _CAP_REF = re.compile(r"(?<![\w.])([A-Z]\w*)")
 _MEMBER_CALL = re.compile(r"\.\s*([A-Z]\w*)\s*(?:<[^()<>]*>)?\s*\(")
 _QUALIFIED = re.compile(r"(?<![\w.])((?:[A-Z]\w*\.){2,}[A-Z]\w*)")
 _PROPERTY = re.compile(r"(?<![\w.])([A-Z]\w*)\s*(?:\{\s*(?:get|set|init|private|protected|internal)\b|=>)")
-#: Where only a type can stand (a name ``{n}``): new X(…), X x, X?, X[], X<…>, <X>, typeof(X), is / as X, a base
-#: list, a cast, an attribute.
-_TYPE_USE = (r"\bnew\s+{n}\b|(?<![\w.]){n}\s*(?:\?|\[\s*\]|<)|(?<![\w.]){n}\s+[A-Za-z_@]\w*\s*(?:[=;,){{]|=>)|"
-             r"[<,]\s*{n}\s*[>,]|typeof\(\s*{n}\s*\)|\b(?:is|as)\s+{n}\b|\(\s*{n}\s*\)\s*[\w(]|"
-             r"(?:class|struct|interface|record)\s+\w+(?:<[^>]*>)?\s*:\s*[^{{]*\b{n}\b|\[\s*{n}\s*[\](]")
+#: Where only a type can stand: new X(…), X x, X?, X[], X<…>, <X>, typeof(X), is / as X, a cast, an attribute (one
+#: pass per file collects every such name; a base list is read by :data:`_BASE_LIST`).
+_ID = r"([A-Za-z_]\w*)"
+_TYPE_POSITIONS = [re.compile(p) for p in (
+    rf"\bnew\s+{_ID}\b", rf"(?<![\w.]){_ID}(?=\s*(?:\?|\[\s*\]|<))",
+    rf"(?<![\w.]){_ID}(?=\s+[A-Za-z_@]\w*\s*(?:[=;,){{]|=>))", rf"[<,]\s*{_ID}(?=\s*[>,])",
+    rf"typeof\(\s*{_ID}\s*\)", rf"\b(?:is|as)\s+{_ID}\b", rf"\(\s*{_ID}(?=\s*\)\s*[\w(])",
+    rf"\[\s*{_ID}(?=\s*[\](])")]
+_BASE_LIST = re.compile(r"(?:class|struct|interface|record)\s+\w+(?:<[^>]*>)?\s*:\s*([^{]*)")
 _MAIN = re.compile(r"\bstatic\s+(?:async\s+)?(?:void|int|Task(?:\s*<\s*int\s*>)?)\s+Main\s*\(")
 #: Framework namespaces (the SDKs ship them; ASP.NET Core and the Extensions come with the web SDK).
 _STDLIB = ("System", "Microsoft.CSharp", "Microsoft.Win32", "Microsoft.VisualBasic", "Microsoft.AspNetCore",
@@ -292,8 +296,11 @@ def parse_csharp(text: str) -> dict[str, Any]:
     # C# members are PascalCase like types: a property or method named like a type (``public string Name { get;
     # set; }``) is not a use of the type ``Name`` unless the name also appears where only a type can be
     members = {d["name"] for d in scan.decls if d["kind"] == "method"} | set(_PROPERTY.findall(body_code))
-    for name in members & refs.keys():
-        if not re.search(_TYPE_USE.format(n=re.escape(name)), body_code):
+    shadowed = members & refs.keys()
+    if shadowed:
+        as_type = {n for rx in _TYPE_POSITIONS for n in rx.findall(body_code)}
+        as_type.update(n for m in _BASE_LIST.finditer(body_code) for n in re.findall(r"[A-Za-z_]\w*", m.group(1)))
+        for name in shadowed - as_type:
             del refs[name]
     calls: dict[str, int] = {}
     for m in _MEMBER_CALL.finditer(body_code):
@@ -334,7 +341,7 @@ def _enclosing(ns: str) -> list[str]:
 
 class DotnetAnalyzer(Analyzer):
     name = "dotnet"
-    version = "2"  # bump when the parse result or the graph changes (part of the cache keys)
+    version = "3"  # bump when the parse result or the graph changes (part of the cache keys)
     languages = ("csharp",)
     capabilities = (CAP_MODULES, CAP_SYMBOLS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS)
 

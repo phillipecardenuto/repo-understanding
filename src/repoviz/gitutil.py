@@ -545,7 +545,7 @@ class Git:
                            "--name-only", "--end-of-options", rev)
         stats: dict[str, dict[str, object]] = {}
         for block in (out or "").split("\x1e"):
-            lines = [l for l in block.splitlines() if l.strip()]
+            lines = [ln for ln in block.splitlines() if ln.strip()]
             if not lines:
                 continue
             head, _, name = lines[0].partition("\x1f")

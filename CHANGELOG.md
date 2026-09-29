@@ -671,6 +671,48 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   inputs, and the drift view's *Every (days)*. Their `display` style won over
   the `hidden` attribute. A global `[hidden]` rule fixes it.
 
+Problems found by a deep review of the work since the last one
+(8bb7968..205b6f1), each with a regression test:
+
+- **Parser speed.** The C# analyzer compiled one regular expression per
+  member named like a type: Newtonsoft.Json took 40 s serial, now 4 s (a
+  file with 1,500 such properties: 11.7 s, now 0.04 s). The Ruby analyzer
+  rescanned long lines and the whole block stack at every keyword: one long
+  line of `class A` took 18.8 s, now 0.5 s. Both give the same results on
+  real repositories (961 Ruby files compared).
+- **Drift jobs in the live app.**
+  - Pressing *Compute* again while a timeline was measuring cancelled it; the
+    running job now goes on.
+  - Every sampling left its own thread running; now one timeline runs at a
+    time, and one that was pushed out starts again when its page asks for it.
+  - Each progress poll re-read all tags with one `git show` per 200 tags, and
+    the whole first-parent log for *every N days*. Tags and their dates now
+    come from one `for-each-ref`, the log is read back only as far as the
+    points need, and the sampled points are reused while the page polls.
+- **Drift output.** A tag or wave label with `|` broke the Markdown table;
+  a damaged `drift.json` (not an object) failed the command instead of being
+  ignored.
+- **Standing guidance.**
+  - With 500 entries, adding one silently dropped the oldest, active or not,
+    and loading a larger file kept the oldest 500. Active entries are never
+    dropped now: the oldest retired ones go first, up to 2,000 in all.
+  - `repoviz guidance import` saved once per entry and could stop half-way;
+    it now checks every entry, then writes once, or changes nothing.
+  - An entry with an unknown kind in a hand-edited file made
+    `repoviz guidance export` fail; such entries are left out when loading.
+- **Manifests.** A `Cargo.toml` with `bin = 5`, a non-string name or path,
+  or a `composer.json` whose `autoload` or PSR-4 folders were not the
+  expected type lost the whole manifest ("parser failed"); now only the odd
+  field is skipped.
+- **Globs.** A character class such as `[[]` or `[a&&b]` in an exclude
+  pattern raised a Python `FutureWarning` (nested set, set operation); these
+  characters are literal now.
+- **Moved code.** A moved block longer than 2,000 lines was only matched on
+  its first 2,000; the whole block is compared now, up to the 5,000-line wave
+  cap (about 50 ms more for a 2,400-line file).
+- **Code smells.** Duplicate set items, unused loop variables, ambiguous
+  `l` names and unparenthesized `and`/`or` chains; `ruff check` is clean.
+
 Fifteen problems found by a deep review of the work since the last one
 (3448f7f..e643f2c), each with a regression test:
 

@@ -227,7 +227,10 @@ owner-only permissions. Every linked worktree of the repository shares it. It
 is never written into the repository: to keep it in version control, commit the
 output of `repoviz guidance export` (for example as a section of `AGENTS.md`)
 and load it elsewhere with `repoviz guidance import FILE`. At most 500 entries
-are active; a text is cut at 2,000 characters.
+are active (adding or importing more is refused, and an import adds nothing
+unless every entry fits); retired entries are kept for past waves, up to 2,000
+entries in all, the oldest retired ones dropped first. A text is cut at 2,000
+characters.
 
 ## Parse cache
 

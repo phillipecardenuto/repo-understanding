@@ -2464,8 +2464,7 @@
       const api = this.app.api, token = (this.token = (this.token || 0) + 1);
       if (!api.live) { this.render(await api.drift()); return; }
       const d = this.tab.opts.drift;
-      if (restart && this.running) await api.driftCancel().catch(() => null);
-      let first = true;
+      let first = true;  // the server keeps a running timeline and stops any other one it starts
       while (token === this.token) {
         const params = { sample: d.sample, every: String(d.every), limit: "12" };
         if (first && restart) params.restart = "1";
@@ -2473,8 +2472,8 @@
         let r;
         try { r = await api.drift(params); } catch (err) { r = { status: "error", error: err.message }; }
         if (token !== this.token) return;
-        this.running = r.status === "running" || r.status === "cancelling";
-        if (!this.running) { this.render(r); return; }
+        const running = r.status === "running" || r.status === "cancelling";
+        if (!running) { this.render(r); return; }
         this.progress(r);
         await sleep(this.shown ? 700 : 2500);
       }
@@ -4990,7 +4989,7 @@
           ["Largest jump", "ranked by what changed between two points: 1 per component link that appeared or disappeared, 5 per component, cycle or contract violation gained or lost, 1 per external package; with a sentence such as *v0.3 → v0.4: +2 components, +9 cross-component dependencies (ui → db appeared), 1 new cycle*."]] },
         { ul: ["Each chart shows every point with a dot and its value; the **thick dashed** segment is the largest jump.",
           "**Click a segment** (or focus it and press Enter) to open that comparison in the Comparison view. In a static report it shows what changed instead: comparing needs `repoviz serve`.",
-          "The live app measures the points in the background and shows its progress; **Cancel** stops it. Each point is measured once and remembered in the state directory, so the next run only measures new points.",
+          "The live app measures the points in the background and shows its progress; **Cancel** stops it, and **Compute** while it runs keeps it going. One timeline is measured at a time: choosing other points stops the previous run. Each point is measured once and remembered in the state directory, so the next run only measures new points.",
           "From the command line: `repoviz drift [--tags | --every 7d | --waves] [--json | --markdown]`. Static reports include it with `repoviz report --drift`."] },
       ] },
     { id: "structure", title: "Structure", icon: "tree", tab: "structure", intro: "Learn the project: its layout and components, and what repoviz discovered about it.",

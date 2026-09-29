@@ -872,6 +872,29 @@ def test_ruby_blocks_methods_and_visibility(make_repo) -> None:
     assert syms["Admin"].metadata["kind"] == "module"
 
 
+
+def test_text_parsers_stay_linear_on_pathological_input() -> None:
+    """One long line or thousands of shadowing members once took seconds to minutes (quadratic scans)."""
+    import time
+
+    from repoviz.analyzers.dotnet import parse_csharp
+    from repoviz.analyzers.ruby import parse_ruby
+
+    for text in ("class A " * 3000, "def " * 5000, "A::B " * 20000, "private\n" * 3000 + "def x\nend\n" * 2000):
+        t = time.perf_counter()
+        parse_ruby(text)
+        assert time.perf_counter() - t < 5, text[:12]
+    # a property named like a type is a use of the type only where a type can stand (one pass, not one per name)
+    n = 1500
+    text = ("namespace N {\npublic class C {\n" + "".join(f"  public int Item{i} {{ get; set; }}\n" for i in range(n))
+            + "  void M() {\n" + "".join(f"    Item{i} = 1;\n" for i in range(n))
+            + "    Item7 x = new Item8(); var y = (Item9) z; Foo<Item10> w;\n  }\n}\nclass D : Item11 { }\n}\n")
+    t = time.perf_counter()
+    refs = set(parse_csharp(text)["refs"])
+    assert time.perf_counter() - t < 5
+    assert {f"Item{i}" for i in range(n)} & refs == {"Item7", "Item8", "Item9", "Item10", "Item11"}
+
+
 # --------------------------------------------------------------------------- C and C++
 
 C_APP = {
@@ -987,7 +1010,7 @@ def test_analyzers_can_be_disabled(shop_repo) -> None:
     snap = Repository(shop_repo.path).snapshot("WORKTREE")
     runs = {a.name for a in snap.analyzers}
     assert "python" not in runs and "git" in runs  # mandatory analyzers cannot be disabled
-    langs = {l["language"]: l for l in snap.profile["languages"]}
+    langs = {lang["language"]: lang for lang in snap.profile["languages"]}
     assert not langs["python"]["supported"]
     assert any(d.code == "unsupported-language" for d in snap.diagnostics)
 

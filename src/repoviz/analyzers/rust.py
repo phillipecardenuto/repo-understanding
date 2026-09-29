@@ -621,7 +621,7 @@ class RustAnalyzer(Analyzer):
                 return not strict and name[:1].islower() and name not in local_names
 
             seen_ext: set[str] = set()
-            for segs, glob, alias, line, inline in info["uses"]:
+            for segs, glob, _alias, line, inline in info["uses"]:
                 name = "::".join(segs) + ("::*" if glob else "")
                 if root is None:
                     target, crate = None, (None if segs[0] in ("crate", "self", "super") else segs[0])

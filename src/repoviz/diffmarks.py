@@ -30,7 +30,7 @@ from typing import Any
 MAX_LINES = 5000  # changed lines per wave searched for moved blocks
 MIN_BLOCK = 3  # lines
 MIN_SHARE = 0.75  # of a block's lines that must match (the rest is the residual edit)
-MAX_RUN = 2000  # lines of one run compared with difflib
+MAX_RUN = MAX_LINES  # lines of one run compared with difflib (a whole moved file, up to the cap)
 MAX_MARK_LINE = 400  # characters; longer lines get no marks
 MAX_PAIR_RUN = 60  # removed / added lines paired for marks in one replace
 TOKEN = re.compile(r"\w+|\s+|[^\w\s]")

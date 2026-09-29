@@ -157,7 +157,7 @@ class AnalysisContext:
         if not lines or start < 1 or start > len(lines):
             return None
         end = min(end or start, start + max_lines - 1, len(lines))
-        text = "\n".join(l.rstrip() for l in lines[start - 1:end])
+        text = "\n".join(ln.rstrip() for ln in lines[start - 1:end])
         return redact(text[:400])
 
     def cached(self, key: tuple[Any, ...], compute: Any) -> Any:

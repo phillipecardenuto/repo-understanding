@@ -1227,7 +1227,7 @@ class PythonAnalyzer(Analyzer):
                     spec = importlib.util.find_spec(top)
                     origin = (spec.origin or "") if spec else ""
                     locations = list(spec.submodule_search_locations or []) if spec else []
-                    if not (origin.startswith(abs_root) or any(str(l).startswith(abs_root) for l in locations)):
+                    if not (origin.startswith(abs_root) or any(str(loc).startswith(abs_root) for loc in locations)):
                         b.diagnostic("info", "grimp-skipped", f"grimp cross-check skipped for '{top}': the package "
                                      "resolves outside the repository.", self.name)
                         continue

@@ -64,6 +64,8 @@ LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
 CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 #: Seconds a review reuses the other worktrees' state (git status in each of them) before reading it again.
 OTHERS_TTL = 2.0
+#: Seconds the points of a drift sampling are reused while the page polls the job measuring them.
+DRIFT_SAMPLE_TTL = 30.0
 FAVICON = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" '
            b'fill="#4f46e5"/><circle cx="9" cy="10" r="4" fill="#fff"/><circle cx="23" cy="10" r="4" fill="#fff"/>'
            b'<circle cx="16" cy="23" r="4" fill="#fff"/><path d="M9 10L16 23L23 10" stroke="#fff" stroke-width="2" '
@@ -118,6 +120,7 @@ class _DriftJob:
         self.error: str | None = None
         self.cancel = threading.Event()
         self.finished = threading.Event()
+        self.superseded = False  # cancelled because another timeline started (one computes at a time)
 
     def progress(self, done: int, total: int, label: str) -> None:
         self.done, self.total, self.current = done, total, label
@@ -159,6 +162,7 @@ class AppState:
         self._worktree_lock = threading.Lock()  # opening one: never twice for the same path (no leaked processes)
         self._others: tuple[float, tuple[Any, ...]] | None = None  # other worktrees' state, reused briefly
         self._drift_jobs = _Lru(4)  # drift timelines, by sampling and points: computed in the background
+        self._drift_samples = _Lru(8)  # the points of a sampling, reused while the page polls (HEAD unchanged)
         if auto_session and repo.is_git and repo.current_session() is None:
             repo.state.start_session(repo.git, repo.root, label="started with repoviz serve")
 
@@ -288,17 +292,33 @@ class AppState:
         from . import drift
 
         how = query.get("sample") or "auto"
-        try:
-            sampled = drift.sample(self.repo, how, _int(query.get("every"), 7, 3650),
-                                   _int(query.get("limit"), drift.MAX_POINTS, 50))
-        except (drift.DriftError, RepositoryError, GitError) as exc:
-            return {"status": "error", "error": str(exc)}
+        restart = query.get("restart") == "1"
+        args = (how, _int(query.get("every"), 7, 3650), _int(query.get("limit"), drift.MAX_POINTS, 50))
+        head = self.repo.git.head() if self.repo.git is not None else None
+        with self.cache_lock:
+            kept = self._drift_samples.get(args)
+        if kept is not None and kept[0] == head and time.monotonic() - kept[1] < DRIFT_SAMPLE_TTL and not restart:
+            sampled = kept[2]
+        else:
+            try:
+                sampled = drift.sample(self.repo, *args)
+            except (drift.DriftError, RepositoryError, GitError) as exc:
+                return {"status": "error", "error": str(exc)}
+            with self.cache_lock:
+                self._drift_samples.put(args, (head, time.monotonic(), sampled))
         key = (sampled["mode"], sampled.get("every_days"), tuple(p.spec for p in sampled["points"]),
                drift.settings_key(self.repo))
         with self.cache_lock:
             job = self._drift_jobs.get(key)
-            stale = job is not None and job.finished.is_set() and job.result is None
-            if job is None or (stale and query.get("restart") == "1"):
+            others = [j for j in self._drift_jobs.values() if j is not job and not j.cancel.is_set()
+                      and not j.finished.is_set()]
+            # a running job is kept (Compute twice does not start over); a stopped or failed one starts again
+            # when asked, and one another timeline pushed out starts again once nothing else runs
+            stopped = job is not None and job.result is None and (job.cancel.is_set() or job.finished.is_set())
+            if job is None or (stopped and (restart or (job.superseded and job.finished.is_set() and not others))):
+                for other in others:  # one timeline at a time: the page shows one
+                    other.superseded = True
+                    other.cancel.set()
                 job = _DriftJob(sampled)
                 self._drift_jobs.put(key, job)
                 threading.Thread(target=self._run_drift, args=(job,), name="repoviz-drift", daemon=True).start()
@@ -675,7 +695,7 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                 elif path in ASSETS:
                     name, ctype = ASSETS[path]
                     self._send(200, asset_bytes(name), ctype, {"Cache-Control": "max-age=300"})
-                elif path == "/favicon.ico" or path == "/favicon.svg":
+                elif path in ("/favicon.ico", "/favicon.svg"):
                     self._send(200, FAVICON, "image/svg+xml", {"Cache-Control": "max-age=86400"})
                 elif path == "/api/health":
                     self._json(200, {"ok": True, "version": __version__, "repository": str(st.repo.root)})

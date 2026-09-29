@@ -316,7 +316,7 @@ def _package_for(name: str, vendor: list[tuple[str, str]], declared: dict[str, s
         def fits(package: str) -> bool:  # GuzzleHttp\\Promise → guzzlehttp/promises
             key = _key(package.split("/")[-1])
             return any(key in (j, j.removeprefix(segs[0])) or
-                       len(j) >= 4 and abs(len(key) - len(j)) <= 2 and (key.startswith(j) or j.startswith(key))
+                       (len(j) >= 4 and abs(len(key) - len(j)) <= 2 and (key.startswith(j) or j.startswith(key)))
                        for j in joined)
 
         cands = [d for d in cands if fits(d)]

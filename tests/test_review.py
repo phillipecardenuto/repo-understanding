@@ -2228,6 +2228,44 @@ def test_guidance_valid_at_the_time_of_a_past_wave(make_repo) -> None:
     assert shown("all") == []  # now: retired
 
 
+def test_guidance_store_never_drops_active_entries_and_imports_all_or_nothing(make_repo, monkeypatch) -> None:
+    from repoviz import guidance
+
+    monkeypatch.setattr(guidance, "MAX_ENTRIES", 3)
+    monkeypatch.setattr(guidance, "MAX_STORED", 4)
+    repo = make_repo({"app/a.py": "A = 0\n"})
+    r = Repository(repo.path)
+    first = [guidance.add(r, "app/", f"rule {i}") for i in range(3)]
+    with pytest.raises(guidance.GuidanceError, match="at most 3 active"):
+        guidance.add(r, "app/", "one too many")
+    for e in first[:2]:
+        guidance.retire(r, e["id"])
+    guidance.add(r, "app/", "rule 3")
+    guidance.add(r, "app/", "rule 4")  # 5 entries > 4 stored: the oldest retired one goes, no active one
+    texts = [e["text"] for e in guidance.load(r)]
+    assert texts == ["rule 1", "rule 2", "rule 3", "rule 4"]
+    assert [e["text"] for e in guidance.load(r) if not e.get("retired_at")] == ["rule 2", "rule 3", "rule 4"]
+    # an import that would go over the cap, or holds one bad item, changes nothing
+    before = guidance._file(r).read_bytes()
+    with pytest.raises(guidance.GuidanceError, match="at most 3 active"):
+        guidance.import_entries(r, json.dumps([{"selector": "db/", "text": "new"}]))
+    with pytest.raises(guidance.GuidanceError, match="kind"):
+        guidance.import_entries(r, json.dumps([{"selector": "app/", "text": "rule 2"},
+                                               {"selector": "db/", "text": "x", "kind": "law"}]))
+    assert guidance._file(r).read_bytes() == before
+    assert guidance.import_entries(r, json.dumps([{"selector": "app/", "text": "rule 3"}])) == {"added": 0,
+                                                                                                 "skipped": 1}
+    # a hand-edited store: entries without a known kind or a text are left out (the export no longer fails)
+    data = json.loads(before)
+    data["entries"] += [{"id": "x1", "selector": "db/", "text": "odd", "kind": "law"},
+                        {"id": "x2", "selector": "db/", "kind": "rule"}, "junk"]
+    guidance._file(r).write_text(json.dumps(data))
+    assert [e["id"] for e in guidance.load(r)] == [e["id"] for e in data["entries"][:4]]
+    assert "rule 4" in guidance.export_markdown(guidance.load(r))
+    guidance._file(r).write_text('{"entries": {"not": "a list"}}')
+    assert guidance.load(r) == []
+
+
 def test_java_changes_get_the_same_review_signals(make_repo) -> None:
     from test_analyzers import JAVA_APP
 
@@ -2509,3 +2547,8 @@ def test_moved_code_detection_is_bounded(make_repo) -> None:
     assert best < 0.3, best  # a 5,000-line wave adds under 300 ms
     over = diffmarks.annotate(wave(), max_lines=1000)  # above the cap: no move search, still the marks
     assert over["moves_searched"] is False and over["changed_lines"] == changed
+    # one block longer than a few thousand lines moves whole (every line up to the wave cap is compared)
+    big = [f"    v_{i} = fn_{i % 41}(x_{i})" for i in range(2400)]
+    moved = diffmarks.annotate([("a.py", file_hunks("\n".join(["x = 1"] + big), "x = 1")[0]),
+                                ("b.py", file_hunks("y = 1", "\n".join(["y = 1"] + big))[0])])
+    assert moved["moved_blocks"] == 1 and moved["moved_lines"] == 2400

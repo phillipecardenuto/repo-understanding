@@ -98,7 +98,7 @@ SYSTEM = {"unistd", "fcntl", "pthread", "dirent", "dlfcn", "poll", "sched", "sem
           "mswsock", "iphlpapi", "winternl", "ntstatus", "bcrypt", "intrin", "x86intrin", "immintrin", "emmintrin",
           "xmmintrin", "pmmintrin", "tmmintrin", "smmintrin", "nmmintrin", "wmmintrin", "avxintrin", "avx2intrin",
           "cpuid", "arm_neon", "arm_acle", "arm_sve", "TargetConditionals", "crt_externs", "AvailabilityMacros",
-          "Availability", "dispatch", "libproc", "mach-o", "execinfo", "cxxabi", "unwind", "valgrind"}
+          "Availability", "dispatch", "libproc", "mach-o", "cxxabi", "unwind", "valgrind"}
 SYSTEM_DIRS = {"sys", "netinet", "netinet6", "arpa", "net", "linux", "bits", "asm", "asm-generic", "mach", "machine",
                "libkern", "os", "malloc", "CoreFoundation", "CoreServices", "Security", "Foundation", "IOKit",
                "SystemConfiguration", "mach-o", "dispatch", "gnu", "ext", "tr1", "xlocale", "android", "uapi",
@@ -807,15 +807,15 @@ class CFamilyAnalyzer(Analyzer):
                     continue
                 norm = posixpath.normpath(path)
                 beside = posixpath.normpath(posixpath.join(here, path))
-                if norm in present and norm != f or kind == "local" and beside in present and beside != f:
+                if (norm in present and norm != f) or (kind == "local" and beside in present and beside != f):
                     continue  # there, but not a C/C++ file (.inc, .def, too large)
                 std = std_kind(path)
                 folder = posixpath.dirname(norm)
                 if std is None and (kind == "local" or folder):
                     base = posixpath.basename(norm)
                     roots = ([here] if kind == "local" else []) + include_dirs
-                    folder_here = kind == "local" and not folder or bool(folder) and any(
-                        (posixpath.normpath(posixpath.join(d, folder)) if d else folder) in all_dirs for d in roots)
+                    folder_here = (kind == "local" and not folder) or (bool(folder) and any(
+                        (posixpath.normpath(posixpath.join(d, folder)) if d else folder) in all_dirs for d in roots))
                     generated = base in mentioned or _GENERATED.search(base) or any(
                         t in templates for t in (base + ".in", base + ".cmake", base + ".cmakein",
                                                  _stem(base) + ".in" + base[len(_stem(base)):]))

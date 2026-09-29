@@ -180,9 +180,9 @@ def cmd_discover(args: argparse.Namespace) -> int:
            f"  branch {prof.branch or '-'}  HEAD {(prof.head or '-')[:12]}  default branch {prof.default_branch or 'unknown'}",
            f"  files: {prof.file_count} total, {prof.analyzed_file_count} analyzed, {prof.excluded_count} excluded",
            "  contents: " + format_breakdown(counts), "", "Languages:"]
-    for l in prof.languages[:15]:
-        support = "analyzed" if l["supported"] else ("structure only" if l["kind"] == "programming" else l["kind"])
-        out.append(f"  {l['display']:<16} {l['files']:>6} files   {support}")
+    for lang in prof.languages[:15]:
+        support = "analyzed" if lang["supported"] else ("structure only" if lang["kind"] == "programming" else lang["kind"])
+        out.append(f"  {lang['display']:<16} {lang['files']:>6} files   {support}")
 
     def section(title: str, items: list[Any], fmt: Any) -> None:
         out.append(f"\n{title} ({len(items)}):")
@@ -300,7 +300,7 @@ def cmd_mermaid(args: argparse.Namespace) -> int:
 
     icons = mermaid.theme()["icons"]
     repo = _open(args)
-    if args.view == "changes" or args.view == "flow":
+    if args.view in ("changes", "flow"):
         comp, diff = repo.compare(args.base, args.target, mode=args.mode, spec=args.spec)
         if args.view == "changes":
             view = views.changes_view(diff, level=args.level, scope=args.scope, include_external=args.external,
@@ -1044,8 +1044,8 @@ def cmd_guidance(args: argparse.Namespace) -> int:
             print(f"added {entry['id']}: {guidance.KIND_LABEL[entry['kind']].lower()} for "
                   f"{guidance.label_of(entry['selector'])}", file=sys.stderr)
         elif args.action in ("edit", "retire"):
-            if len(rest) != 1 or args.action == "edit" and all(
-                    v is None for v in (args.selector, args.text, args.kind)):
+            if len(rest) != 1 or (args.action == "edit" and all(
+                    v is None for v in (args.selector, args.text, args.kind))):
                 print(f"repoviz: usage: repoviz guidance {args.action} ID"
                       + (" [--selector S] [--text T] [--kind K]" if args.action == "edit" else ""), file=sys.stderr)
                 return EXIT_USAGE

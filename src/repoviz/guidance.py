@@ -42,7 +42,8 @@ _FILE = re.compile(r"\.(py|pyi|js|jsx|mjs|cjs|ts|tsx|go|rs|java|kt|rb|php|c|h|cc
 KINDS = ("rule", "context", "frozen")
 KIND_LABEL = {"rule": "Rule", "context": "Context", "frozen": "Frozen"}
 FILE_NAME = "guidance.json"
-MAX_ENTRIES = 500
+MAX_ENTRIES = 500  # active entries
+MAX_STORED = 2000  # with the retired ones (past waves still show them): the oldest retired go first
 MAX_TEXT = 2000
 MAX_SELECTOR = 300
 MARKER = "<!-- repoviz guidance v1 -->"
@@ -103,7 +104,7 @@ def matches(selector: str, facts: dict[str, Any]) -> bool:
     if kind == "symbol":  # the module (or package) itself, or a changed class or function under the name
         return _under(module, value) or any(_under(s, value) for s in symbols)
     # a bare word: a component, a top-level directory or a top-level module of that name
-    return value == facts.get("component") or path.split("/", 1)[0] == value and "/" in path or \
+    return value == facts.get("component") or (path.split("/", 1)[0] == value and "/" in path) or \
         module.split(".", 1)[0] == value
 
 
@@ -120,11 +121,29 @@ def load(repo: "Repository") -> list[dict[str, Any]]:
     except (OSError, ValueError):
         return []
     entries = data.get("entries") if isinstance(data, dict) else None
-    return [e for e in entries or [] if isinstance(e, dict) and e.get("id") and e.get("selector")][:MAX_ENTRIES]
+    return _trim([e for e in entries if _well_formed(e)] if isinstance(entries, list) else [])
+
+
+def _well_formed(e: Any) -> bool:
+    return isinstance(e, dict) and all(isinstance(e.get(k), str) and e[k] for k in ("id", "selector", "text")) \
+        and e.get("kind") in KINDS
+
+
+def _trim(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """At most :data:`MAX_STORED` entries: the oldest retired ones are dropped first, never an active one while
+    a retired one is left."""
+    extra = len(entries) - MAX_STORED
+    if extra <= 0:
+        return entries
+    retired = [i for i, e in enumerate(entries) if e.get("retired_at")][:extra]
+    drop = set(retired)
+    kept = [e for i, e in enumerate(entries) if i not in drop]
+    return kept[-MAX_STORED:]
 
 
 def save(repo: "Repository", entries: list[dict[str, Any]]) -> None:
-    _atomic_write(_file(repo), json.dumps({"version": 1, "updated_at": utcnow(), "entries": entries}, indent=1))
+    _atomic_write(_file(repo), json.dumps({"version": 1, "updated_at": utcnow(), "entries": _trim(entries)},
+                                          indent=1))
 
 
 def stamp(repo: "Repository") -> tuple[int, int]:
@@ -151,19 +170,27 @@ def _head(repo: "Repository") -> str | None:
     return repo.git.head() if repo.git is not None else None
 
 
-def add(repo: "Repository", selector: str, text: str, kind: str = "rule", author: str = "") -> dict[str, Any]:
-    """A new active entry, valid from the current commit."""
-    selector, text, kind = _clean(selector, text, kind)
-    entries = load(repo)
-    if sum(1 for e in entries if not e.get("valid_until_sha") and not e.get("retired_at")) >= MAX_ENTRIES:
-        raise GuidanceError(f"at most {MAX_ENTRIES} active entries")
+def _check_room(entries: list[dict[str, Any]], adding: int) -> None:
+    if sum(1 for e in entries if not e.get("retired_at")) + adding > MAX_ENTRIES:
+        raise GuidanceError(f"at most {MAX_ENTRIES} active entries (retire some first)")
+
+
+def _new_entries(repo: "Repository", items: list[tuple[str, str, str]], author: str) -> list[dict[str, Any]]:
     from .verdict import default_reviewer
 
-    entry = {"id": secrets.token_hex(6), "selector": selector, "text": text, "kind": kind,
-             "author": redact(str(author or "").strip() or default_reviewer(repo))[:100], "created_at": utcnow(),
-             "valid_from_sha": _head(repo)}
-    entries.append(entry)
-    save(repo, entries[-MAX_ENTRIES:])
+    who = redact(str(author or "").strip() or default_reviewer(repo))[:100]
+    now, head = utcnow(), _head(repo)
+    return [{"id": secrets.token_hex(6), "selector": selector, "text": text, "kind": kind, "author": who,
+             "created_at": now, "valid_from_sha": head} for selector, text, kind in items]
+
+
+def add(repo: "Repository", selector: str, text: str, kind: str = "rule", author: str = "") -> dict[str, Any]:
+    """A new active entry, valid from the current commit."""
+    item = _clean(selector, text, kind)
+    entries = load(repo)
+    _check_room(entries, 1)
+    entry = _new_entries(repo, [item], author)[0]
+    save(repo, entries + [entry])
     return entry
 
 
@@ -256,7 +283,7 @@ def export_markdown(entries: list[dict[str, Any]]) -> str:
         groups.setdefault(e["selector"], []).append(e)
     for selector in sorted(groups, key=lambda s: (parse_selector(s)[0] != "component", s)):
         lines += [f"### `{selector}`", ""]
-        for e in sorted(groups[selector], key=lambda x: (KINDS.index(x["kind"]), x["created_at"])):
+        for e in sorted(groups[selector], key=lambda x: (KINDS.index(x["kind"]), x.get("created_at") or "")):
             lines.append(f"- **{KIND_LABEL[e['kind']]}:** {e['text']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -269,7 +296,7 @@ _ITEM = re.compile(r"^[-*]\s+\*\*(Rule|Context|Frozen):\*\*\s+(.+?)\s*$", re.IGN
 def parse_export(text: str) -> list[dict[str, str]]:
     """Entries (``selector``, ``kind``, ``text``) from :func:`export_markdown` or its JSON form."""
     stripped = text.lstrip()
-    if stripped.startswith("{") or stripped.startswith("["):
+    if stripped.startswith(("{", "[")):
         try:
             data = json.loads(text)
         except ValueError as exc:
@@ -297,10 +324,13 @@ def parse_export(text: str) -> list[dict[str, str]]:
 
 def import_entries(repo: "Repository", text: str, author: str = "") -> dict[str, int]:
     """Load exported guidance back: new entries are added, ones already active (same selector, kind and text)
-    are kept as they are.  Retired entries of a JSON export are skipped."""
+    are kept as they are.  Retired entries of a JSON export are skipped.  All or nothing: every item is checked
+    before the store is written, once."""
     items = parse_export(text)
-    have = {(e["selector"], e["kind"], e["text"]) for e in load(repo) if not e.get("retired_at")}
-    added = skipped = 0
+    entries = load(repo)
+    have = {(e["selector"], e["kind"], e["text"]) for e in entries if not e.get("retired_at")}
+    new: list[tuple[str, str, str]] = []
+    skipped = 0
     for item in items:
         if item.get("retired"):
             skipped += 1
@@ -309,10 +339,12 @@ def import_entries(repo: "Repository", text: str, author: str = "") -> dict[str,
         if (selector, kind, body) in have:
             skipped += 1
             continue
-        add(repo, selector, body, kind, author=author)
+        new.append((selector, body, kind))
         have.add((selector, kind, body))
-        added += 1
-    return {"added": added, "skipped": skipped}
+    if new:
+        _check_room(entries, len(new))
+        save(repo, entries + _new_entries(repo, new, author))
+    return {"added": len(new), "skipped": skipped}
 
 
 def for_review(entries: list[dict[str, Any]], files: list[dict[str, Any]]) -> list[dict[str, Any]]:

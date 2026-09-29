@@ -97,51 +97,56 @@ def _iso(ts: str | int | None) -> str | None:
         return str(ts)[:10]
 
 
+def _tags(git: Any, merged: str | None) -> dict[str, tuple[list[str], int]]:
+    """``{commit: (tag names, commit time)}`` of the tags naming commits, in one ``for-each-ref`` (the dates of
+    lightweight tags, and of the commits annotated tags point to, come with it)."""
+    out = git.try_run("for-each-ref", "--format=%(refname:short)%09%(objecttype)%09%(objectname)%09%(*objecttype)"
+                      "%09%(*objectname)%09%(committerdate:unix)%09%(*committerdate:unix)",
+                      *([f"--merged={merged}"] if merged else []), "refs/tags") or ""
+    commits: dict[str, tuple[list[str], int]] = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        name, otype, oid, ptype, pid, ts, pts = parts
+        sha, when = (pid, pts) if otype == "tag" and ptype == "commit" else (oid, ts) if otype == "commit" else ("", "")
+        if sha and when.isdigit():
+            commits.setdefault(sha, ([], int(when)))[0].append(name)
+    return commits
+
+
 def tag_points(git: Any, merged: str | None = "HEAD") -> list[Point]:
     """Tags that name commits, oldest first (by the commit's date); with ``merged``, only those in its history
     (one line of releases: a maintenance branch's tags would make the timeline jump back and forth)."""
-    out = git.try_run("for-each-ref", "--format=%(refname:short)%09%(objecttype)%09%(objectname)%09%(*objecttype)"
-                      "%09%(*objectname)", *([f"--merged={merged}"] if merged else []), "refs/tags") or ""
-    commits: dict[str, list[str]] = {}
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 5:
-            continue
-        name, otype, oid, ptype, pid = parts
-        sha = pid if otype == "tag" and ptype == "commit" else oid if otype == "commit" else None
-        if sha:
-            commits.setdefault(sha, []).append(name)
-    if not commits:
-        return []
-    dates = {}
-    shas = list(commits)
-    for i in range(0, len(shas), 200):
-        log = git.try_run("show", "-s", "--format=%H %ct", *shas[i:i + 200]) or ""
-        for line in log.splitlines():
-            sha, _, ts = line.partition(" ")
-            if ts.isdigit():
-                dates[sha] = int(ts)
-    points = [Point(sha, ", ".join(sorted(names)), _iso(dates.get(sha)), "tag", sorted(names)[0])
-              for sha, names in commits.items() if sha in dates]
-    return sorted(points, key=lambda p: (dates.get(p.spec, 0), p.label))
+    points = [(when, Point(sha, ", ".join(sorted(names)), _iso(when), "tag", sorted(names)[0]))
+              for sha, (names, when) in _tags(git, merged).items()]
+    return [p for _, p in sorted(points, key=lambda wp: (wp[0], wp[1].label))]
 
 
 def every_points(git: Any, days: int, limit: int) -> list[Point]:
     """One commit per ``days`` on the first-parent history, newest first back ``limit`` steps, returned oldest
-    first: the most recent commit of each step."""
-    out = git.try_run("log", "--first-parent", "--format=%H %ct", "HEAD") or ""
-    points: list[Point] = []
-    next_before: int | None = None
-    for line in out.splitlines():
-        sha, _, ts = line.partition(" ")
-        if not ts.isdigit():
-            continue
-        t = int(ts)
-        if next_before is None or t <= next_before:
-            points.append(Point(sha, _iso(t) or sha[:10], _iso(t), "commit", sha[:12]))
-            next_before = t - days * 86400
-            if len(points) >= limit:
-                break
+    first: the most recent commit of each step.  The log is read back ``limit`` steps from HEAD first (the whole
+    history only when gaps in it leave fewer points)."""
+    head = (git.try_run("log", "-1", "--format=%ct", "HEAD") or "").strip()
+    since = [f"--since=@{int(head) - (limit + 1) * days * 86400}"] if head.isdigit() else []
+    for bound in ((since, []) if since else ([],)):
+        out = git.try_run("log", "--first-parent", "--format=%H %ct %P", *bound, "HEAD") or ""
+        points: list[Point] = []
+        next_before: int | None = None
+        root = False  # the log reached the first commit: the whole history is in it
+        for line in out.splitlines():
+            sha, ts, *parents = line.split(" ")
+            if not ts.isdigit():
+                continue
+            root = not parents or parents == [""]
+            t = int(ts)
+            if next_before is None or t <= next_before:
+                points.append(Point(sha, _iso(t) or sha[:10], _iso(t), "commit", sha[:12]))
+                next_before = t - days * 86400
+                if len(points) >= limit:
+                    break
+        if len(points) >= limit or root:
+            break
     if points:
         points[0].kind = "head"
     return list(reversed(points))
@@ -180,7 +185,7 @@ def sample(repo: Any, how: str = "auto", every_days: int = 7, limit: int = MAX_P
         if how == "tags" or (how == "auto" and len(tags) >= 3):
             if not tags:
                 raise DriftError("no tag in the history of HEAD (use --every 7d or --waves)")
-            elsewhere = len(tag_points(git, None)) - len(tags)
+            elsewhere = len(_tags(git, None)) - len(tags)
             if elsewhere > 0:
                 notes.append(f"{_plural(elsewhere, 'tag')} not in the history of HEAD left out (other release lines)")
             head = git.head()
@@ -333,11 +338,14 @@ class _Cache:
     def __init__(self, repo: Any) -> None:
         self.path = repo.state.dir / "drift.json"
         self.lock = threading.Lock()
+        self.items: dict[str, Any] = {}
         try:
             data = json.loads(self.path.read_text())
-            self.items: dict[str, Any] = data.get("points", {}) if data.get("version") == __version__ else {}
-        except (OSError, ValueError, AttributeError):
-            self.items = {}
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict) and data.get("version") == __version__ and isinstance(data.get("points"), dict):
+            self.items = {k: v for k, v in data["points"].items()
+                          if isinstance(v, dict) and isinstance(v.get("metrics"), dict)}
         self.dirty = False
 
     def get(self, key: str) -> dict[str, Any] | None:
@@ -438,6 +446,11 @@ def _fmt(v: Any) -> str:
     return "–" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
 
 
+def _cell(text: str) -> str:
+    """A Markdown table cell: a tag or a wave label may hold ``|`` or a line break."""
+    return " ".join(text.split()).replace("\\", "\\\\").replace("|", "\\|")
+
+
 def to_text(doc: dict[str, Any], markdown: bool = False) -> str:
     pts = doc["points"]
     how = {"tags": "tags", "every": f"one commit every {doc.get('every_days')} days", "waves": "waves"}[doc["mode"]]
@@ -446,7 +459,7 @@ def to_text(doc: dict[str, Any], markdown: bool = False) -> str:
     out.append("")
     labels = [p["label"] if len(p["label"]) <= 18 else p["label"][:17] + "…" for p in pts]
     if markdown:
-        out.append("| Metric | " + " | ".join(labels) + " |")
+        out.append("| Metric | " + " | ".join(_cell(lab) for lab in labels) + " |")
         out.append("|---|" + "---|" * len(labels))
         for m in doc["metrics"]:
             out.append(f"| {m['label']} | " + " | ".join(_fmt(p["metrics"].get(m["key"])) for p in pts) + " |")

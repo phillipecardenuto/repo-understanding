@@ -417,12 +417,12 @@ def file_hunks(before: str, after: str, context: int = 3) -> tuple[list[dict[str
         lines: list[str] = []
         for tag, i1, i2, j1, j2 in group:
             if tag == "equal":
-                lines += [" " + l[:MAX_LINE_CHARS] for l in a[i1:i2]]
+                lines += [" " + ln[:MAX_LINE_CHARS] for ln in a[i1:i2]]
                 continue
             if tag in ("replace", "delete"):
-                lines += ["-" + l[:MAX_LINE_CHARS] for l in a[i1:i2]]
+                lines += ["-" + ln[:MAX_LINE_CHARS] for ln in a[i1:i2]]
             if tag in ("replace", "insert"):
-                lines += ["+" + l[:MAX_LINE_CHARS] for l in b[j1:j2]]
+                lines += ["+" + ln[:MAX_LINE_CHARS] for ln in b[j1:j2]]
         first, last = group[0], group[-1]
         hunks.append({"old_start": first[1] + 1, "old_len": last[2] - first[1], "new_start": first[3] + 1,
                       "new_len": last[4] - first[3], "lines": lines})
@@ -2303,7 +2303,7 @@ def _note_lines(n: int, note: dict[str, Any], finding: dict[str, Any] | None) ->
         out.append(f"   Related signal: {finding['title']}: {finding.get('detail', '')}")
     excerpt = note.get("excerpt") or (finding or {}).get("excerpt")
     if excerpt:
-        out += ["   ```", *("   " + l for l in str(excerpt).splitlines()[:8]), "   ```"]
+        out += ["   ```", *("   " + ln for ln in str(excerpt).splitlines()[:8]), "   ```"]
     return out
 
 

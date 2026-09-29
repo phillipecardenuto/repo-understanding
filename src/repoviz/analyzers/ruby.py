@@ -23,6 +23,7 @@ the modifier forms ``return if x`` open nothing).
 
 from __future__ import annotations
 
+import bisect
 import posixpath
 import re
 from collections import Counter
@@ -59,7 +60,7 @@ STDLIB = {"json", "set", "net", "uri", "time", "date", "yaml", "psych", "fileuti
           "io", "bigdecimal", "rbconfig", "resolv", "ipaddr", "abbrev", "find", "getoptlong", "coverage",
           "objspace", "ripper", "racc", "strscan", "cgi", "webrick", "rdoc", "irb", "readline", "reline", "fiber",
           "continuation", "mkmf", "bundler", "rubygems", "matrix", "prime", "tsort", "un", "drb", "expect", "pty",
-          "syslog", "win32ole", "fiddle", "securerandom", "random", "digest/md5", "digest/sha1"}
+          "syslog", "win32ole", "fiddle", "random", "digest/md5", "digest/sha1"}
 
 
 # --------------------------------------------------------------------------- parsing (pure, cached per content)
@@ -70,6 +71,9 @@ class _Open:
     kind: str  # class | module | def | block
     decl: dict[str, Any] | None = None
     name: str = ""  # the constant path this class / module adds to the nesting
+    nest: tuple[str, ...] = ()  # the nesting inside it (enclosing constant names)
+    singleton: bool = False  # inside `class << self`
+    owner: int = -1  # start of the innermost class / module declaration around it
 
 
 @dataclass
@@ -79,12 +83,17 @@ class _Scan:
     lines: LineIndex
     decls: list[dict[str, Any]] = field(default_factory=list)
     defined: list[tuple[str, int]] = field(default_factory=list)  # (full constant name, line)
+    owners: dict[int, int] = field(default_factory=dict)  # id(method decl) -> start of its class / module
 
 
-def _statement_start(code: str, pos: int) -> bool:
-    """Whether the keyword at ``pos`` starts a statement (``if x`` opens a block, ``return if x`` does not)."""
-    line_start = code.rfind("\n", 0, pos) + 1
-    before = code[line_start:pos].rstrip()
+#: Characters of a line looked at around a keyword (a minified or generated file can be one huge line).
+WINDOW = 300
+
+
+def _statement_start(before: str) -> bool:
+    """Whether a keyword after ``before`` (its line up to it) starts a statement (``if x`` opens a block,
+    ``return if x`` does not)."""
+    before = before.rstrip()
     if not before:
         return True
     semi = before.rfind(";")
@@ -97,15 +106,22 @@ def _statement_start(code: str, pos: int) -> bool:
 def _declarations(scan: _Scan) -> list[tuple[int, tuple[str, ...]]]:
     """Blocks and definitions; returns the nesting (enclosing constant names) at every position where it changes."""
     code = scan.code
+    starts = scan.lines.starts  # offsets just after each newline
     stack: list[_Open] = []
     changes: list[tuple[int, tuple[str, ...]]] = [(0, ())]
 
     def nesting() -> tuple[str, ...]:
-        out: list[str] = []
-        for o in stack:
-            if o.kind in ("class", "module") and o.name:
-                out = [o.name[2:]] if o.name.startswith("::") else out + [o.name]
-        return tuple(out)
+        return stack[-1].nest if stack else ()  # every open block carries the nesting inside it
+
+    def push(kind: str, decl: dict[str, Any] | None = None, name: str = "", nest: tuple[str, ...] | None = None,
+             owner: int | None = None) -> None:
+        top = stack[-1] if stack else _Open("")
+        stack.append(_Open(kind, decl, name, top.nest if nest is None else nest,
+                           top.singleton or kind == "singleton", top.owner if owner is None else owner))
+
+    def line_bounds(pos: int) -> tuple[int, int]:
+        k = bisect.bisect_right(starts, pos)
+        return (starts[k - 1] if k else 0), (starts[k] - 1 if k < len(starts) else len(code))
 
     for m in _OPENERS.finditer(code):
         word, pos = m.group(1), m.start()
@@ -117,50 +133,48 @@ def _declarations(scan: _Scan) -> list[tuple[int, tuple[str, ...]]]:
                 if closed.kind in ("class", "module"):
                     changes.append((m.end(), nesting()))
             continue
-        if word in ("if", "unless", "while", "until", "for") and not _statement_start(code, pos):
+        line_start, line_end = line_bounds(pos)
+        before = code[max(line_start, pos - WINDOW):pos]
+        if word in ("if", "unless", "while", "until", "for") and not _statement_start(before):
             continue  # a modifier: `x if y`
-        if word == "do" and re.match(r"[ \t]*$", code[code.rfind("\n", 0, pos) + 1:pos]) is None and \
-                re.search(r"\b(?:while|until|for)\b[^\n]*$", code[code.rfind("\n", 0, pos) + 1:pos]):
+        if word == "do" and before.strip() and re.search(r"\b(?:while|until|for)\b[^\n]*$", before):
             continue  # `while x do`: the do belongs to the loop
-        rest = code[m.end():code.find("\n", m.end()) if code.find("\n", m.end()) >= 0 else len(code)]
+        rest = code[m.end():min(line_end, m.end() + WINDOW)]
         if word in ("class", "module"):
             cm = re.match(r"\s*(<<\s*self|(?:::)?[A-Z]\w*(?:::[A-Z]\w*)*)(\s*<\s*([^;\n]+))?", rest)
             if cm is None:
                 continue  # `klass.class`, `class_eval`: not a definition
             if cm.group(1).replace(" ", "").startswith("<<"):
-                stack.append(_Open("block"))  # class << self: singleton methods, same nesting
-                stack[-1].kind = "singleton"
+                push("singleton")  # class << self: singleton methods, same nesting
                 continue
             name = cm.group(1)
             parent = nesting()
-            full = name[2:] if name.startswith("::") else "::".join(parent + (name,))
-            line = scan.lines.line(pos)
+            nest = (name[2:],) if name.startswith("::") else parent + (name,)
+            full = "::".join(nest)
             decl = _add(scan, full, name.split("::")[-1], word, pos, None, None, True)
-            scan.defined.append((full, line))
-            stack.append(_Open(word, decl, name))
-            changes.append((m.end(), nesting()))
-            if re.match(r"\s*(?:<<\s*self|(?:::)?[A-Z][\w:]*)(?:\s*<\s*[^;\n]+)?\s*;\s*end\b", rest):
-                pass  # `class Foo < Bar; end`: the scanner meets the `end` next
+            scan.defined.append((full, scan.lines.line(pos)))
+            push(word, decl, name, nest, pos)  # `class Foo < Bar; end`: the scanner meets the end next
+            changes.append((m.end(), nest))
             continue
         if word == "def":
             dm = re.match(r"\s*(self\.)?([A-Za-z_]\w*[?!=]?|\[\]=?|[+\-*/%<>=!~^&|]+)\s*(\(([^)]*)\)|([^\n;=]*))?", rest)
             if dm is None:
                 continue
             after = rest[dm.end():]
-            singleton = bool(dm.group(1)) or any(o.kind == "singleton" for o in stack)
+            singleton = bool(dm.group(1)) or bool(stack and stack[-1].singleton)
             group = 4 if dm.group(4) is not None else 5  # read from the text with strings kept
             params = squash(scan.noc[m.end() + dm.start(group):m.end() + dm.end(group)] if dm.group(group) else "")
             owner = "::".join(nesting())
             qual = f"{owner}{'.' if singleton else '#'}{dm.group(2)}" if owner else dm.group(2)
             endless = bool(re.match(r"\s*=(?!=)", after))  # def square(x) = x * x
-            public = not re.search(r"\b(?:private|protected)\s+$", code[code.rfind("\n", 0, pos) + 1:pos])
+            public = not re.search(r"\b(?:private|protected)\s+$", before)
             decl = _add(scan, qual, dm.group(2), "method" if owner else "function", pos,
-                        (code.find("\n", m.end()) if code.find("\n", m.end()) >= 0 else len(code)) - 1 if endless
-                        else None, f"({params})", public)
+                        line_end - 1 if endless else None, f"({params})", public)
+            scan.owners[id(decl)] = stack[-1].owner if stack else -1
             if not endless:
-                stack.append(_Open("def", decl))
+                push("def", decl)
             continue
-        stack.append(_Open("block"))
+        push("block")
     for d in scan.decls:
         if d["end"] is None:
             d["end"] = len(code) - 1
@@ -184,25 +198,22 @@ def parse_ruby(text: str) -> dict[str, Any]:
     changes = _declarations(scan)
     positions = [c[0] for c in changes]
 
-    import bisect
-
     def nesting_at(pos: int) -> tuple[str, ...]:
         return changes[bisect.bisect_right(positions, pos) - 1][1]
 
-    private_ranges: list[tuple[int, int]] = []  # `private` on its own line: the methods after it
-    for m in re.finditer(r"(?m)^[ \t]*(private|protected|public)[ \t]*$", code):
-        private_ranges.append((m.start(), 1 if m.group(1) != "public" else 0))
+    visibility = [(m.start(), m.group(1) != "public")  # `private` on its own line: the methods after it
+                  for m in re.finditer(r"(?m)^[ \t]*(private|protected|public)[ \t]*$", code)]
+    visibility_at = [v[0] for v in visibility]
     for d in scan.decls:
         if d["kind"] in ("method", "function"):
-            owner_start = max((o["start"] for o in scan.decls if o["kind"] in ("class", "module")
-                               and o["start"] < d["start"] <= o["end"]), default=-1)
-            before = [flag for start, flag in private_ranges if owner_start < start < d["start"]]
-            if before and before[-1]:
+            k = bisect.bisect_left(visibility_at, d["start"]) - 1  # the last keyword before it, in its class
+            if k >= 0 and visibility[k][0] > scan.owners.get(id(d), -1) and visibility[k][1]:
                 d["public"] = False
     refs: dict[str, list[Any]] = {}
     for m in _CONST_REF.finditer(code):
         line = lines.line(m.start())
-        before = code[code.rfind("\n", 0, m.start()) + 1:m.start()]
+        line_start = lines.starts[line - 2] if line > 1 else 0
+        before = code[max(line_start, m.start() - WINDOW):m.start()]
         if re.search(r"(?<![\w:])(?:class|module)\s+$", before):
             continue  # the name being defined
         name = m.group(2)
@@ -260,7 +271,7 @@ def _gem_key(name: str) -> str:
 
 class RubyAnalyzer(Analyzer):
     name = "ruby"
-    version = "1"  # bump when the parse result or the graph changes (part of the cache keys)
+    version = "2"  # bump when the parse result or the graph changes (part of the cache keys)
     languages = ("ruby",)
     capabilities = (CAP_MODULES, CAP_SYMBOLS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS)
 

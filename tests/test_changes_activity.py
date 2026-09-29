@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from repoviz import __version__
 from repoviz.activity import observe
 from repoviz.diff import diff_snapshots
 from repoviz.flow import affected_flow
@@ -795,6 +796,46 @@ def drift_repo(make_repo):
     return repo
 
 
+def test_drift_every_n_days_reads_back_only_as_far_as_needed(make_repo, monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    from repoviz import drift
+    from repoviz.gitutil import Git
+
+    repo = make_repo({"a.py": "x = 0\n"})
+    day = 86400
+    t0 = 1_699_920_000  # midnight UTC: the points carry dates
+
+    def commit_at(days: int) -> None:
+        monkeypatch.setenv("GIT_COMMITTER_DATE", f"@{t0 + days * day} +0000")
+        repo.append("a.py", f"x = {days}\n")
+        repo.commit(f"day {days}")
+
+    monkeypatch.setenv("GIT_COMMITTER_DATE", f"@{t0} +0000")
+    repo.git("commit", "-q", "--amend", "--no-edit")
+    for d in (1, 2, 400, 401, 402, 410):
+        commit_at(d)
+    git = Git(repo.path)
+    calls: list[tuple[str, ...]] = []
+    real = git.try_run
+    monkeypatch.setattr(git, "try_run", lambda *a, **k: calls.append(a) or real(*a, **k))
+
+    def days_of(points):
+        return [(int(datetime.strptime(p.date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()) - t0) // day
+                for p in points]
+
+    assert days_of(drift.every_points(git, 7, 2)) == [402, 410]  # 2 steps: 3 weeks of history are enough
+    assert len([c for c in calls if c[0] == "log" and "--first-parent" in c]) == 1
+    calls.clear()
+    # the gap leaves too few points in the last weeks: the whole history is read, same result as before
+    assert days_of(drift.every_points(git, 7, 4)) == [2, 402, 410]
+    assert len([c for c in calls if c[0] == "log" and "--first-parent" in c]) == 2
+    calls.clear()
+    # a short history reaches the first commit in the bounded read: no second read
+    assert days_of(drift.every_points(git, 100, 12)) == [2, 410]
+    assert len([c for c in calls if c[0] == "log" and "--first-parent" in c]) == 1
+
+
 def test_drift_over_tags_counts_and_the_largest_jump(make_repo, tmp_path) -> None:
     from repoviz import drift
     from repoviz.cli import main
@@ -825,6 +866,14 @@ def test_drift_over_tags_counts_and_the_largest_jump(make_repo, tmp_path) -> Non
     text = tmp_path / "drift.md"
     assert main(["drift", "-C", repo.path, "--markdown", "-o", str(text)]) == 0  # auto: 4 tags
     assert "**Largest jump: v0.2 → v0.3:" in text.read_text() and "| Cycles | 0 | 0 | 1 | 1 |" in text.read_text()
+    # a tag name may hold a table separator; a damaged cache file is ignored, not a crash
+    repo.git("tag", "v0.5|rc")
+    state = Repository(repo.path).state.dir / "drift.json"
+    for broken in ("[1, 2]", '{"version": "%s", "points": [1]}' % __version__,
+                   '{"version": "%s", "points": {"k": 1, "j": {"metrics": 3}}}' % __version__):
+        state.write_text(broken)
+        assert main(["drift", "-C", repo.path, "--tags", "--markdown", "-o", str(text)]) == 0
+    assert "| Metric | v0.1 | v0.2 | v0.3 | v0.4, v0.5\\|rc |" in text.read_text()  # two tags, one commit
 
 
 def test_drift_sampling_caps_points_and_falls_back_to_dates(make_repo, monkeypatch) -> None:
