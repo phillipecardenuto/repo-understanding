@@ -2395,3 +2395,117 @@ def test_c_cpp_changes_get_the_same_review_signals(make_repo) -> None:
     fmt = next(k for k in money["symbols"] if k["name"] == "money_format")
     assert (fmt["signature_before"], fmt["signature"]) == ("(money_t m, const char *cur) -> char *",
                                                            "(money_t m, const char *cur, int pad) -> char *")
+
+
+# --------------------------------------------------------------------------- diff readability (#33)
+
+MOVED_BODY = "\n".join(f"    value_{i} = compute_step({i}, rate)" for i in range(28))
+
+
+def moved_repo(make_repo):
+    """convert() (30 lines) moves from app/a.py to app/b.py with one line changed on the way; util.py renames a
+    variable and re-indents a line; mover.py moves shout() unchanged into app/b.py too."""
+    repo = make_repo({
+        "app/__init__.py": "",
+        "app/a.py": "from app.util import compute_step\n\n\ndef keep():\n    return 1\n\n\ndef convert(rate):\n"
+                    + MOVED_BODY + "\n    return value_1\n\n\ndef tail():\n    return 2\n",
+        "app/b.py": "import json\n\n\ndef other():\n    return json.dumps({})\n",
+        "app/util.py": "def compute_step(i, rate):\n    total = i * rate\n    return total\n\n\ndef wrap(x):\n"
+                       "    if x:\n        return x\n    return None\n",
+        "app/mover.py": "def shout(text):\n    text = text.upper()\n    text = text + '!'\n    return text\n\n\n"
+                        "def stay():\n    return 0\n",
+    })
+    a = Path(repo.path, "app/a.py").read_text()
+    start, end = a.index("def convert"), a.index("\n\n\ndef tail")
+    fn = a[start:end].replace("value_7 = compute_step(7, rate)", "value_7 = compute_step(7, rate * 2)")
+    m = Path(repo.path, "app/mover.py").read_text()
+    shout = m[:m.index("\n\n\ndef stay")]
+    repo.write({
+        "app/a.py": a[:start] + a[end + 3:],
+        "app/b.py": Path(repo.path, "app/b.py").read_text() + "\n\n" + fn + "\n\n\n" + shout + "\n",
+        "app/util.py": Path(repo.path, "app/util.py").read_text().replace("total = i * rate\n    return total",
+                                                                           "amount = i * rate\n    return amount")
+        .replace("    if x:\n        return x\n", "    if x:\n            return x\n"),
+        "app/mover.py": "def stay():\n    return 0\n",
+    })
+    return repo
+
+
+def test_moved_blocks_across_files_with_the_residual_edit(make_repo) -> None:
+    repo = moved_repo(make_repo)
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    files = {f["path"]: f for f in report["files"]}
+    assert report["moves"]["moves_searched"] and report["moves"]["moved_blocks"] == 2
+    src = [m for hk in files["app/a.py"]["hunks"] for m in hk.get("moved", [])]
+    dst = [m for hk in files["app/b.py"]["hunks"] for m in hk.get("moved", [])]
+    assert [(m["side"], m["path"], m["lines"], m["changed"]) for m in src] == [("-", "app/b.py", 30, 1)]
+    conv = next(m for m in dst if m["path"] == "app/a.py")
+    assert (conv["side"], conv["lines"], conv["changed"]) == ("+", 30, 1)
+    # the one line edited while moving, alone, with only the new tokens marked
+    assert [(x["t"], x["text"].strip()) for x in conv["residual"]] == [
+        ("-", "value_7 = compute_step(7, rate)"), ("+", "value_7 = compute_step(7, rate * 2)")]
+    plus = conv["residual"][1]
+    assert [plus["text"][s:e] for s, e in plus["marks"]] == ["* 2"]
+    hunk = next(hk for hk in files["app/b.py"]["hunks"] if conv in hk.get("moved", []))
+    assert hunk["lines"][conv["start"]].startswith("+def convert") and hunk["lines"][conv["end"]] == "+    return value_1"
+    # an unchanged function moved to another file: a moved block, and a key change "moved from" with its body intact
+    shout = next(m for m in dst if m["path"] == "app/mover.py")
+    assert shout["changed"] == 0 and shout["residual"] == []
+    moved_sym = next(k for k in files["app/b.py"]["symbols"] if k["name"] == "shout")
+    assert moved_sym["moved_from"] == "app/mover.py" and moved_sym["body_unchanged"] is True
+
+
+def test_word_level_marks_and_whitespace_only_lines(make_repo) -> None:
+    from repoviz import diffmarks
+
+    repo = moved_repo(make_repo)
+    r = Repository(repo.path)
+    util = next(f for f in build_review(r, resolve_target(r, "all"))["files"] if f["path"] == "app/util.py")
+    hk = util["hunks"][0]
+    marked = {hk["lines"][i][1:][s:e] for i, ranges in hk["marks"] for s, e in ranges}
+    assert marked == {"total", "amount"}  # only the renamed identifier, never "= i * rate"
+    ws = [hk["lines"][i][0] + hk["lines"][i][1:].strip() for i in hk["ws"]]
+    assert ws == ["-return x", "+return x"]  # re-indented only
+    assert not any(m for m in hk.get("moved", []))  # an edit in place is not a move
+    # a rewritten line gets no marks; whitespace is never marked
+    assert diffmarks.token_marks("x = compute(a, b)", "return other_thing()") is None
+    assert diffmarks.token_marks("f(a,  b)", "f(a, c)") == ([[6, 7]], [[5, 6]])
+
+
+def test_moved_code_detection_is_bounded(make_repo) -> None:
+    import random
+    import time
+
+    from repoviz import diffmarks
+    from repoviz.review import file_hunks
+
+    rnd = random.Random(1)
+
+    def line(i):
+        return f"    result_{i} = service.compute_{rnd.randint(0, 50)}(item_{i}, rate={rnd.random():.3f})"
+
+    def wave():
+        files = []
+        blocks = [[line(i + 1000 * k) for i in range(60)] for k in range(10)]
+        for k in range(10):
+            before = [line(i + 100000 * k) for i in range(380)]
+            after = [x.replace("rate=", "ratio=") if i % 2 == 0 else x for i, x in enumerate(before)]
+            before += blocks[k]
+            after += [x.replace("item_", "elem_", 1) if j == 5 else x for j, x in enumerate(blocks[(k + 1) % 10])]
+            files.append((f"f{k}.py", file_hunks("\n".join(before), "\n".join(after))[0]))
+        return files
+
+    files = wave()
+    changed = sum(1 for _p, hs in files for hk in hs for x in hk["lines"] if x[:1] in "+-")
+    assert 4800 <= changed <= diffmarks.MAX_LINES
+    best = None
+    for _ in range(3):
+        files = wave()
+        t = time.perf_counter()
+        stats = diffmarks.annotate(files)
+        best = min(best or 1e9, time.perf_counter() - t)
+    assert stats["moves_searched"] and stats["moved_blocks"] == 10
+    assert best < 0.3, best  # a 5,000-line wave adds under 300 ms
+    over = diffmarks.annotate(wave(), max_lines=1000)  # above the cap: no move search, still the marks
+    assert over["moves_searched"] is False and over["changed_lines"] == changed

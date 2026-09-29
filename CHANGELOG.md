@@ -6,6 +6,22 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Moved code and changed words in the diffs** ([#33](https://github.com/phillipecardenuto/repo-understanding/issues/33)).
+  - **Moved blocks.** Code the agent moved, within a file or to another file of
+    the wave, is found (3 or more lines, whitespace collapsed, hash-then-difflib
+    matching). In the diff it collapses behind a **↕** row, such as "30 lines
+    moved from `app/a.py:8` · 1 line changed while moving", that shows only
+    the lines edited on the way.
+  - **Changed words.** Inside changed lines, the words that changed are
+    underlined and bold, not colour alone; a renamed variable marks just the
+    name.
+  - **Whitespace.** *hide whitespace-only changes* hides re-indented and blank
+    lines.
+  - **Key changes.** They say "moved from … (unchanged body)" for a function
+    moved intact.
+  - **Where and cost.** Also in the Structure tab's *Code changes* panel and in
+    static reports. A 5,000-line wave adds about 0.15 s to the review; larger
+    ones skip the move search and say so.
 - **Architecture drift over time** ([#32](https://github.com/phillipecardenuto/repo-understanding/issues/32)).
   - **Command.** `repoviz drift [--tags | --every 7d | --waves] [--json | --markdown]`
     measures the architecture at up to 12 points: tags in the history of HEAD,

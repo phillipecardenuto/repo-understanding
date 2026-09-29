@@ -90,7 +90,7 @@ Labels:
 | [#30](https://github.com/phillipecardenuto/repo-understanding/issues/30) | Health metrics and hotspot overlays (complexity × churn, fan-in/out, ownership) · **✓ done** | P2 | M |
 | [#31](https://github.com/phillipecardenuto/repo-understanding/issues/31) | History-based comparisons for clean checkouts on the Changes tab · **✓ done** | P2 | S |
 | [#32](https://github.com/phillipecardenuto/repo-understanding/issues/32) | Architecture over time: a drift timeline across tags, releases or waves · **✓ done** | P3 | M |
-| [#33](https://github.com/phillipecardenuto/repo-understanding/issues/33) | Moved-code detection and word-level highlights in diffs | P3 | M |
+| [#33](https://github.com/phillipecardenuto/repo-understanding/issues/33) | Moved-code detection and word-level highlights in diffs · **✓ done** | P3 | M |
 | [#36](https://github.com/phillipecardenuto/repo-understanding/issues/36) | Inspect the code changes of churn hotspots in the Structure tab (maintainer's issue) · **✓ done** | P1 | M |
 | [#37](https://github.com/phillipecardenuto/repo-understanding/issues/37) | Spotlight a module and its direct links on click in Dependencies (maintainer's issue) · **✓ done** | P1 | S |
 
@@ -124,7 +124,7 @@ Labels:
    (plan vs actual), #9 (verdict and gate), #10 (parallel agents), #12
    (coverage reports), #13 (cross-service contracts) and #30 (health metrics),
    done; then the P3 items #15 and #20 (done), #26 (one language at a
-   time) and #32 (drift timeline), done; then #33.
+   time), #32 (drift timeline) and #33 (moved code, changed words), done.
 
 ## Dependencies between items
 

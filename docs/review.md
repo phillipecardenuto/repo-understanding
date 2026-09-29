@@ -637,6 +637,47 @@ Pairing is deliberately cautious:
 
 Moving a protected file counts as touching it.
 
+A function moved to another file with its body intact is not a change of
+behaviour. Its key change reads "↕ moved from `app/mover.py` (unchanged
+body)".
+
+### Moved code and changed words in the diff
+
+Agents reorganize code: they extract a helper, move functions between files
+and reorder methods. A line diff shows that as a large deletion plus a large
+addition, and the two changed tokens inside get lost. The review's diffs
+(`diffmarks.py`) make both readable:
+
+- **Moved blocks.** A run of 3 or more removed lines whose text comes back as
+  added lines is a moved block, marked on both sides. The text is compared
+  with whitespace collapsed, so a method moved into a class still counts. The
+  lines may come back in the same file or in another file of the wave.
+  - The destination shows one **↕** row, collapsed: "30 lines moved from
+    `app/a.py:8` · 1 line changed while moving". Below it are only the lines
+    edited on the way, old and new, with the changed words marked.
+  - The source shows "moved to `app/b.py:14`". **show** expands the block.
+  - A removed run right above an added run in the same hunk is an edit in
+    place, not a move.
+  - Matching goes hash first, then `difflib` on the candidate runs, and is
+    one-to-one. Up to a quarter of a block may differ, which is the residual
+    edit.
+  - A review with more than 5,000 changed lines is not searched for moves. The
+    file card says so.
+- **Changed words.** Similar removed and added lines are paired (in place, and
+  inside moved blocks), and a token diff marks what changed. Tokens are words,
+  numbers, single punctuation marks and whitespace runs.
+  - A renamed variable marks the identifier only, never the rest of the line.
+  - Marks are underlined and bold on a stronger tint, so they read in both
+    themes and in greyscale.
+  - Whitespace is never marked. A line rewritten for the most part gets no
+    marks.
+- **Whitespace.** A line whose change is whitespace only (re-indented, or
+  blank) is tagged. *hide whitespace-only changes* above the diff hides those
+  lines, and the choice is remembered.
+- **Cost.** A 5,000-line wave adds about 0.15 s to the review build (checked in
+  `test_moved_code_detection_is_bounded`). The Structure tab's *Code changes*
+  panel uses the same marks.
+
 ### New code that is not wired in
 
 A frequent agent mistake is to write the new piece and forget to connect it. In

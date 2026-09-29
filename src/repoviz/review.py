@@ -26,7 +26,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from . import classify, depchanges, globs, metrics
+from . import classify, depchanges, diffmarks, globs, metrics
 from .activity import _ImpactIndex, _tests_affected, nodes_by_path
 from .config import DependencyRule
 from .contracts import check as check_contracts
@@ -670,6 +670,10 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
                 "lines_added": counts[0], "lines_removed": counts[1],
                 "public": n.metadata.get("public", n.metadata.get("exported", True)),
                 "renamed_from": ch.before.get("name") if any(r.startswith("renamed from") for r in ch.reasons) else None,
+                "moved_from": ch.before.get("path") if any(r.startswith("moved from") for r in ch.reasons) else None,
+                # moved or renamed and nothing else: the same code
+                "body_unchanged": bool(ch.reasons) and all(r.startswith(("moved from", "renamed from"))
+                                                           for r in ch.reasons),
             })
         key_changes.sort(key=lambda k: (-(k["lines_added"] + k["lines_removed"]), k["qualified_name"]))
         entry["symbols"] = key_changes
@@ -746,6 +750,9 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         if (entry.get("lines_added") or 0) > 400:
             add(Finding("large-change", "hygiene", "info", "Large change",
                         f"{entry['lines_added']} lines added in one file; review in detail.", path, component=cname))
+
+    # moved blocks across the wave's files, and the words that changed inside lines (diffmarks.py)
+    moves = diffmarks.annotate([(f["path"], f["hunks"]) for f in files if f.get("hunks")])
 
     sub_moves = {r["new_path"]: r["old_path"] for r in diff.renames if r["kind"] == "submodule"
                  and r["old_path"] and r["new_path"]}
@@ -840,6 +847,7 @@ def build_review(repo: "Repository", target: ReviewTarget, *, scope: ScopePolicy
         "components": components,
         "component_edges": comp_edges,
         "files": files,
+        "moves": moves,
         "plan": plan_report,
         "coverage": coverage_report,
         "guidance": guidance_report,

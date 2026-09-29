@@ -1708,3 +1708,36 @@ def test_drift_timeline_in_both_themes_and_click_through(page, make_repo, tmp_pa
     detail = page.inner_text("#tab-changes .drift-detail")
     assert "db → ui" in detail and "repoviz serve" in detail
     assert page.errors == []  # type: ignore[attr-defined]
+
+
+def test_moved_blocks_collapse_and_changed_words_are_marked(page, make_repo, tmp_path: Path) -> None:
+    from test_review import moved_repo
+
+    repo = moved_repo(make_repo)
+    report = tmp_path / "moved.html"
+    report.write_text(render_static_html(build_bundle(Repository(repo.path))), encoding="utf-8")
+    decorations = []
+    for scheme in ("dark", "light"):
+        page.emulate_media(color_scheme=scheme)
+        page.goto(report.as_uri())
+        page.wait_for_function(ALL_RENDERED, arg="review", timeout=60_000)
+        page.evaluate("repoviz.app.tabs.review.selectFile('app/b.py')")
+        row = page.locator("#tab-review table.diff tr.moved-row", has_text="moved from app/a.py")
+        assert "30 lines moved from app/a.py:8" in row.inner_text() and "1 line changed while moving" in row.inner_text()
+        # collapsed: the 30 lines are hidden, only the edit made while moving shows, its new tokens marked
+        assert page.locator("#tab-review table.diff tr.moved:visible").count() == 0
+        assert page.locator("#tab-review table.diff tr.residual:visible").count() == 2
+        assert page.locator("#tab-review table.diff tr.residual.add mark.tok").all_text_contents() == ["* 2"]
+        decorations.append(page.evaluate("getComputedStyle(document.querySelector('#tab-review mark.tok')).textDecorationLine"))
+    assert decorations == ["underline", "underline"]  # marked by an underline too, not colour alone
+    row.locator("button", has_text="show").click()
+    assert page.locator("#tab-review table.diff tr.moved:visible").count() >= 30
+    assert page.locator("#tab-review table.diff tr.residual:visible").count() == 0
+    # an in-place edit: only the renamed identifier is marked; whitespace-only lines can be hidden
+    page.evaluate("repoviz.app.tabs.review.selectFile('app/util.py')")
+    page.wait_for_selector("#tab-review .diff-legend", timeout=10_000)
+    assert sorted(set(page.locator("#tab-review table.diff mark.tok").all_text_contents())) == ["amount", "total"]
+    assert page.locator("#tab-review table.diff tr.ws:visible").count() == 2
+    page.locator("#tab-review .diff-legend input[type=checkbox]").check()
+    assert page.locator("#tab-review table.diff tr.ws:visible").count() == 0
+    assert page.errors == []  # type: ignore[attr-defined]

@@ -1599,24 +1599,81 @@
   }
   /* A diff: line numbers, an explicit + / − marker on every changed line (never colour alone), code.
      `row(tr, line)` may decorate each line's row and return extra rows to insert after it (the review's notes);
-     line = { t: "+" | "-" | " ", text, oldNo, newNo }. */
+     line = { t: "+" | "-" | " ", text, oldNo, newNo }.  Hunks annotated by diffmarks.py (#33) also get:
+     the changed words underlined (<mark>), whitespace-only lines tagged (`ws`, hidden by .hide-ws), and moved
+     blocks collapsed behind a ↕ row that shows only what changed inside them. */
+  function codeCell(text, ranges) {
+    const td = h("td", { class: "code" });
+    let at = 0;
+    for (const [s, e] of ranges || []) {
+      if (s > at) td.appendChild(document.createTextNode(text.slice(at, s)));
+      td.appendChild(h("mark", { class: "tok", text: text.slice(s, e) }));
+      at = e;
+    }
+    if (at < text.length || !td.childNodes.length) td.appendChild(document.createTextNode(text.slice(at)));
+    return td;
+  }
   function diffTable(hunks, row) {
     const tbl = h("table", { class: "diff" });
     for (const hk of hunks) {
       tbl.appendChild(h("tr", { class: "hunk" }, h("td", { colspan: 4, text: `@@ -${hk.old_start},${hk.old_len} +${hk.new_start},${hk.new_len} @@` })));
-      let o = hk.old_start, n = hk.new_start;
-      for (const raw of hk.lines) {
+      const marks = new Map(hk.marks || []), ws = new Set(hk.ws || []);
+      const movedAt = new Map((hk.moved || []).map((m) => [m.start, m]));
+      let o = hk.old_start, n = hk.new_start, block = null, blockRows = null;
+      hk.lines.forEach((raw, idx) => {
+        const mv = movedAt.get(idx);
+        if (mv && !block) {
+          block = mv; blockRows = [];
+          const rows = blockRows, residual = [];
+          const where = `${mv.path}${mv.line ? ":" + mv.line : ""}`;
+          const btn = h("button", { type: "button", class: "btn small", "aria-expanded": "false" }, "show");
+          const summary = h("tr", { class: "moved-row" }, h("td", { colspan: 2 }), h("td", { class: "mk", title: "moved block", text: "↕" }),
+            h("td", null, `${plural(mv.lines, "line")} moved ${mv.side === "-" ? "to" : "from"} `, h("span", { class: "mono", text: where }),
+              mv.side === "+" ? (mv.changed ? ` · ${plural(mv.changed, "line")} changed while moving (below)` : " · unchanged") : " (what changed is shown there)", " ", btn));
+          tbl.appendChild(summary);
+          for (const x of mv.side === "+" ? mv.residual || [] : []) {  // the edit made while moving, alone
+            const tr = h("tr", { class: "residual " + (x.t === "+" ? "add" : "del"), title: x.t === "-" ? `was ${mv.path}:${x.no}` : "" },
+              h("td", { class: "ln", text: x.t === "-" ? x.no : "" }), h("td", { class: "ln", text: x.t === "+" ? x.no : "" }),
+              h("td", { class: "mk", text: x.t === "+" ? "↕+" : "↕−" }), codeCell(x.text, x.marks));
+            residual.push(tr); tbl.appendChild(tr);
+          }
+          btn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const open = btn.getAttribute("aria-expanded") !== "true";
+            btn.setAttribute("aria-expanded", String(open)); btn.textContent = open ? "hide" : "show";
+            for (const r of rows) r.hidden = !open;
+            for (const r of residual) r.hidden = open;
+          });
+          blockRows.expand = () => { if (btn.getAttribute("aria-expanded") !== "true") btn.click(); };
+        }
         const t = raw[0], line = { t, text: raw.slice(1), oldNo: t === "+" ? null : o, newNo: t === "-" ? null : n };
-        const tr = h("tr", { class: t === "+" ? "add" : t === "-" ? "del" : "ctx" },
+        const cls = (t === "+" ? "add" : t === "-" ? "del" : "ctx") + (block ? " moved" : "") + (ws.has(idx) ? " ws" : "");
+        const tr = h("tr", { class: cls },
           h("td", { class: "ln", text: line.oldNo === null ? "" : line.oldNo }), h("td", { class: "ln", text: line.newNo === null ? "" : line.newNo }),
-          h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), h("td", { class: "code", text: line.text }));
+          h("td", { class: "mk", text: t === "+" ? "+" : t === "-" ? "−" : "" }), codeCell(line.text, marks.get(idx)));
         tbl.appendChild(tr);
-        for (const extra of (row && row(tr, line)) || []) tbl.appendChild(extra);
+        const extras = (row && row(tr, line)) || [];
+        for (const extra of extras) tbl.appendChild(extra);
+        if (block) {
+          tr.hidden = true; blockRows.push(tr); tr.expandBlock = blockRows.expand;
+          for (const extra of extras) { extra.hidden = true; blockRows.push(extra); }
+          if (extras.length) blockRows.expand();  // a note inside a moved block: show the block
+          if (idx >= block.end) block = null;
+        }
         if (t !== "+") o++;
         if (t !== "-") n++;
-      }
+      });
     }
     return h("div", { class: "diff-wrap" }, tbl);
+  }
+  /* What the diff marks mean, and the whitespace switch (per file card). */
+  function diffLegendRow(hunks, onWs) {
+    const moved = hunks.some((hk) => (hk.moved || []).length), marked = hunks.some((hk) => (hk.marks || []).length), ws = hunks.some((hk) => (hk.ws || []).length);
+    if (!moved && !marked && !ws) return null;
+    return h("div", { class: "diff-legend faint small" },
+      moved ? h("span", null, h("b", { text: "↕" }), " moved block, collapsed: only what changed while moving is shown") : null,
+      marked ? h("span", null, h("mark", { class: "tok", text: "underlined" }), " words that changed") : null,
+      ws ? checkbox("hide whitespace-only changes", !!storage.get("rv.hidews", false), (c) => { storage.set("rv.hidews", c); onWs(c); }) : null);
   }
   function checkbox(label, checked, onchange) {
     const c = h("input", { type: "checkbox", checked, onchange: () => onchange(c.checked) });
@@ -2720,7 +2777,10 @@
         const shown = c.hunks.reduce((a, hk) => a + hk.lines.length, 0);
         this.drawer.appendChild(h("div", { class: "notice", role: "status", text: live ? `Diff truncated: showing the first ${shown} of ${c.total_lines} lines.` : `Diff truncated for report size: showing ${shown} of ${c.total_lines} lines.` }));
       }
+      const legend = diffLegendRow(c.hunks, (on) => { const t = this.drawer.querySelector("table.diff"); if (t) t.classList.toggle("hide-ws", on); });
+      if (legend) this.drawer.appendChild(legend);
       this.drawer.appendChild(diffTable(c.hunks));
+      if (storage.get("rv.hidews", false)) { const t = this.drawer.querySelector("table.diff"); if (t) t.classList.add("hide-ws"); }
     },
     /* Closing keeps the graph as it was (zoom, pan, selection) and gives the focus back to the selected node. */
     closeChanges(restoreFocus) {
@@ -4558,7 +4618,9 @@
         this.fileEl.appendChild(table([
           { key: "status", label: "", render: (k) => statusPill(k.status) },
           { key: "qualified_name", label: "Symbol", render: (k) => [h("span", { class: "mono", text: `${k.kind} ${k.name}` }),
-            k.renamed_from ? h("span", { class: "faint", title: "renamed", text: ` ↦ was ${k.renamed_from}` }) : null, k.public === false ? h("span", { class: "faint", text: " (private)" }) : null] },
+            k.renamed_from ? h("span", { class: "faint", title: "renamed", text: ` ↦ was ${k.renamed_from}` }) : null,
+            k.moved_from ? h("span", { class: "faint", title: "moved", text: ` ↕ moved from ${k.moved_from}` }) : null,
+            k.body_unchanged ? h("span", { class: "faint", text: " (unchanged body)" }) : null, k.public === false ? h("span", { class: "faint", text: " (private)" }) : null] },
           { key: "signature", label: "Signature", render: (k) => k.signature_before && k.signature_before !== k.signature
             ? h("span", { class: "mono" }, h("del", { text: k.signature_before }), " → ", h("ins", { text: k.signature || "" })) : h("span", { class: "mono faint", text: k.signature || "" }) },
           { key: "lines_added", label: "+/−", num: true, render: (k) => `+${k.lines_added} −${k.lines_removed}`, sort: (k) => k.lines_added + k.lines_removed },
@@ -4641,6 +4703,10 @@
       if (!f.hunks || !f.hunks.length) { this.fileEl.appendChild(h("div", { class: "empty", text: f.diff_omitted ? `Diff not shown: ${f.diff_omitted}.` : "No textual diff." })); return; }
       const lineSymbol = (line) => { const k = f.symbols.find((s) => s.line && s.end_line && s.line <= line && line <= s.end_line); return k ? k.qualified_name : null; };
       // Every line can take a note for the agent; notes already written show under their line.
+      const wsHidden = () => !!storage.get("rv.hidews", false);
+      const legend = diffLegendRow(f.hunks, (c) => { const t = this.fileEl.querySelector("table.diff"); if (t) t.classList.toggle("hide-ws", c); });
+      if (legend) this.fileEl.appendChild(legend);
+      if (this.report.moves && this.report.moves.moves_searched === false) this.fileEl.appendChild(h("div", { class: "faint small", text: `ⓘ Moved code not searched: ${this.report.moves.changed_lines} changed lines in this review (limit 5,000).` }));
       this.fileEl.appendChild(diffTable(f.hunks, (tr, { t, text, oldNo, newNo }) => {
         const anchorLine = t === "-" ? oldNo : newNo;
         const lineNotes = t !== "-" ? notesByLine.get(newNo) || [] : [];
@@ -4655,6 +4721,7 @@
         return lineNotes.map((nn) => h("tr", { class: "note-row" }, h("td", { colspan: 2 }), h("td", { class: "mk" }, iconEl("comment")),
           h("td", null, pill(VERDICT_LABELS[nn.verdict] || nn.verdict, nn.verdict === "ok" ? "added" : "modified"), " ", nn.comment || "")));
       }));
+      if (wsHidden()) { const t = this.fileEl.querySelector("table.diff"); if (t) t.classList.add("hide-ws"); }
       if (focusLine) this.scrollToLine(focusLine);
     }
     /* A submodule: where its pointer moved, the commits in between, and the files changed inside it. */
@@ -4687,6 +4754,7 @@
       if (!line) return;
       const rows = $$("table.diff tr", this.fileEl).filter((tr) => tr.dataset.line);
       const row = rows.find((tr) => parseInt(tr.dataset.line, 10) === line) || rows.find((tr) => parseInt(tr.dataset.line, 10) >= line);
+      if (row && row.hidden && row.expandBlock) row.expandBlock();  // inside a collapsed moved block
       if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("flash"); setTimeout(() => row.classList.remove("flash"), 1500); }
     }
     /* Inline note form; `anchor` is where it appears, `ref` what the note is about. */
@@ -4866,6 +4934,8 @@
           "**Search** (press `/`) narrows the table by path, component or signal title. The **component chips** filter it (several can be on; they combine with the search). The search, chips, grouping and collapsed groups are remembered.",
           "**Risk** is a score from 0 to 100 with a level (*high*, *medium*, *low*), shown as an icon, a number and a word. Hover it, or open the file, to see each factor and its points: the most severe signal, how many places call the changed code, the entry points reaching it, missing or stale tests, a protected or sensitive path, a churn hotspot and the size of the change. The **wave risk** badge at the top is the riskiest file; click it to open that file. Weights are set in `[review.risk]`.",
           "The change card shows **key changes** (functions and classes added, modified or removed, with signature changes), dependency changes, signals, affected tests and the diff.",
+          "**Moved code** (to another place or another file of the wave) is collapsed in the diff behind a **↕** row (*30 lines moved from app/a.py:8 · 1 line changed while moving*) that shows only the lines edited on the way; **show** expands it. A function moved with its body intact says *moved from … (unchanged body)* in the key changes.",
+          "Inside a changed line, the **words that changed are underlined** (a renamed variable marks just the name). **Hide whitespace-only changes** above the diff hides re-indented and blank lines.",
           "A manifest's or lock file's card lists its **dependencies**: added, removed, **↑ upgraded**, **↓ downgraded**, **source changed** (now from a Git repository, a URL, a path outside the repository, an npm alias or another registry) or loosened (**unpinned**), with the version the lock file resolves. Indirect packages are counted. The header shows `+added −removed ↑ ↓` for the wave.",
           "Key changes also list **values**: constants, settings-class defaults and configuration keys, before → after (`MAX_IMAGES: 20 → 200`). A safety setting switched the risky way (debug on, TLS verification off, a timeout removed, CORS `*`) carries a **⚠** pill and a *Safety setting weakened* signal. Secret-looking names show `•••`.",
           "**What kind of file it is.** Under the risk line, the card says what the file was *before* the change: **hotspot (top 5%)** (complex and often changed), **high fan-in (used by 42 modules)** or **single owner** (one author made all its recent commits: ask them). These feed the risk score's churn factor.",

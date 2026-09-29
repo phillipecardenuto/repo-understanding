@@ -142,6 +142,9 @@ def file_changes(repo: "Repository", path: str, commit: str | None = None, *, ma
             break
         kept.append(hk)
         used += len(hk["lines"])
+    from .diffmarks import annotate
+
+    annotate([(path, kept)])  # moved blocks within the file, and the words that changed (#33)
     result.update(hunks=kept, total_lines=total, truncated=used < total)
     return result
 

@@ -154,7 +154,12 @@ or as the *exact difference* between the two trees.
       The review header counts them (`dependencies: +2 −0 ↑1 ↓0`);
     - dependency changes;
     - tests that exercise it;
-    - the diff, where any line can be annotated.
+    - the diff, where any line can be annotated. Code the agent moved (to
+      another place or another file of the wave) is collapsed behind a **↕**
+      row ("30 lines moved from `app/a.py:8` · 1 line changed while moving")
+      that shows only the lines edited on the way. Inside a changed line, the
+      words that changed are underlined. A switch hides whitespace-only lines
+      (re-indented or blank).
 - **Notes → prompt:** notes become a feedback prompt for the agent. See
   [docs/review.md](docs/review.md).
 
