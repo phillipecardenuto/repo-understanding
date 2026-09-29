@@ -767,3 +767,113 @@ def test_a_retargeted_symlink_is_not_a_removed_file_in_checkpoints(make_repo) ->
     Path(repo.path, "app.py").write_text("x = 2\n")
     meta, created = cp.create(r.state, r.git, r.root, session)
     assert created and [c["path"] for c in meta["changed"]] == ["app.py"]  # links are not files: never "removed"
+
+
+# --------------------------------------------------------------------------- drift over time (#32)
+
+
+def drift_repo(make_repo):
+    """Four tagged releases: ui → core; then ui → db; then db → ui (a cycle, against the layers); then an api
+    component that core reaches."""
+    repo = make_repo({
+        "pyproject.toml": '[project]\nname = "app"\nversion = "0.1"\ndependencies = ["requests"]\n',
+        ".repoviz.toml": '[[contracts]]\nname = "layers"\ntype = "layers"\nlayers = ["ui", "core", "db"]\n',
+        "ui/__init__.py": "", "db/__init__.py": "", "core/__init__.py": "",
+        "ui/view.py": "from core import util\n", "core/util.py": "def f():\n    return 1\n",
+        "db/store.py": "import sqlite3\n", "tests/test_view.py": "from ui import view\n",
+    })
+    repo.git("tag", "v0.1")
+    repo.append("ui/view.py", "from db import store\n")
+    repo.commit("v2")
+    repo.git("tag", "v0.2")
+    repo.append("db/store.py", "from ui import view\n")
+    repo.commit("v3")
+    repo.git("tag", "-a", "v0.3", "-m", "three")  # annotated tags name their commit too
+    repo.write({"api/__init__.py": "", "api/routes.py": "from db import store\n", "core/wire.py": "from api import routes\n"})
+    repo.commit("v4")
+    repo.git("tag", "v0.4")
+    return repo
+
+
+def test_drift_over_tags_counts_and_the_largest_jump(make_repo, tmp_path) -> None:
+    from repoviz import drift
+    from repoviz.cli import main
+
+    repo = drift_repo(make_repo)
+    doc = drift.compute(Repository(repo.path), "tags")
+    assert doc["mode"] == "tags" and [p["label"] for p in doc["points"]] == ["v0.1", "v0.2", "v0.3", "v0.4"]
+
+    def col(key):
+        return [p["metrics"][key] for p in doc["points"]]
+
+    assert col("modules") == [6, 6, 6, 9] and col("components") == [3, 3, 3, 4]  # tests left out
+    assert col("internal_edges") == [1, 2, 3, 5] and col("cross_component_edges") == [1, 2, 3, 5]
+    assert col("cycles") == [0, 0, 1, 1] and col("largest_cycle") == [0, 0, 2, 2]
+    assert col("contract_violations") == [0, 0, 1, 1] and col("external_packages") == [1, 1, 1, 1]
+    big = doc["segments"][doc["largest"]]
+    assert big["label"] == "v0.2 → v0.3" and big["new_links"] == ["db → ui"] and big["new_cycles"] == 1
+    assert big["summary"] == "+1 cross-component dependency (db → ui appeared), 1 new cycle, +1 contract violation"
+    assert (big["base"], big["target"]) == ("v0.2", "v0.3")  # what the Changes tab compares
+    assert doc["segments"][2]["summary"] == ("+1 component, +2 cross-component dependencies (api → db, core → api "
+                                             "appeared)")
+    assert doc["measured_now"] == 4
+    # the CLI: each point was measured once, and the state directory remembers it
+    out = tmp_path / "drift.json"
+    assert main(["drift", "-C", repo.path, "--tags", "--json", "-o", str(out)]) == 0
+    again = json.loads(out.read_text())
+    assert again["measured_now"] == 0 and again["points"] == doc["points"]
+    text = tmp_path / "drift.md"
+    assert main(["drift", "-C", repo.path, "--markdown", "-o", str(text)]) == 0  # auto: 4 tags
+    assert "**Largest jump: v0.2 → v0.3:" in text.read_text() and "| Cycles | 0 | 0 | 1 | 1 |" in text.read_text()
+
+
+def test_drift_sampling_caps_points_and_falls_back_to_dates(make_repo, monkeypatch) -> None:
+    from repoviz import drift
+
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2024-01-01T12:00:00")
+    repo = make_repo({"a.py": "x = 1\n"})
+    repo.git("tag", "t1")
+    for i, day in enumerate([3, 9, 16, 30]):
+        monkeypatch.setenv("GIT_COMMITTER_DATE", f"2024-01-{day:02d}T12:00:00")
+        repo.write({f"m{i}.py": "import a\n"})
+        repo.commit(f"c{i}")
+        if i < 1:
+            repo.git("tag", f"t{i + 2}")
+    r = Repository(repo.path)
+    # two tags: one commit per 7 days of the first-parent history instead, newest first back
+    s = drift.sample(r, "auto", 7)
+    assert s["mode"] == "every" and [p.label for p in s["points"]] == ["2024-01-01", "2024-01-09", "2024-01-16",
+                                                                       "2024-01-30"]
+    assert "fewer than 3 tags" in s["notes"][0]
+    assert [p.label for p in drift.sample(r, "every", 7, limit=2)["points"]] == ["2024-01-16", "2024-01-30"]
+    for i in (3, 4, 5):
+        repo.git("tag", f"t{i}", f"HEAD~{5 - i}")
+    s = drift.sample(r, "auto", limit=3)  # five tags, evenly spread: the first and the last kept
+    assert s["mode"] == "tags" and [p.label for p in s["points"]] == ["t1", "t3", "t5"]
+    assert s["available"] == 5 and "3 of 5 points sampled" in s["notes"][0]
+    assert drift.parse_every("2w") == 14 and drift.parse_every("1m") == 30 and drift.parse_every("10") == 10
+
+
+def test_drift_over_waves_and_errors(make_repo) -> None:
+    import pytest
+
+    from repoviz import drift
+
+    repo = make_repo({"a/__init__.py": "", "a/x.py": "x = 1\n", "b/__init__.py": "", "b/y.py": "y = 1\n"})
+    r = Repository(repo.path)
+    with pytest.raises(drift.DriftError, match="no finished wave"):
+        drift.sample(r, "waves")
+    with pytest.raises(drift.DriftError, match="no tag in the history"):
+        drift.sample(r, "tags")
+    s1 = r.state.start_session(r.git, r.root, label="wave 1")
+    repo.write({"a/x.py": "from b import y\n"})
+    repo.commit("w1")
+    r.state.end_session(r.git, r.root)
+    s2 = r.state.start_session(r.git, r.root, label="wave 2")
+    repo.write({"b/y.py": "from a import x\n"})  # left uncommitted: the wave's recorded end state holds it
+    r.state.end_session(r.git, r.root)
+    doc = drift.compute(r, "waves")
+    assert [p["label"] for p in doc["points"]] == ["before wave 1", "wave 1", "wave 2"]
+    assert [p["ref"] for p in doc["points"]] == [f"SESSION@{s1.id}", f"SESSION-END@{s1.id}", f"SESSION-END@{s2.id}"]
+    assert [p["metrics"]["cross_component_edges"] for p in doc["points"]] == [0, 1, 2]
+    assert doc["segments"][1]["new_cycles"] == 1 and doc["segments"][doc["largest"]]["label"] == "wave 1 → wave 2"

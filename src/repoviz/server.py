@@ -106,6 +106,33 @@ class _Lru(OrderedDict):
             self.popitem(last=False)
 
 
+class _DriftJob:
+    """One drift timeline computed in a background thread; the page polls its progress (no request waits for it)."""
+
+    def __init__(self, sampled: dict[str, Any]) -> None:
+        self.sampled = sampled
+        self.total = len(sampled["points"])
+        self.done = 0
+        self.current = ""
+        self.result: dict[str, Any] | None = None
+        self.error: str | None = None
+        self.cancel = threading.Event()
+        self.finished = threading.Event()
+
+    def progress(self, done: int, total: int, label: str) -> None:
+        self.done, self.total, self.current = done, total, label
+
+    def status(self) -> dict[str, Any]:
+        if self.result is not None:
+            return {"status": "done", "drift": self.result}
+        if self.error is not None:
+            return {"status": "error", "error": self.error}
+        state = ("cancelled" if self.finished.is_set() else "cancelling") if self.cancel.is_set() else "running"
+        return {"status": state,
+                "done": self.done, "total": self.total, "current": self.current, "mode": self.sampled["mode"],
+                "labels": [p.label for p in self.sampled["points"]]}
+
+
 class AppState:
     """Shared state of a running server.
 
@@ -131,6 +158,7 @@ class AppState:
         self._worktrees: dict[str, AppState] = {}  # other worktrees of this repository, opened on demand
         self._worktree_lock = threading.Lock()  # opening one: never twice for the same path (no leaked processes)
         self._others: tuple[float, tuple[Any, ...]] | None = None  # other worktrees' state, reused briefly
+        self._drift_jobs = _Lru(4)  # drift timelines, by sampling and points: computed in the background
         if auto_session and repo.is_git and repo.current_session() is None:
             repo.state.start_session(repo.git, repo.root, label="started with repoviz serve")
 
@@ -253,6 +281,49 @@ class AppState:
         self.maybe_auto_checkpoint(etag)
         tl = self.timeline()
         return f"{etag}-{tl['version']}", _splice({"generated_at": result["generated_at"], "timeline": tl}, body)
+
+    def drift(self, query: dict[str, str]) -> dict[str, Any]:
+        """The drift timeline (drift.py): its progress while a background thread measures the points, then the
+        result.  The first request starts the computation; ``restart=1`` starts a cancelled or failed one again."""
+        from . import drift
+
+        how = query.get("sample") or "auto"
+        try:
+            sampled = drift.sample(self.repo, how, _int(query.get("every"), 7, 3650),
+                                   _int(query.get("limit"), drift.MAX_POINTS, 50))
+        except (drift.DriftError, RepositoryError, GitError) as exc:
+            return {"status": "error", "error": str(exc)}
+        key = (sampled["mode"], sampled.get("every_days"), tuple(p.spec for p in sampled["points"]),
+               drift.settings_key(self.repo))
+        with self.cache_lock:
+            job = self._drift_jobs.get(key)
+            stale = job is not None and job.finished.is_set() and job.result is None
+            if job is None or (stale and query.get("restart") == "1"):
+                job = _DriftJob(sampled)
+                self._drift_jobs.put(key, job)
+                threading.Thread(target=self._run_drift, args=(job,), name="repoviz-drift", daemon=True).start()
+        return job.status()
+
+    def _run_drift(self, job: _DriftJob) -> None:
+        from . import drift
+
+        try:
+            job.result = drift.compute(self.repo, sampled=job.sampled, progress=job.progress,
+                                       cancelled=job.cancel.is_set, save_lock=self.write_lock)
+        except drift.Cancelled:
+            pass
+        except Exception as exc:  # reported to the page, never a dead thread
+            log.error("drift failed: %s\n%s", exc, traceback.format_exc())
+            job.error = f"{type(exc).__name__}: {exc}"
+        finally:
+            job.finished.set()
+
+    def drift_cancel(self) -> dict[str, Any]:
+        with self.cache_lock:
+            running = [j for j in self._drift_jobs.values() if not j.finished.is_set()]
+        for job in running:
+            job.cancel.set()
+        return {"cancelled": len(running)}
 
     def timeline(self) -> dict[str, Any]:
         from .checkpoints import timeline
@@ -645,6 +716,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, st.why(self._query()))
                 elif path == "/api/impact":
                     self._json(200, st.impact(self._query()))
+                elif path == "/api/drift":
+                    self._json(200, st.drift(self._query()))
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:
@@ -695,6 +768,8 @@ def make_handler(state: AppState, allowed_hosts: set[str]) -> type[BaseHTTPReque
                     self._json(200, st.parse_plan(body))
                 elif path == "/api/guidance":
                     self._json(200, st.save_guidance(body))
+                elif path == "/api/drift/cancel":
+                    self._json(200, st.drift_cancel())
                 else:
                     self._json(404, {"error": f"not found: {path}"})
             except ApiError as exc:

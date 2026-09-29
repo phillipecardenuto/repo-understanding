@@ -6,6 +6,23 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ### Added
 
+- **Architecture drift over time** ([#32](https://github.com/phillipecardenuto/repo-understanding/issues/32)).
+  - **Command.** `repoviz drift [--tags | --every 7d | --waves] [--json | --markdown]`
+    measures the architecture at up to 12 points: tags in the history of HEAD,
+    one commit per period, or the start and end of recorded waves. The metrics
+    are modules, components, internal and cross-component dependencies,
+    cycles, contract violations, external packages and average instability.
+  - **Jumps.** It lists the jumps between points, largest first, each with a
+    sentence ("v0.2 → v0.3: +1 cross-component dependency (db → ui appeared),
+    1 new cycle, +1 contract violation").
+  - **Live app.** The Changes tab gets a *Drift over time* view: one small
+    chart per metric with a dot and a value at every point, and the largest
+    jump drawn thick and dashed. Clicking a segment opens that comparison. The
+    server measures in the background with progress and **Cancel**.
+  - **Cache and reports.** Measured points are remembered in the state
+    directory. `repoviz report --drift` embeds the timeline.
+  - **Speed.** Flask's 63 tags in its history, sampled to 12: 6.5 s cold,
+    0.3 s the second time.
 - **Java and Kotlin dependencies** (part of [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26)).
   A new `jvm` analyzer reads Java and Kotlin as text (never compiled): modules by
   `package`, `import` / `import static` / wildcard imports (only the types used),
@@ -633,6 +650,10 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   - Thresholds go in the new `[history]` configuration table.
 
 ### Fixed
+
+- Fields hidden in a toolbar still showed: the Changes tab's merge-base and *Since*
+  inputs, and the drift view's *Every (days)*. Their `display` style won over
+  the `hidden` attribute. A global `[hidden]` rule fixes it.
 
 Fifteen problems found by a deep review of the work since the last one
 (3448f7f..e643f2c), each with a regression test:

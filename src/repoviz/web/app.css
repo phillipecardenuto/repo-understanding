@@ -39,6 +39,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* also for .field, .group… whose display would otherwise win */
 html, body { margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
 a { color: var(--accent); }
@@ -418,3 +419,28 @@ table.diff td.mk .cov.run { color: var(--added); }
 .guidance-form input[type="text"] { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
 .guidance-add > summary, .guidance-retired > summary { cursor: pointer; color: var(--accent); margin: 4px 0; }
 .guidance-retired > summary { color: var(--muted); }
+
+/* ---------- drift over time (Changes tab) ---------- */
+.view-switch { display: flex; gap: 6px; margin-bottom: 10px; }
+.view-switch .btn[aria-pressed="true"] { font-weight: 700; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.drift-status { min-height: 1.6em; margin: 4px 0 8px; color: var(--muted); }
+.drift-status progress { vertical-align: middle; width: 140px; }
+.drift-head { margin: 6px 0 10px; }
+.drift-largest { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+.drift-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 8px; }
+.drift-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.drift-card { padding: 8px 10px 4px; }
+.drift-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.drift-card-head h4 { margin: 0; font-size: 13px; }
+.drift-chart { width: 100%; height: auto; display: block; overflow: visible; }
+.drift-chart .drift-axis { stroke: var(--border); stroke-width: 1; }
+.drift-chart .drift-seg .line { stroke: var(--accent); stroke-width: 2; }
+.drift-chart .drift-seg.largest .line { stroke: var(--cycle); stroke-width: 4; stroke-dasharray: 7 4; }
+.drift-chart .drift-seg .hit { stroke: transparent; stroke-width: 16; cursor: pointer; }
+.drift-chart .drift-seg:hover .line, .drift-chart .drift-seg:focus .line { stroke-width: 5; }
+.drift-chart .drift-seg:focus { outline: none; }
+.drift-chart .drift-seg:focus-visible .hit { stroke: var(--accent-soft); }
+.drift-chart .drift-pt { fill: var(--panel); stroke: var(--accent); stroke-width: 2; }
+.drift-chart .drift-val { font-size: 10.5px; fill: var(--text); font-family: var(--sans); }
+.drift-chart .drift-x { font-size: 10px; fill: var(--muted); font-family: var(--sans); }
+.drift-detail h3 { margin-top: 0; }

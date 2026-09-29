@@ -359,6 +359,15 @@ def cmd_report(args: argparse.Namespace) -> int:
     for spec in args.compare or []:
         comps.append(repo.resolve_comparison(spec=spec))
     bundle = build_bundle(repo, comparisons=comps, include_activity=not args.no_activity, extra_reviews=args.review)
+    if args.drift:
+        from . import drift
+
+        how, days = _drift_sampling(args.drift)
+        try:
+            bundle["drift"] = drift.compute(repo, how, days)
+        except drift.DriftError as exc:
+            bundle["drift"] = {"error": str(exc)}
+            print(f"repoviz: drift left out: {exc}", file=sys.stderr)
     compress = True if args.compress else (False if args.no_compress else None)
     html = render_static_html(bundle, compress=compress)
     output = args.output or "repoviz-report.html"
@@ -975,6 +984,44 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _drift_sampling(value: str) -> tuple[str, int]:
+    """``auto``, ``tags``, ``waves`` or a period (``7d``, ``2w``) → (sampling, days)."""
+    from .drift import parse_every
+
+    if value in ("auto", "tags", "waves"):
+        return value, 7
+    return "every", parse_every(value)
+
+
+def cmd_drift(args: argparse.Namespace) -> int:
+    """``repoviz drift``: architecture metrics at tags, dates or waves, and the largest jumps between them."""
+    from . import drift
+    from .render.html import dumps
+
+    repo = _open(args)
+    how, days = ("tags", 7) if args.tags else ("waves", 7) if args.waves else \
+        ("every", drift.parse_every(args.every)) if args.every else ("auto", 7)
+    tty = sys.stderr.isatty()
+
+    def progress(done: int, total: int, label: str) -> None:
+        if tty and label:
+            print(f"\rmeasuring {done + 1}/{total}: {label[:40]:<40}", end="", file=sys.stderr, flush=True)
+
+    try:
+        doc = drift.compute(repo, how, days, args.limit, progress=progress)
+    except drift.DriftError as exc:
+        print(f"repoviz: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        if tty:
+            print("\r" + " " * 60 + "\r", end="", file=sys.stderr, flush=True)
+    if args.json:
+        _write(dumps(doc), args.output)
+    else:
+        _write(drift.to_text(doc, markdown=args.markdown), args.output)
+    return EXIT_OK
+
+
 def cmd_guidance(args: argparse.Namespace) -> int:
     """``repoviz guidance``: standing guidance on components, paths and qualified names (list, add, edit, retire,
     export, import).  It lives in the state directory, never in the repository."""
@@ -1185,6 +1232,9 @@ def build_parser() -> argparse.ArgumentParser:
                    "or main..feature (exact difference); repeatable")
     p.add_argument("--compress", action="store_true", help="always gzip the embedded data")
     p.add_argument("--no-compress", action="store_true", help="never gzip the embedded data")
+    p.add_argument("--drift", nargs="?", const="auto", metavar="SAMPLING",
+                   help="include the architecture drift timeline: auto (the default), tags, waves or a period "
+                   "such as 7d")
     p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("serve", parents=[common], help="run the live web application")
@@ -1344,6 +1394,19 @@ def build_parser() -> argparse.ArgumentParser:
                    "(only when [privacy] show_authors = true)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_metrics)
+
+    p = sub.add_parser("drift", parents=[common],
+                       help="architecture over time: modules, components, cross-component dependencies, cycles, "
+                       "contract violations… at tags, dates or waves, and the largest jumps")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--tags", action="store_true", help="one point per tag (the default with 3 tags or more)")
+    g.add_argument("--every", metavar="PERIOD", help="one commit per period on the first-parent history (7d, 2w, 1m)")
+    g.add_argument("--waves", action="store_true", help="the start of the first recorded wave and every wave's end")
+    p.add_argument("--limit", type=int, default=12, help="most points (default 12, evenly spread)")
+    fmt = p.add_mutually_exclusive_group()
+    fmt.add_argument("--json", action="store_true")
+    fmt.add_argument("--markdown", action="store_true")
+    p.set_defaults(func=cmd_drift)
 
     p = sub.add_parser("guidance", parents=[common],
                        help="standing guidance on components, paths or qualified names: shown on later reviews, in "

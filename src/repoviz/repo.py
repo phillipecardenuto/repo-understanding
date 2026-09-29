@@ -287,7 +287,9 @@ class Repository:
         with self._lock:
             return self._inflight.setdefault(key, threading.Lock())
 
-    def snapshot_of(self, source: TreeSource, label: str) -> RepositorySnapshot:
+    def snapshot_of(self, source: TreeSource, label: str, *, keep: bool = True) -> RepositorySnapshot:
+        """The snapshot of ``source``, computed once per revision and settings.  ``keep=False`` (drift over many
+        past revisions) does not store a new one, so it cannot push the working tree's out of the cache."""
         # The label is cosmetic ("HEAD" vs "HEAD (1a2b3c)"): one analysis serves every label.
         key = (source.kind, source.revision_id, self.config.fingerprint())
         cached = self._cached(self._snapshots, key)
@@ -304,7 +306,8 @@ class Repository:
                                   file_cache=self.file_cache)
             self._flush_file_cache(snap)
             with self._lock:
-                self._snapshots[key] = snap
+                if keep:
+                    self._snapshots[key] = snap
                 while len(self._snapshots) > self.SNAPSHOT_CACHE_SIZE:
                     self._snapshots.popitem(last=False)
                 if len(self.file_cache) > 200_000:

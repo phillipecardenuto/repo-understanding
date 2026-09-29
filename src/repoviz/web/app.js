@@ -89,6 +89,12 @@
       const c = this.data.comparisons.find((x) => x.id === id) || this.data.comparisons[0];
       return c;
     }
+    /* The drift timeline embedded with `repoviz report --drift` (the live app computes it on demand). */
+    async drift() {
+      const d = this.data.drift;
+      if (!d) return { status: "none" };
+      return d.error ? { status: "error", error: d.error } : { status: "done", drift: d };
+    }
     async activity() {
       const a = this.data.activity;
       if (a && !a.diff && a.diff_ref) {
@@ -139,6 +145,8 @@
     impact(si, id) { return this.get("/api/impact?" + new URLSearchParams({ node: id, max_items: "200" }).toString()); }
     comparison(params) { return this.get("/api/diff?" + new URLSearchParams(params).toString()); }
     comparisons() { return this.get("/api/comparisons"); }
+    drift(params) { return this.get("/api/drift?" + new URLSearchParams(params).toString()); }
+    driftCancel() { return this.post("/api/drift/cancel", {}); }
     activity() { return this.get("/api/activity", true); }
     snapshot(rev) { return this.get("/api/snapshot?" + new URLSearchParams({ rev }).toString()); }
     sessionStart(label) { return this.post("/api/session/start", { label }); }
@@ -2163,6 +2171,7 @@
         o.mode = choice || o.mode;
         this.picker = groupedSelect(groups, o.mode, (v) => { o.mode = v; o.modePicked = true; this.cleanNote.hidden = true; sync(); if (!["custom", "merge-base", "since"].includes(v)) this.load(); });
         const sync = () => { custom.hidden = o.mode !== "custom"; mb.hidden = o.mode !== "merge-base"; since.hidden = o.mode !== "since"; };
+        this.baseIn = baseIn; this.targetIn = targetIn; this.syncCustom = sync;
         put(bar, field("Comparison", this.picker), custom, mb, since,
           h("button", { class: "btn primary", onclick: () => { o.base = baseIn.value.trim() || "HEAD"; o.target = targetIn.value.trim() || "WORKTREE"; o.mbRef = mbIn.value.trim(); o.since = sinceIn.value.trim(); o.modePicked = true; this.load(); } }, "Compare"), dl);
         sync();
@@ -2188,8 +2197,37 @@
           checkbox("hide formatting-only", o.hideCosmetic, (c) => { o.hideCosmetic = c; redraw(); }),
           checkbox("group by component", o.cluster, (c) => { o.cluster = c; redraw(); }))),
         this.statusEl);
-      put(this.root, bar, this.cleanNote, this.statsEl, h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el), this.listsEl);
-      await this.load();
+      this.compareEl = h("div", null, bar, this.cleanNote, this.statsEl, h("div", { class: "split" }, h("div", null, this.diagram.el), this.details.el), this.listsEl);
+      this.driftEl = h("div", { hidden: true });
+      const viewBtn = (v, text, title) => h("button", { type: "button", class: "btn small", "aria-pressed": "false", title, onclick: () => this.showView(v) }, text);
+      this.viewBtns = { compare: viewBtn("compare", "Comparison", "What changed between two states"),
+        drift: viewBtn("drift", "Drift over time", "Architecture metrics at tags, dates or waves, and the largest jumps") };
+      put(this.root, h("div", { class: "view-switch", role: "group", "aria-label": "Changes view" }, this.viewBtns.compare, this.viewBtns.drift), this.compareEl, this.driftEl);
+      await this.showView(o.view === "drift" ? "drift" : "compare");
+    }
+    /* Comparison of two states, or the drift timeline (#32). */
+    async showView(v) {
+      const o = this.opts;
+      o.view = v; this.save();
+      for (const [k, b] of Object.entries(this.viewBtns)) b.setAttribute("aria-pressed", String(k === v));
+      this.compareEl.hidden = v !== "compare"; this.driftEl.hidden = v !== "drift";
+      if (v === "drift") {
+        if (!this.drift) { this.drift = new DriftView(this); this.driftEl.appendChild(this.drift.el); }
+        this.drift.show();
+      } else {
+        if (this.drift) this.drift.hide();
+        if (!this.comp) await this.load();
+      }
+    }
+    /* A drift segment: compare its two points (live app). */
+    openComparison(base, target) {
+      const o = this.opts;
+      o.mode = "custom"; o.base = base; o.target = target; o.modePicked = true;
+      if (this.picker) this.picker.value = "custom";
+      if (this.baseIn) { this.baseIn.value = base; this.targetIn.value = target; this.syncCustom(); }
+      this.cleanNote.hidden = true;
+      this.comp = null;
+      return this.showView("compare");
     }
     /* A clean checkout opens on history instead of an empty comparison, and says so. */
     showCleanNote(mode) {
@@ -2290,6 +2328,157 @@
             filter: (r) => this.opts.showRollups || !isRollup(r),
             toolbar: rollups ? checkbox(`show folder rollups (${rollups})`, !!this.opts.showRollups, (c) => { this.opts.showRollups = c; this.save(); this.drawLists(); }) : null })),
         diagnosticsCard(d.diagnostics, "Comparison diagnostics"));
+    }
+  }
+
+  // ---------------------------------------------------------------- drift over time (#32)
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function svg(tag, attrs, ...children) {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) el.setAttribute(k, String(v));
+    for (const c of children.flat()) if (c !== null && c !== undefined) el.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
+    return el;
+  }
+  const driftValue = (v) => (v === null || v === undefined ? "–" : typeof v === "number" && !Number.isInteger(v) ? v.toFixed(2) : String(v));
+  const DRIFT_SAMPLES = [["auto", "Tags (every 7 days without 3 tags)"], ["tags", "Tags"], ["every", "One commit every N days"], ["waves", "Waves (recorded sessions)"]];
+  const DRIFT_HOW = (doc) => (doc.mode === "tags" ? "tags" : doc.mode === "waves" ? "waves" : `one commit every ${doc.every_days} days`);
+
+  /* One metric over the sampled points: a marker and a value label at every point (labels alternate above and
+     below so they never collide), each segment a button that opens that comparison; the largest jump is drawn
+     thick and dashed, never by colour alone. */
+  function driftChart(metric, doc, shortLabels, onSegment) {
+    const pts = doc.points, n = pts.length;
+    const vals = pts.map((p) => (p.metrics || {})[metric.key]);
+    const nums = vals.filter((v) => v !== null && v !== undefined);
+    const W = 340, H = 128, L = 16, R = 16, T = 24, B = 34;
+    const lo = nums.length ? Math.min(...nums) : 0, hi = nums.length ? Math.max(...nums) : 0;
+    const x = (i) => L + (n === 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (n - 1));
+    const y = (v) => (hi === lo ? T + (H - T - B) / 2 : T + ((hi - v) * (H - T - B)) / (hi - lo));
+    const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "drift-chart", role: "group",
+      "aria-label": `${metric.label}: ` + pts.map((p, i) => `${p.label} ${driftValue(vals[i])}`).join(", ") });
+    chart.appendChild(svg("line", { x1: L, y1: H - B + 6, x2: W - R, y2: H - B + 6, class: "drift-axis" }));
+    for (let i = 1; i < n; i++) {
+      const seg = doc.segments[i - 1];
+      if (!seg || vals[i - 1] === null || vals[i - 1] === undefined || vals[i] === null || vals[i] === undefined) continue;
+      const big = doc.largest === i - 1;
+      const c = { x1: x(i - 1), y1: y(vals[i - 1]), x2: x(i), y2: y(vals[i]) };
+      const g = svg("g", { class: "drift-seg" + (big ? " largest" : ""), tabindex: "0", role: "button", "data-segment": i - 1,
+        "aria-label": `${seg.label}: ${seg.summary}${big ? " (largest jump)" : ""}` },
+        svg("title", null, `${seg.label}: ${seg.summary}${big ? " · largest jump" : ""}`),
+        svg("line", Object.assign({ class: "hit" }, c)), svg("line", Object.assign({ class: "line" }, c)));
+      g.addEventListener("click", () => onSegment(seg));
+      g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onSegment(seg); } });
+      chart.appendChild(g);
+    }
+    pts.forEach((p, i) => {
+      const v = vals[i];
+      if (v !== null && v !== undefined) {
+        chart.appendChild(svg("circle", { cx: x(i), cy: y(v), r: 3.5, class: "drift-pt" }, svg("title", null, `${p.label}: ${driftValue(v)}`)));
+        const above = i % 2 === 0 || n <= 6;
+        chart.appendChild(svg("text", { x: x(i), y: above ? y(v) - 8 : y(v) + 16, class: "drift-val", "text-anchor": "middle" }, driftValue(v)));
+      }
+      chart.appendChild(svg("text", { x: x(i), y: H - 8, class: "drift-x", "text-anchor": i === 0 && n > 1 ? "start" : i === n - 1 && n > 1 ? "end" : "middle" },
+        svg("title", null, p.label), shortLabels ? p.label : String(i + 1)));
+    });
+    return chart;
+  }
+
+  class DriftView {
+    constructor(tab) {
+      this.tab = tab; this.app = tab.app;
+      const d = (tab.opts.drift = Object.assign({ sample: "auto", every: 7 }, tab.opts.drift || {}));
+      this.el = h("div", { class: "drift" });
+      this.statusEl = h("div", { class: "drift-status", role: "status", "aria-live": "polite" });
+      this.bodyEl = h("div");
+      const bar = h("div", { class: "toolbar" });
+      if (this.app.api.live) {
+        const daysField = field("Every (days)", numberInput(d.every, 1, 3650, (v) => { d.every = v; tab.save(); }));
+        const sync = () => { daysField.hidden = d.sample !== "every"; };
+        put(bar, field("Points", select(DRIFT_SAMPLES, d.sample, (v) => { d.sample = v; tab.save(); sync(); })), daysField,
+          h("button", { class: "btn primary", onclick: () => this.compute(true) }, "Compute"),
+          h("span", { class: "faint small", text: "At most 12 points, evenly spread; each point is measured once and remembered." }));
+        sync();
+      } else put(bar, h("span", { class: "muted", text: "Drift timeline embedded in this report (repoviz report --drift)." }));
+      put(this.el, bar, this.statusEl, this.bodyEl);
+    }
+    show() { this.shown = true; if (!this.started) { this.started = true; this.compute(false); } }
+    hide() { this.shown = false; }
+    async compute(restart) {
+      const api = this.app.api, token = (this.token = (this.token || 0) + 1);
+      if (!api.live) { this.render(await api.drift()); return; }
+      const d = this.tab.opts.drift;
+      if (restart && this.running) await api.driftCancel().catch(() => null);
+      let first = true;
+      while (token === this.token) {
+        const params = { sample: d.sample, every: String(d.every), limit: "12" };
+        if (first && restart) params.restart = "1";
+        first = false;
+        let r;
+        try { r = await api.drift(params); } catch (err) { r = { status: "error", error: err.message }; }
+        if (token !== this.token) return;
+        this.running = r.status === "running" || r.status === "cancelling";
+        if (!this.running) { this.render(r); return; }
+        this.progress(r);
+        await sleep(this.shown ? 700 : 2500);
+      }
+    }
+    progress(r) {
+      const n = Math.min(r.done + 1, r.total);
+      this.statusEl.innerHTML = "";
+      put(this.statusEl, h("span", { class: "spinner" }), ` ${r.status === "cancelling" ? "Stopping" : `Measuring point ${n} of ${r.total}`}${r.current ? ": " + r.current : ""}… `,
+        h("progress", { max: r.total, value: r.done, "aria-label": "Points measured" }), " ",
+        r.status === "running" ? h("button", { class: "btn small", onclick: () => this.app.api.driftCancel().catch(() => null) }, "Cancel") : null);
+    }
+    render(r) {
+      this.statusEl.innerHTML = "";
+      this.bodyEl.innerHTML = "";
+      if (r.status === "done") { this.draw(r.drift); return; }
+      const text = r.status === "none" ? "This report has no drift timeline. Build it with repoviz report --drift, or open repoviz serve."
+        : r.status === "cancelled" ? "Cancelled. The points measured so far are remembered: Compute resumes from there."
+          : "Drift failed: " + (r.error || "unknown error");
+      put(this.bodyEl, h("div", { class: "notice" + (r.status === "error" ? " error" : ""), text }));
+    }
+    openSegment(seg) {
+      if (this.app.api.live) { this.tab.openComparison(seg.base, seg.target); return; }
+      this.detailEl.innerHTML = "";
+      put(this.detailEl, h("h3", { text: seg.label }), h("p", { text: seg.summary }),
+        seg.new_links_count ? [h("h4", { text: `Component links that appeared (${seg.new_links_count})` }), h("ul", { class: "plain" }, seg.new_links.map((l) => h("li", null, "✚ ", l)))] : null,
+        seg.removed_links_count ? [h("h4", { text: `Component links that disappeared (${seg.removed_links_count})` }), h("ul", { class: "plain" }, seg.removed_links.map((l) => h("li", null, "✖ ", l)))] : null,
+        h("p", { class: "faint", text: "Opening this comparison needs the live app (repoviz serve), or a report built with --compare " + seg.base + ".." + seg.target + "." }));
+      this.detailEl.hidden = false;
+      this.detailEl.scrollIntoView({ block: "nearest" });
+    }
+    draw(doc) {
+      const pts = doc.points, segs = doc.segments;
+      const short = pts.length <= 8 && pts.every((p) => p.label.length <= 8);
+      const big = doc.largest === null || doc.largest === undefined ? null : segs[doc.largest];
+      this.detailEl = h("div", { class: "card drift-detail", hidden: true });
+      const chartCard = (m) => {
+        const first = pts[0].metrics[m.key], last = pts[pts.length - 1].metrics[m.key];
+        const delta = typeof first === "number" && typeof last === "number" ? last - first : null;
+        return h("div", { class: "card drift-card" },
+          h("div", { class: "drift-card-head" }, h("h4", { text: m.label }),
+            h("span", { class: "faint small", text: `${driftValue(first)} → ${driftValue(last)}` + (delta ? ` (${delta > 0 ? "+" : "−"}${driftValue(Math.abs(Math.round(delta * 100) / 100))})` : "") })),
+          driftChart(m, doc, short, (seg) => this.openSegment(seg)));
+      };
+      put(this.bodyEl,
+        h("div", { class: "drift-head" }, h("span", { text: `${pts.length} points (${DRIFT_HOW(doc)})` }),
+          doc.measured_now !== undefined ? h("span", { class: "faint small", text: ` · ${doc.measured_now} measured now, ${pts.length - doc.measured_now} remembered` }) : null,
+          (doc.notes || []).map((n) => h("div", { class: "faint small", text: n }))),
+        big ? h("div", { class: "notice drift-largest" }, iconEl("alert"), h("strong", { text: " Largest jump: " }), `${big.label}: ${big.summary} `,
+          h("button", { class: "btn small", onclick: () => this.openSegment(big) }, this.app.api.live ? "Compare these two points" : "Details"))
+          : h("div", { class: "notice", text: "No architectural jump between the sampled points." }),
+        short ? null : h("div", { class: "drift-legend faint small" }, pts.map((p, i) => h("span", { title: p.date || "" }, h("b", { text: `${i + 1}` }), " " + p.label))),
+        h("div", { class: "drift-grid" }, doc.metrics.map(chartCard)),
+        h("div", { class: "faint small", text: "Each dot is a point, with its value. A thick dashed segment is the largest jump. Click or press Enter on a segment to " + (this.app.api.live ? "compare its two points." : "see what changed.") }),
+        this.detailEl,
+        h("div", { class: "card" }, h("h3", { text: "Jumps, largest first" }),
+          table([{ key: "label", label: "Between" }, { key: "summary", label: "What changed" }, { key: "score", label: "Score", title: "1 per component link that appeared or disappeared; 5 per component, cycle or contract violation gained or lost; 1 per external package" }],
+            segs.filter((s) => s.score > 0).sort((a, b) => b.score - a.score), { onRow: (sg) => this.openSegment(sg), empty: "No architectural change between the sampled points.", sort: "score", dir: -1 })),
+        h("details", { class: "card" }, h("summary", { text: "Values at every point" }),
+          table([{ key: "label", label: "Point", render: (p) => [p.label, p.date ? h("span", { class: "faint", text: " " + p.date }) : null] },
+            ...doc.metrics.map((m) => ({ key: m.key, label: m.label, sort: (p) => p.metrics[m.key], render: (p) => driftValue(p.metrics[m.key]) }))],
+          pts, { empty: "No points." })));
     }
   }
 
@@ -4724,6 +4913,15 @@
           "**Changed nodes** lists the most relevant first: new dependencies, cycles and role changes; then API changes (added, removed, renamed, signatures); dependency changes; body changes; formatting-only last. Folders listed only because something inside them changed are hidden behind **show folder rollups (N)**. Search it (press `/`), filter it with the component chips, or group it by component, as in AI Review.",
           "Below the diagram: new and removed dependencies, cycles introduced or resolved, and every changed node with the reason."] },
         { tip: "A new **⟲ cycle** or a new dependency between components is usually the most important thing on this tab." },
+        { h: "Drift over time" },
+        { p: "**Drift over time** (next to *Comparison*) shows how the architecture moved across many states, not two: after weeks of agent work, where did it drift, and which step caused the jump?" },
+        { kv: [["Points", "**Tags** (the default with 3 tags or more; only tags in the history of HEAD), **one commit every N days** of the first-parent history, or **waves**: the start of the first recorded session and the end of every finished one. At most 12, evenly spread."],
+          ["Metrics", "modules, components, internal and cross-component dependencies, cycles and the largest one, violations of today's architecture contracts, external packages and average instability. Test code is left out."],
+          ["Largest jump", "ranked by what changed between two points: 1 per component link that appeared or disappeared, 5 per component, cycle or contract violation gained or lost, 1 per external package; with a sentence such as *v0.3 → v0.4: +2 components, +9 cross-component dependencies (ui → db appeared), 1 new cycle*."]] },
+        { ul: ["Each chart shows every point with a dot and its value; the **thick dashed** segment is the largest jump.",
+          "**Click a segment** (or focus it and press Enter) to open that comparison in the Comparison view. In a static report it shows what changed instead: comparing needs `repoviz serve`.",
+          "The live app measures the points in the background and shows its progress; **Cancel** stops it. Each point is measured once and remembered in the state directory, so the next run only measures new points.",
+          "From the command line: `repoviz drift [--tags | --every 7d | --waves] [--json | --markdown]`. Static reports include it with `repoviz report --drift`."] },
       ] },
     { id: "structure", title: "Structure", icon: "tree", tab: "structure", intro: "Learn the project: its layout and components, and what repoviz discovered about it.",
       blocks: [

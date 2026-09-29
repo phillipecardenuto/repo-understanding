@@ -493,6 +493,48 @@ By default `TYPE_CHECKING`-only imports are excluded and lazy imports included
 **introduced**, **resolved**, or **changed** (members added or removed). Every
 edge records whether it is in a cycle in the base and in the target.
 
+## Drift over time
+
+`drift.py` measures the architecture at up to 12 points of history (#32):
+
+- **Sampling.** Tags merged into HEAD, oldest first by commit date (tags of
+  other release lines would make the timeline jump back and forth); one commit
+  per N days of `git log --first-parent`, newest first back; or the start of
+  the first finished session (`SESSION@id`) and the end of each
+  (`SESSION-END@id`). Sessions order by their start, to the microsecond. More
+  points than the limit are spread evenly, keeping the first and the last. A
+  point carries a `ref` (the tag, a short SHA or the session spec) that the
+  Changes tab can compare.
+- **Metrics.** Each point is snapshotted like any revision: per-file parse
+  results come from the parse cache, so only files that changed between points
+  are parsed. Test modules and test-only edges are left out. The metrics are:
+  - modules, and components holding code;
+  - internal import edges between modules, and those crossing components (with
+    the component pairs they connect);
+  - module-level cycles and the size of the largest;
+  - violations of today's contracts;
+  - external packages (not the standard library);
+  - the mean instability of the modules that have imports either way.
+- **Jumps.** Between consecutive points, the metric deltas, the component links
+  that appeared or disappeared, and the cycles gained or lost (by their sorted
+  members). The score is 1 per link, 5 per component, cycle or contract
+  violation, and 1 per external package. The largest non-zero score is the
+  largest jump. A sentence names the changes.
+- **Cache.** Measured points go to `drift.json` in the state directory
+  (owner-only, at most 300). They are keyed by the source's revision ID and by
+  the settings: repoviz version, config fingerprint, analyzer versions and
+  contracts. A snapshot measured for drift is not kept in the snapshot cache
+  (`snapshot_of(…, keep=False)`), so it cannot evict the working tree's.
+- **Live app.** `GET /api/drift?sample=…` starts a background thread the first
+  time and returns its progress (`running`, done / total, the current point)
+  on later calls, then the result. The page polls every 0.7 s, and no request
+  waits for the work. `POST /api/drift/cancel` stops it between points.
+  `restart=1` starts a cancelled or failed one again. Points measured before a
+  cancel are already in the cache. Jobs are kept per sampling and point list
+  (at most 4).
+- **Reports.** `repoviz report --drift` embeds the document. `StaticApi.drift()`
+  returns it, and a segment shows its details instead of a comparison.
+
 ## Caching and performance
 
 - Per-file parse results are cached by content hash, so comparing HEAD with the
@@ -660,6 +702,7 @@ Server endpoints:
 | `GET /api/impact?node=[&depth=][&rev=]` | blast radius (`query.blast_radius`): dependents by distance, entry points and tests reached |
 | `GET /api/file/changes?path=[&commit=SHA\|WORKTREE]` | one file's last commits (newest first) and the diff of one of them (by default its uncommitted edits, else its latest commit); used by the Structure tab's *Code changes* drawer |
 | `GET /api/fleet[?risk=1]` | parallel agents (`fleet.py`): every worktree of the repository and the overlaps between their waves |
+| `GET /api/drift?sample=auto\|tags\|every\|waves[&every=DAYS][&limit=12][&restart=1]`, `POST /api/drift/cancel` | the drift timeline (`drift.py`): the first call starts it in a background thread; later calls return its progress, then the result; cancel stops it between points (see [Drift over time](#drift-over-time)) |
 | `GET /api/review/targets`, `/api/review?id=\|base=&target=[&mode=merge-base\|exact][&commit=SHA\|WORKTREE]`, `/api/review/notes?key=` | AI review (`mode`: since the two diverged, or the exact difference; `commit`: one step of the range, reviewed alone) |
 | `GET /api/guidance`, `POST /api/guidance` (`{action: add\|edit\|retire, id?, selector?, text?, kind?}`) | standing guidance (`guidance.py`): every entry, retired ones included; one file for all the worktrees, written under the server's first write lock |
 | `POST /api/session/start`, `/api/session/end`, `/api/session/scope`, `/api/session/checkpoint`, `/api/plan/parse`, `/api/review/notes`, `/api/review/verdict`, `/api/review/reviewed` | state changes (`/api/plan/parse` only reads); the review (`GET /api/review`) carries the verdict, with `stale`, and the reviewed marks |

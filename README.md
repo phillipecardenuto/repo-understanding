@@ -33,6 +33,7 @@ implementation waves, and for understanding any codebase. It answers questions l
 | Where is the risky code: complex files that keep changing, modules everything uses, files only one person knows? | **Structure** / **Dependencies** → *Colour by*, a node's **Health**, `repoviz metrics` |
 | What changed since another commit / branch / tag / merge base? | **Changes** tab, `repoviz diff` |
 | Did a change introduce a new dependency or a dependency cycle? Resolve one? | **Changes** tab, `repoviz diff --fail-on new-cycle` |
+| How has the architecture drifted across releases or waves, and which step caused the jump? | **Changes** → *Drift over time*, `repoviz drift` |
 | Which parts of the repository are being modified right now? | **Activity & Flow** tab, `repoviz activity` |
 | Which execution/call flow, entry points and tests may be affected? | **Activity & Flow** tab (affected flow) |
 | What has an AI coding agent changed during its current work session? | `repoviz session start` + **Activity & Flow** tab |
@@ -71,9 +72,10 @@ import graph, and `'.[test]'` / `'.[browser]'` install test dependencies.
 | `repoviz fleet [--json] [--risk]` | Parallel agents: every Git worktree of the repository (branch, commits ahead, uncommitted files, session, verdict, optionally risk) and where their work overlaps: the same symbol, a changed signature the other one calls, the same file. |
 | `repoviz guidance [list\|add SELECTOR TEXT\|edit ID\|retire ID\|export\|import FILE] [--kind rule\|context\|frozen]` | Standing guidance on a component, path or qualified name: shown on the file cards of later reviews and in their feedback prompt; `frozen` areas raise a signal when changed. `export` prints a Markdown section for `AGENTS.md` / `CLAUDE.md` (`--format json` too); `import` loads it back. |
 | `repoviz metrics [--sort hotspot] [--by component] [--json]` | Code health, top first: code lines, complexity (cyclomatic for Python, whitespace for other languages), fan-in / fan-out, complexity × churn hotspots and ownership (counts only; `--authors` prints names when `[privacy] show_authors = true`). |
+| `repoviz drift [--tags \| --every 7d \| --waves] [--limit 12] [--json \| --markdown]` | Architecture over time: modules, components, internal and cross-component dependencies, cycles, contract violations, external packages and average instability at tags (only those in the history of HEAD), one commit per period, or the start and end of recorded waves; at most 12 points, evenly spread. Lists the jumps between points, largest first, with a sentence (`v0.2 → v0.3: +1 cross-component dependency (db → ui appeared), 1 new cycle`). Each point is measured once and remembered in the state directory. |
 | `repoviz gate [TARGET] [--require approve\|any] [--require-all-reviewed] [--max-open SEVERITY] [--json] [--hook-input]` | Before a push: exit 3 unless a fresh verdict approves the work (and, optionally, every file is marked reviewed and no signal is left without a note). `--hook-input` makes it a Claude Code `PreToolUse` hook that blocks `git push`. |
 | `repoviz serve [--port 8765] [--open] [--session]` | Live web app (binds 127.0.0.1). `--session` starts a work session if none is active. |
-| `repoviz report [-o FILE] [--compare SPEC …]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. |
+| `repoviz report [-o FILE] [--compare SPEC …] [--drift [SAMPLING]]` | Self-contained HTML report. Includes default comparisons: uncommitted changes; staged and unstaged when something is staged; the branch vs its merge base with the default branch; the active session. `--drift` embeds the drift timeline (`auto`, `tags`, `waves` or a period such as `7d`). |
 | `repoviz diff [SPEC] [--format text\|json\|markdown\|mermaid] [--fail-on …]` | Compare two states; `--fail-on new-cycle,new-dependency,…` exits with status 3 (for CI and agent guardrails). History presets: `last-commit`, `last-merge`, `branch` (since it left the default branch) and `since:<tag or date>` (`since:v0.1.0`, `since:2024-06-01`). |
 | `repoviz cache [info\|clear]` | The persistent parse cache in the state directory: its size per analyzer, or empty it. Off with `REPOVIZ_NO_DISK_CACHE=1` or `[cache] disk = false`. |
 | `repoviz why A B [--json]` | Why A depends on B: up to 5 shortest import (or call) chains, each hop with file:line and code; the reverse direction when A does not depend on B. |
@@ -177,6 +179,27 @@ tab opens on this branch, the last merge or the last commit (the first that has
 changes), with a note. The history comparisons are `last-commit`, `last-merge`,
 `branch` and `since:<tag or date>`. Reports include the last commit and this
 branch.
+
+**Drift over time** (the second view of the Changes tab) follows the
+architecture across many states instead of two:
+
+- **Points.** Tags (the default with 3 tags or more; only those in the history
+  of HEAD), one commit per N days of the first-parent history, or waves (the
+  start of the first recorded session, then the end of each finished one). At
+  most 12, evenly spread.
+- **Charts.** One small chart per metric: modules, components, internal and
+  cross-component dependencies, cycles and the largest cycle, violations of
+  today's architecture contracts, external packages and average instability.
+  Test code is left out. Every point has a dot and its value; the largest jump
+  is a thick dashed segment.
+- **Jumps.** A list of the jumps, largest first, each with a sentence:
+  *v0.3 → v0.4: +2 components, +9 cross-component dependencies (ui → db
+  appeared), 1 new cycle*. Click a segment, or a row, to open that comparison.
+- **Background work.** The live app measures the points in the background with
+  a progress bar and **Cancel**. Each point is measured once and remembered, so
+  the next run only measures new points. A static report shows the drift when
+  built with `repoviz report --drift`; there a segment shows what changed, and
+  comparing needs `repoviz serve`.
 
 Folders listed only because something inside changed are hidden behind **show
 folder rollups (N)**. As in AI Review, you can search it (`/`), filter it with
@@ -663,7 +686,7 @@ See [docs/configuration.md](docs/configuration.md) for every option.
 - Credential-like values are redacted from excerpts and diffs. Static reports
   show your home directory as `~`.
 - The state directory holds session baselines (copies of your files), review
-  notes and the parse cache. It is created with owner-only permissions
+  notes, the parse cache and the measured drift points. It is created with owner-only permissions
   (`0700` / `0600`). The parse cache stores compressed JSON only, so reading it
   cannot run anything.
 - If Git refuses a repository ("dubious ownership"), the tool respects that and

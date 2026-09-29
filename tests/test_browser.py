@@ -1654,3 +1654,57 @@ def test_guidance_in_details_on_the_review_card_and_read_only_in_reports(page, m
     assert "Read-only in this report" in section.inner_text() and section.locator("button, summary:has-text('Add')").count() == 0
     assert "by Rev" not in section.inner_text()  # no author names in a report by default
     assert static.errors == []  # type: ignore[attr-defined]
+
+
+def _drift_charts(page) -> None:
+    page.click("#tab-changes .view-switch >> text=Drift over time")
+    page.wait_for_selector("#tab-changes .drift-grid", timeout=60_000)
+    assert page.locator("#tab-changes .drift-chart").count() == 9
+    cycles = page.locator("#tab-changes .drift-card").filter(has=page.locator("h4", has_text="Cycles")).first
+    assert cycles.locator(".drift-val").all_text_contents() == ["0", "0", "1", "1"]  # a value label per point
+    assert cycles.locator(".drift-pt").count() == 4
+    assert "Largest jump: v0.2 → v0.3" in " ".join(page.inner_text("#tab-changes .drift-largest").split())
+
+
+def test_drift_timeline_in_both_themes_and_click_through(page, make_repo, tmp_path: Path) -> None:
+    from test_changes_activity import drift_repo
+
+    repo = drift_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/#tab=changes"
+        strokes = []
+        for scheme in ("dark", "light"):
+            page.emulate_media(color_scheme=scheme)
+            page.goto(url)
+            page.wait_for_selector("#tab-changes .view-switch", timeout=60_000)
+            if page.get_attribute("#tab-changes .view-switch button >> nth=1", "aria-pressed") == "true":
+                page.click("#tab-changes .view-switch >> text=Comparison")  # the view is remembered
+            _drift_charts(page)
+            strokes.append(page.evaluate("getComputedStyle(document.querySelector('#tab-changes .drift-seg .line')).stroke"))
+        assert strokes[0] != strokes[1]  # drawn with each theme's colours
+        # the largest jump is a thick dashed line: not colour alone
+        dash = page.evaluate("getComputedStyle(document.querySelector('#tab-changes .drift-seg.largest .line')).strokeDasharray")
+        assert dash not in ("", "none")
+        page.locator("#tab-changes .drift-seg.largest").first.dispatch_event("click")
+        page.wait_for_function("() => { const c = repoviz.app.tabs.changes.comp; return c && c.diff.base.label.startsWith('v0.2') && c.diff.target.label.startsWith('v0.3'); }", timeout=60_000)
+        assert page.is_visible("#tab-changes .stats") and not page.is_visible("#tab-changes .drift")
+        assert page.input_value("#tab-changes input[aria-label='Base revision']") == "v0.2"
+        assert page.errors == []  # type: ignore[attr-defined]
+    finally:
+        srv.shutdown()
+    # a report built with --drift has it too; a segment then shows what changed (comparing needs repoviz serve)
+    from repoviz import drift
+
+    bundle = build_bundle(Repository(repo.path))
+    bundle["drift"] = drift.compute(Repository(repo.path), "tags")
+    out = tmp_path / "drift.html"
+    out.write_text(render_static_html(bundle), encoding="utf-8")
+    page.goto(out.as_uri() + "#tab=changes")
+    page.wait_for_selector("#tab-changes .view-switch", timeout=60_000)
+    _drift_charts(page)
+    page.locator("#tab-changes .drift-seg.largest").first.dispatch_event("click")
+    detail = page.inner_text("#tab-changes .drift-detail")
+    assert "db → ui" in detail and "repoviz serve" in detail
+    assert page.errors == []  # type: ignore[attr-defined]

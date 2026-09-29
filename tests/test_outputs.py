@@ -1107,3 +1107,78 @@ def test_guidance_api_cli_export_import_and_read_only_report(make_repo, capsys, 
         sorted((e["selector"], e["kind"], e["text"]) for e in exported["entries"])
     assert main(["guidance", "-C", third.path, "add", "only-a-selector"]) == 2
     assert main(["guidance", "-C", third.path, "retire", "nope"]) == 1
+
+
+def test_drift_runs_in_the_background_and_reports_embed_it(make_repo, tmp_path) -> None:
+    from test_changes_activity import drift_repo
+
+    repo = drift_repo(make_repo)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _, _ = request(srv, "GET", "/api/drift?sample=tags", headers={})
+        assert status == 403  # like every API call: X-Repoviz only
+        deadline = time.time() + 60
+        while True:  # the first request starts the work; later ones report its progress, then the result
+            status, _, body = request(srv, "GET", "/api/drift?sample=tags")
+            data = json.loads(body)
+            assert status == 200 and data["status"] in ("running", "done"), data
+            if data["status"] == "done":
+                break
+            assert data["total"] == 4 and data["labels"] == ["v0.1", "v0.2", "v0.3", "v0.4"]
+            assert time.time() < deadline
+            time.sleep(0.05)
+        doc = data["drift"]
+        assert doc["segments"][doc["largest"]]["label"] == "v0.2 → v0.3"
+        status, _, body = request(srv, "GET", "/api/drift?sample=waves")
+        assert status == 200 and "no finished wave" in json.loads(body)["error"]
+        status, _, body = request(srv, "POST", "/api/drift/cancel", {})
+        assert status == 200 and json.loads(body) == {"cancelled": 0}
+        status, _, _ = request(srv, "POST", "/api/drift/cancel", {}, headers={"Content-Type": "application/json"})
+        assert status == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    out = tmp_path / "drift.html"
+    assert main(["report", "-C", repo.path, "-o", str(out), "--no-compress", "--no-activity", "--drift", "tags"]) == 0
+    html = out.read_text(encoding="utf-8")
+    assert '"drift":' in html and ("v0.2 → v0.3" in html or "v0.2 \\u2192 v0.3" in html)
+    plain = tmp_path / "plain.html"
+    assert main(["report", "-C", repo.path, "-o", str(plain), "--no-compress", "--no-activity"]) == 0
+    assert '"drift":' not in plain.read_text(encoding="utf-8")
+
+
+def test_drift_job_can_be_cancelled(make_repo, monkeypatch) -> None:
+    from test_changes_activity import drift_repo
+
+    import repoviz.drift as drift
+
+    repo = drift_repo(make_repo)
+    gate = threading.Event()
+    real = drift.measure
+
+    def slow(snap, contracts):
+        gate.wait(10)
+        return real(snap, contracts)
+
+    monkeypatch.setattr(drift, "measure", slow)
+    srv = create_server(Repository(repo.path), port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert json.loads(request(srv, "GET", "/api/drift?sample=tags")[2])["status"] == "running"
+        assert json.loads(request(srv, "POST", "/api/drift/cancel", {})[2]) == {"cancelled": 1}
+        gate.set()
+        deadline = time.time() + 30
+        while (data := json.loads(request(srv, "GET", "/api/drift?sample=tags")[2]))["status"] != "cancelled":
+            assert data["status"] == "cancelling" and time.time() < deadline
+            time.sleep(0.05)
+        # computing again restarts it, and the point measured before the cancel is remembered
+        data = json.loads(request(srv, "GET", "/api/drift?sample=tags&restart=1")[2])
+        while data["status"] != "done":
+            assert time.time() < deadline
+            time.sleep(0.05)
+            data = json.loads(request(srv, "GET", "/api/drift?sample=tags")[2])
+        assert data["drift"]["measured_now"] == 3
+    finally:
+        srv.shutdown()
+        srv.server_close()

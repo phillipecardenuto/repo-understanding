@@ -101,6 +101,7 @@ class Session:
     baseline_branch: str | None
     label: str = ""
     ended_at: str | None = None
+    started_us: int = 0  # the start in microseconds: orders waves that started within the same second
     # path -> stored blob hash, or None when the file was deleted at session start
     overrides: dict[str, str | None] = field(default_factory=dict)
     skipped: list[str] = field(default_factory=list)
@@ -247,6 +248,7 @@ class StateStore:
             now = _dt.datetime.now(_dt.timezone.utc)
             sid = now.strftime("%Y%m%dT%H%M%SZ") + "-" + stable_hash(str(now.timestamp()), length=6)
             session = Session(id=sid, started_at=now.isoformat(timespec="seconds"),
+                              started_us=int(now.timestamp() * 1e6),
                               baseline_head=git.head() if git else None,
                               baseline_branch=git.branch() if git else None, label=label,
                               allowed=list(allowed or []), protected=list(protected or []),
