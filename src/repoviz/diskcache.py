@@ -53,6 +53,7 @@ def _codecs() -> dict[str, Codec]:
         "rust": same,  # one Rust file (analyzers/rust.py): plain JSON already
         "php": same,  # one PHP file (analyzers/php.py): plain JSON already
         "ruby": same,  # one Ruby file (analyzers/ruby.py): plain JSON already
+        "cfamily": same,  # one C or C++ file (analyzers/cfamily.py): plain JSON already
     }
 
 

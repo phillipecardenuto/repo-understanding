@@ -60,6 +60,24 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   `require_relative` of a missing file is a broken import. Classes, modules and
   methods (`User#save`, `User.find`) are symbols with parameters. Maybe (794
   files) takes 0.7 s, Sinatra (147 files) 0.25 s.
+- **C and C++ dependencies** (closes [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26)).
+  A `cfamily` analyzer resolves `#include` next to the file and under the
+  include directories named by CMake (`target_include_directories`,
+  `$<BUILD_INTERFACE:…>`), Makefiles (`-I`), Meson and Bazel, plus `include/`
+  folders. Only the first branch of each `#if` is scanned, and `#if 0` is
+  skipped. Other headers map to the C or C++ standard library, system headers,
+  or CMake `find_package` libraries. Generated headers (`configure_file`, `.in`
+  templates) are skipped; a missing header in a folder of the repository is a
+  broken import. Functions, classes, structs and enums are symbols with C++
+  namespaces, access and signatures.
+
+  | Project | Files | Cold | Cached |
+  |---|---|---|---|
+  | Redis | 796 | 2.6 s | 1.0 s |
+  | leveldb | 133 | 0.3 s | — |
+  | fmt | 74 | 0.6 s | — |
+
+  The Redis time includes its vendored dependencies.
 - **Standing guidance that persists across waves** ([#20](https://github.com/phillipecardenuto/repo-understanding/issues/20)).
   - `repoviz guidance add SELECTOR TEXT [--kind rule|context|frozen]` records
     advice on a component (`component:storage`), a path glob

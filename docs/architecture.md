@@ -100,6 +100,7 @@ and the manifest analyzer's entry points are linked to Python callables.
 | `rust` | – | modules (the module tree of every crate), symbols, entry points, dependencies (use trees and paths resolved down the tree; externals mapped to Cargo dependencies). See [below](#rust) |
 | `php` | – | modules (namespace folders), symbols, entry points, dependencies (imports, class names in code, PSR-4, require / include; externals mapped to Composer packages). See [below](#php) |
 | `ruby` | – | modules, symbols, entry points, dependencies (constants resolved through the lexical nesting, requires through the load paths; externals mapped to gems). See [below](#ruby) |
+| `cfamily` | – | modules (files), symbols, entry points, dependencies (`#include` through the include directories of CMake, Make, Meson and Bazel; standard, system and `find_package` externals). See [below](#c-and-c) |
 | `runtime` | – | calls: containers the code starts and services it calls (`invokes-container`, `talks-to`); finalize: their service-to-service copies |
 | `interfaces` | – | calls: HTTP routes, background tasks and environment variables, and the code that calls, enqueues or reads them |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
@@ -317,6 +318,73 @@ when they start a statement. The modifier forms (`return if x`, `x unless y`,
   after `private` / `protected`, or declared `private def`, are not public. A
   file with `if __FILE__ == $0` is an entry point. No call flow; `attr_*`,
   `define_method` and metaprogramming are not read.
+
+### C and C++
+
+The `cfamily` analyzer reads `.c`, `.h`, `.cc`, `.cpp`, `.hpp` and the other
+C and C++ extensions as text: nothing is preprocessed or compiled for real, and
+build files are only read.
+
+- **Masking.** Comments (a `//` comment continued by a backslash too), strings,
+  raw strings (`R"x(…)x"`) and character literals are blanked.
+- **Preprocessor.** Directives are blanked. Only the first branch of each `#if`
+  / `#ifdef` is scanned for declarations, so braces stay balanced when both
+  branches open a function. `#if 0` blocks are skipped and their `#else` kept.
+  `#include` lines are read in every branch except `#if 0`. One inside a real
+  conditional (not the include guard, not `#ifdef __cplusplus`) is
+  *conditional* (`conditional: true` on the edge).
+- **Modules.** One per file, named by its path (`src/net/socket.c`): C has no
+  packages, and the path is how code names a header. Architecture contracts
+  therefore use path globs (`layers = ["src/*", "include/*"]`).
+- **Include directories.** These are read from the build files, never run:
+  - CMake: `include_directories` and `target_include_directories`, including
+    `$<BUILD_INTERFACE:…>`, `${CMAKE_CURRENT_SOURCE_DIR}`,
+    `${PROJECT_SOURCE_DIR}` and `${<name>_SOURCE_DIR}`. Build-tree and
+    install paths are ignored.
+  - Makefiles: `-I` flags.
+  - Meson: `include_directories('…')`.
+  - Bazel: `includes = […]`.
+  - Every folder named `include/` is also an include directory.
+- **Resolution.** `#include "x.h"` is resolved in this order:
+  1. next to the including file;
+  2. under the include directories, in order;
+  3. the one file whose path ends with `x.h`, or the nearest of several (confidence 0.7 or 0.6).
+
+  `#include <x.h>` resolves under the include directories, and by path suffix
+  only when it names a folder (`<shop/order.hpp>`), never next to the file. The edge's construct is `include`. A header that
+  exists but is not analyzed (excluded `third_party/`, `.inc`, `.def`, too
+  large) gets no edge.
+- **External headers.** A header found nowhere is one of these:
+  - the **C standard library** (`stdio.h`…);
+  - the **C++ standard library** (`vector`, `memory`…);
+  - **System headers** (POSIX, Linux, macOS and Windows headers, compiler intrinsics: `unistd.h`, `sys/…`, `windows.h`, `immintrin.h`);
+  - a library whose first folder or name matches a CMake `find_package` (`<openssl/ssl.h>` → `OpenSSL`, `<gtest/gtest.h>` → `GTest`, Qt headers → `Qt5` / `Qt6`);
+  - otherwise a library named by its first folder (`<zlib/zlib.h>` → `zlib`).
+- **Generated headers.** A quoted header is skipped, never reported, when any of these holds:
+  - a build file names it (`configure_file`, `AC_CONFIG_HEADERS`, a Makefile rule);
+  - a template exists (`x.h.in`, `x.h.cmake`);
+  - its name looks generated (`config.h`, `version.h`, `*.pb.h`, `ui_*.h`).
+- **Broken includes.** An unconditional include of a missing file whose folder
+  exists is `unresolved-internal-import`. The folder may be next to the file or
+  under an include directory (`#include "shop/fmt.h"` with `include/shop/`
+  here). A missing bare name (`"compat.h"`) counts too.
+- **Symbols.** The analyzer reads these symbols:
+  - functions, and classes, structs, unions and enums (also `typedef struct { … } name;`);
+  - C++ namespaces as qualifiers (`namespace a::b`; an inline namespace is transparent);
+  - methods declared in class bodies, and methods defined out of line (`int Order::total(…) const {`).
+
+  Each carries a signature `(params) -> return`, with default values.
+  Overloads carry their parameter types (`total(const std::string&)`).
+
+  **What is public:**
+  - `private:` members are not; `protected:` members are;
+  - `static` and anonymous-namespace functions of a source file are not;
+  - types defined in source files are not;
+  - out-of-line definitions are not (the class declaration is the API).
+
+  Prototypes are symbols in headers only. A function-like macro with a body
+  (`TEST(Suite, Name) { … }`) is not a function. A top-level `main` is an entry
+  point.
 
 ### Python imports through `sys.path` edits
 

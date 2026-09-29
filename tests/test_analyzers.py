@@ -872,6 +872,78 @@ def test_ruby_blocks_methods_and_visibility(make_repo) -> None:
     assert syms["Admin"].metadata["kind"] == "module"
 
 
+# --------------------------------------------------------------------------- C and C++
+
+C_APP = {
+    'CMakeLists.txt': 'cmake_minimum_required(VERSION 3.16)\nproject(shop C CXX)\nfind_package(OpenSSL REQUIRED)\nfind_package(GTest)\nconfigure_file(src/config.h.in ${PROJECT_BINARY_DIR}/config.h)\nadd_library(shop src/order.cpp src/money.c)\ntarget_include_directories(shop\n  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>\n  PRIVATE src)\nadd_executable(shopd app/main.cpp)\ntarget_link_libraries(shopd shop)\n',
+    'Makefile': 'CFLAGS += -Ilibs/tiny -I/usr/local/include\n',
+    'app/main.cpp': '#include <shop/order.hpp>\n#include <iostream>\n#include <unistd.h>\n#include <tiny.h>\n\nint main(int argc, char** argv) {\n  std::cout << shop::Order::parse("1").total() << std::endl;\n  return 0;\n}\n',
+    'include/shop/money.h': '#ifndef SHOP_MONEY_H\n#define SHOP_MONEY_H\n\n#include <stddef.h>\n\n#ifdef __cplusplus\nextern "C" {\n#endif\n\ntypedef struct {\n  long cents;\n} money_t;\n\nchar *money_format(money_t m, const char *cur);\nstatic inline long money_cents(money_t m) { return m.cents; }\n\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* SHOP_MONEY_H */\n',
+    'include/shop/order.hpp': '#pragma once\n#ifndef SHOP_ORDER_HPP\n#define SHOP_ORDER_HPP\n\n#include <string>\n#include <vector>\n#include "shop/money.h"  // Money in C\n\nnamespace shop {\n\n/* An order. "#include <fake.h>" in a comment is nothing. */\nclass Order {\n public:\n  explicit Order(int id);\n  int total(const std::string& currency = "EUR") const;\n  int total(int rate) const;\n  static Order parse(const char* text);\n  bool operator==(const Order& other) const = default;\n\n private:\n  int id_;\n  std::vector<int> lines_{};\n  void recompute();\n};\n\nstruct Line {\n  int cents = 0;\n};\n\ntemplate <typename T = int>\nT twice(T v) { return v * 2; }\n\n}  // namespace shop\n\n#endif\n',
+    'src/config.h.in': '#define SHOP_VERSION "@PROJECT_VERSION@"\n',
+    'src/detail/fmt.hpp': '#pragma once\n#include <sstream>\nnamespace shop::detail {\ninline std::string pad(const std::string& s, int n) { return s; }\n}\n',
+    'src/money.c': '#include "shop/money.h"\n#include <stdio.h>\n#include <stdlib.h>\n\nchar *money_format(money_t m, const char *cur) {\n  char *buf = malloc(32);\n  snprintf(buf, 32, "%ld.%02ld %s", m.cents / 100, m.cents % 100, cur);  /* { not a brace */\n  return buf;\n}\n',
+    'src/order.cpp': '#include <shop/order.hpp>\n\n#include <openssl/sha.h>\n#include "config.h"\n#include "detail/fmt.hpp"\n\n#if 0\n#include "legacy/none.h"\n#endif\n#ifdef _WIN32\n#include "compat_win.h"\n#endif\n\nnamespace shop {\nnamespace {\nint hidden() { return 1; }\n}  // namespace\n\nstatic const int kTable[] = {1, 2, 3};\n\nOrder::Order(int id) : id_(id), lines_{1, 2} {}\n\nint Order::total(const std::string& currency) const {\n  if (currency == "USD") { return id_ * 2; }\n  return detail::pad(currency, 3).size() + hidden();\n}\n\nint Order::total(int rate) const { return id_ * rate; }\n\nOrder Order::parse(const char* text) {\n  auto f = [](int x) { return x + 1; };\n  return Order(f(0));\n}\n\nvoid Order::recompute() {}\n\nstatic int helper(void) { return kTable[0]; }\n\n}  // namespace shop\n',
+    'tests/order_test.cpp': '#include <gtest/gtest.h>\n#include "shop/order.hpp"\n\nTEST(Order, Total) {\n  EXPECT_EQ(shop::Order(1).total(2), 2);\n}\n',
+    'libs/tiny/tiny.h': '#ifndef TINY_H\n#define TINY_H\nint tiny_add(int a, int b);\n#endif\n',
+}
+
+
+def test_c_cpp_includes_resolve_through_include_dirs(make_repo) -> None:
+    repo = make_repo(C_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    # CMake target_include_directories ($<BUILD_INTERFACE:…>, PRIVATE src), next to the file, Makefile -I
+    assert ("app/main.cpp", "include/shop/order.hpp") in imports
+    assert ("src/money.c", "include/shop/money.h") in imports
+    assert ("include/shop/order.hpp", "include/shop/money.h") in imports
+    assert ("src/order.cpp", "src/detail/fmt.hpp") in imports
+    assert imports[("app/main.cpp", "libs/tiny/tiny.h")].evidence[0].construct == "include"  # <tiny.h>
+    # externals: CMake find_package, the standard libraries, system headers; tests only for gtest
+    assert ("src/order.cpp", "OpenSSL") in imports
+    assert imports[("tests/order_test.cpp", "GTest")].metadata["test_only"] is True
+    assert "stdlib" in snap.find(qualified_name="C++ standard library").tags
+    assert ("src/money.c", "C standard library") in imports and ("app/main.cpp", "System headers") in imports
+    # nothing from comments, #if 0, the generated config.h or a header of another platform
+    assert not any(t in ("fake.h", "legacy", "config.h", "compat_win.h") for (_s, t) in imports)
+    assert not [d for d in snap.diagnostics if d.code == "unresolved-internal-import"]
+    assert snap.find(path="app/main.cpp").metadata["entry_kind"] == "C++ program"
+    # a missing header in a folder of the repository is broken; one of an unknown folder is a library
+    repo.write({"src/money.c": C_APP["src/money.c"].replace('#include <stdio.h>\n', '#include "shop/fmt.h"\n'
+                                                            '#include "zlib/zlib.h"\n')})
+    snap = Repository(repo.path).snapshot("WORKTREE")
+    broken = [(d.path, d.line) for d in snap.diagnostics if d.code == "unresolved-internal-import"]
+    assert broken == [("src/money.c", 2)]
+    assert ("src/money.c", "zlib") in edges_by_name(snap)
+
+
+def test_c_cpp_symbols_namespaces_and_access(make_repo) -> None:
+    repo = make_repo(C_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    syms = {(n.path.rsplit("/", 1)[-1], n.qualified_name): n for n in snap.symbols if n.language in ("c", "cpp")}
+    total = "shop::Order::total(const std::string&)"  # overloads carry their parameter types
+    assert syms[("order.hpp", total)].metadata["signature"] == '(const std::string& currency = "EUR") -> int'
+    assert syms[("order.hpp", total)].metadata["public"] is True
+    assert syms[("order.cpp", total)].metadata["public"] is False  # defined out of line: the class declares it
+    assert syms[("order.hpp", "shop::Order::recompute")].metadata["public"] is False  # private:
+    assert syms[("order.hpp", "shop::Order")].metadata["kind"] == "class"
+    assert ("order.hpp", "shop::Order::operator==") in syms and ("order.hpp", "shop::twice") in syms
+    assert syms[("order.cpp", "shop::hidden")].metadata["public"] is False  # an anonymous namespace
+    assert syms[("order.cpp", "shop::helper")].metadata["public"] is False  # static
+    assert ("fmt.hpp", "shop::detail::pad") in syms  # namespace a::b
+    # braces in initializers, lambdas and strings do not end a function early
+    ctor = syms[("order.cpp", "shop::Order::Order")]
+    assert (ctor.start_line, ctor.end_line) == (21, 21)
+    assert (syms[("order.cpp", "shop::Order::parse")].start_line, syms[("order.cpp", "shop::Order::parse")].end_line) \
+        == (30, 33)
+    assert syms[("money.c", "money_format")].end_line == 9
+    # C: typedef struct { … } name; prototypes in headers; static inline helpers of a header are API
+    assert syms[("money.h", "money_t")].metadata["kind"] == "struct"
+    assert syms[("money.h", "money_format")].metadata["signature"] == "(money_t m, const char *cur) -> char *"
+    assert syms[("money.h", "money_cents")].metadata["public"] is True
+    assert not any(q == "TEST" for (_f, q) in syms)  # a macro, not a function
+
+
 def test_signatures_keep_string_defaults(make_repo) -> None:
     repo = make_repo({
         "src/main/kotlin/app/Fmt.kt": 'package app\n\nclass Fmt {\n    fun show(unit: String = "EUR") = unit\n}\n\n'

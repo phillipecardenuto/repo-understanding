@@ -327,7 +327,8 @@ contracts_baseline = ".repoviz-known-violations.json"   # top-level key; the def
   packages and C# namespaces are dotted the same way (`com.acme.shop.core`,
   `Shop.Core.Orders`); Rust modules and Ruby constants use `::`
   (`shop_core::orders`, `Admin::Reports`) and PHP namespaces `\` (`App\Http`;
-  write `"App\\Http"` in TOML).
+  write `"App\\Http"` in TOML). C and C++ modules are named by path, so
+  their contracts use path globs (`src/*`, `include/*`).
 - **Paths.** A pattern with `/` is a path glob anchored at the repository root
   (`src/features/*`, `src/storage/api.js`). This is how you write contracts for
   JavaScript, TypeScript or any path-named module.

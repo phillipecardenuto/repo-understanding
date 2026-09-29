@@ -2366,3 +2366,32 @@ def test_ruby_changes_get_the_same_review_signals(make_repo) -> None:
     money = next(f for f in report["files"] if f["path"].endswith("shop_kit/money.rb"))
     fmt = next(k for k in money["symbols"] if k["name"] == "format")
     assert (fmt["signature_before"], fmt["signature"]) == ("(cents)", "(cents, currency)")
+
+
+def test_c_cpp_changes_get_the_same_review_signals(make_repo) -> None:
+    from test_analyzers import C_APP
+
+    repo = make_repo({**C_APP, ".repoviz.toml": '[[contracts]]\nname = "Public headers stand alone"\n'
+                      'type = "layers"\nlayers = ["src/*", "include/*"]\n'})
+    repo.write({
+        # a public header reaches into src/ (a layer violation) while src/detail/fmt.hpp includes it: a new cycle
+        "include/shop/order.hpp": C_APP["include/shop/order.hpp"].replace(
+            '#include "shop/money.h"', '#include "shop/money.h"\n#include "detail/fmt.hpp"'),
+        "src/detail/fmt.hpp": C_APP["src/detail/fmt.hpp"].replace("#include <sstream>",
+                                                                  "#include <sstream>\n#include <shop/order.hpp>"),
+        "include/shop/money.h": C_APP["include/shop/money.h"].replace(
+            "char *money_format(money_t m, const char *cur);\n", ""),
+        "src/money.c": C_APP["src/money.c"].replace("#include <stdio.h>", '#include "shop/fmt.h"\n#include <stdio.h>')
+        .replace("money_format(money_t m, const char *cur)", "money_format(money_t m, const char *cur, int pad)"),
+    })
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    kinds = {(f["kind"], f["path"].rsplit("/", 1)[-1]) for f in report["findings"] if f.get("path")}
+    assert ("contract-broken", "order.hpp") in kinds
+    assert ("public-api-removed", "money.h") in kinds  # the money_format prototype
+    assert ("unresolved-internal-import", "money.c") in kinds  # shop/fmt.h
+    assert any(f["kind"] == "new-cycle" for f in report["findings"])
+    money = next(f for f in report["files"] if f["path"] == "src/money.c")
+    fmt = next(k for k in money["symbols"] if k["name"] == "money_format")
+    assert (fmt["signature_before"], fmt["signature"]) == ("(money_t m, const char *cur) -> char *",
+                                                           "(money_t m, const char *cur, int pad) -> char *")

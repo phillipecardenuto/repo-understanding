@@ -12,6 +12,7 @@ from importlib import metadata as _metadata
 
 from .base import PHASES, AnalysisContext, Analyzer, Detection, SnapshotBuilder
 from .callflow import CallFlowAnalyzer
+from .cfamily import CFamilyAnalyzer
 from .dotnet import DotnetAnalyzer
 from .filesystem import FilesystemAnalyzer
 from .git import GitAnalyzer
@@ -40,6 +41,7 @@ _REGISTRY: list[type[Analyzer]] = [
     RustAnalyzer,
     PhpAnalyzer,
     RubyAnalyzer,
+    CFamilyAnalyzer,
     RuntimeAnalyzer,
     InterfacesAnalyzer,
     CallFlowAnalyzer,
