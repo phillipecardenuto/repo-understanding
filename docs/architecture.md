@@ -97,6 +97,7 @@ and the manifest analyzer's entry points are linked to Python callables.
 | `go` | – | modules, symbols, dependencies |
 | `jvm` | – | modules (Java and Kotlin; package folders), symbols, entry points, dependencies (imports, same-package uses, fully qualified names; externals mapped to Maven/Gradle artifacts). See [below](#java-and-kotlin) |
 | `dotnet` | – | modules (C#; namespace folders), symbols, entry points, dependencies (usings resolved to the types used, enclosing namespaces, global usings, extension methods; externals mapped to NuGet packages). See [below](#c) |
+| `rust` | – | modules (the module tree of every crate), symbols, entry points, dependencies (use trees and paths resolved down the tree; externals mapped to Cargo dependencies). See [below](#rust) |
 | `runtime` | – | calls: containers the code starts and services it calls (`invokes-container`, `talks-to`); finalize: their service-to-service copies |
 | `interfaces` | – | calls: HTTP routes, background tasks and environment variables, and the code that calls, enqueues or reads them |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
@@ -192,6 +193,42 @@ rules of C# name lookup:
 
 A byte-order mark at the start of a file (common in Visual Studio projects)
 counts as a blank, for C#, Java and Kotlin alike.
+
+### Rust
+
+Rust modules are files, so the `rust` analyzer rebuilds the module tree the
+compiler would, from the text (lifetimes such as `'a` are not mistaken for
+character literals, and `;` inside `[u8; 4]` ends nothing):
+
+- **Crates.** For every Cargo package: `src/lib.rs`, `src/main.rs`,
+  `src/bin/*`, `tests/*`, `examples/*` and `benches/*`, plus the paths its
+  `[lib]`, `[[bin]]`, `[[test]]`, `[[example]]` and `[[bench]]` tables declare.
+  A crate is named after its package (`-` as `_`) or its file. Without any
+  `Cargo.toml`, `lib.rs` / `main.rs` files are roots.
+- **Module tree.** `mod x;` is `x.rs` or `x/mod.rs` next to the declaring file
+  (`#[path = "…"]` overrides), `mod x { … }` is an inline module of the same
+  file, and declarations inside item-level macros (`cfg_rt! { mod rt; }`,
+  `cfg_if! { if #[cfg(unix)] { mod unix; } }`) count. A module is named by its
+  path (`shop_core::orders::store`); a file no crate reaches (compile-fail
+  fixtures, snippets) is named by its folder.
+- **Resolution.** A `use` tree (groups, `*`, `as`, `pub use`) and a path in code
+  are resolved segment by segment: `crate`, `self` and `super`, a child module
+  of the current one (or of the crate root, as in the 2015 edition), then
+  another crate of the workspace (by package name, or by the key of a `path`
+  dependency, which may rename it). The edge goes to the file of the deepest
+  module named (construct `use`, or `path` for `crate::db::open()` in code).
+- **External crates.** A first segment that is not a module is a crate: `std`,
+  `core`, `alloc`, `proc_macro` and `test` are standard; others match the
+  package's `Cargo.toml` dependencies (`serde_json` for `serde-json`). In code,
+  only standard or declared crates count; names imported by a `use` and
+  capitalized names (enum variants) are not crates.
+- **Broken imports.** `mod x;` with neither file is `unresolved-internal-import`,
+  unless a `#[cfg(…)]` attribute limits it to some configurations.
+- **Symbols.** Functions, structs, enums, unions, traits (with their methods),
+  type aliases, `macro_rules!` macros, and the methods of `impl` blocks
+  (`Order::total`, `<Order as Display>::fmt`), with signatures. `pub` is public;
+  `pub(crate)` and friends are not. `fn main` of a binary or example root is an
+  entry point.
 
 ### Python imports through `sys.path` edits
 

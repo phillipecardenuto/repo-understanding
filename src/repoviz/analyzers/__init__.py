@@ -23,6 +23,7 @@ from .manifest import ManifestAnalyzer
 from .metrics import MetricsAnalyzer
 from .python import PythonAnalyzer
 from .runtime import RuntimeAnalyzer
+from .rust import RustAnalyzer
 
 # Order matters within a phase: generic structure first, call-flow resolution last.
 _REGISTRY: list[type[Analyzer]] = [
@@ -34,6 +35,7 @@ _REGISTRY: list[type[Analyzer]] = [
     GoAnalyzer,
     JvmAnalyzer,
     DotnetAnalyzer,
+    RustAnalyzer,
     RuntimeAnalyzer,
     InterfacesAnalyzer,
     CallFlowAnalyzer,

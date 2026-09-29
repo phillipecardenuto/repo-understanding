@@ -747,6 +747,16 @@ def parse_cargo(path: str, text: str, exists: Callable[[str], bool]) -> Manifest
         if isinstance(b, dict) and b.get("name"):
             md.entry_points.append(EntryPointDecl(b["name"], "cargo-bin", _join(base, b.get("path") or "src/main.rs"),
                                                   "file", find_line(text, b["name"])))
+    targets: list[list[str]] = []  # [kind, name, path]: crate roots declared with a path (the Rust analyzer)
+    lib = data.get("lib")
+    if isinstance(lib, dict) and isinstance(lib.get("path"), str):
+        targets.append(["lib", str(lib.get("name") or md.name or ""), _join(base, lib["path"])])
+    for kind in ("bin", "test", "example", "bench"):
+        for t in data.get(kind) or []:
+            if isinstance(t, dict) and isinstance(t.get("path"), str):
+                targets.append([kind, str(t.get("name") or ""), _join(base, t["path"])])
+    if targets:
+        md.metadata["targets"] = targets
     if md.name and not md.entry_points and exists(_join(base, "src/main.rs")):
         md.entry_points.append(EntryPointDecl(md.name, "cargo-bin", _join(base, "src/main.rs"), "file"))
     if md.name:

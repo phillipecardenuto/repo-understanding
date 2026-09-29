@@ -2282,3 +2282,35 @@ def test_csharp_changes_get_the_same_review_signals(make_repo) -> None:
     math = next(f for f in report["files"] if f["path"].endswith("OrderMath.cs"))
     total = next(k for k in math["symbols"] if k["name"] == "Total")
     assert (total["signature_before"], total["signature"]) == ("(int a, int b) -> int", "(int a, int b, int c) -> int")
+
+
+def test_rust_changes_get_the_same_review_signals(make_repo) -> None:
+    from test_analyzers import RUST_APP
+
+    repo = make_repo({**RUST_APP, ".repoviz.toml": '[[contracts]]\nname = "Orders above money"\ntype = "layers"\n'
+                      'layers = ["shop_core::orders", "shop_core::money"]\n'})
+    orders = RUST_APP["shop/src/orders/mod.rs"]
+    repo.write({
+        # money reaches up into orders (a layer violation) while orders' store uses money: a new cycle
+        "shop/src/money/fmt.rs": "use crate::orders::Order;\npub fn render(c: u64, cur: &str) -> String "
+                                 "{ shop_util::slug(&format!(\"{}{}\", c, cur)) }\npub fn first(o: &Order) -> u64 { o.id }\n",
+        "shop/src/orders/mod.rs": orders.replace("pub fn load(id: u64) -> Option<Order> { db::get(id).map(|b| Order "
+                                                 "{ id, buf: b }) }\n", ""),
+    })
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    kinds = {(f["kind"], f["path"].rsplit("/", 1)[-1]) for f in report["findings"] if f.get("path")}
+    assert ("contract-broken", "fmt.rs") in kinds
+    assert ("public-api-removed", "mod.rs") in kinds  # load
+    assert any(f["kind"] == "new-cycle" for f in report["findings"])
+    fmt = next(f for f in report["files"] if f["path"].endswith("money/fmt.rs"))
+    render = next(k for k in fmt["symbols"] if k["name"] == "render")
+    assert (render["signature_before"], render["signature"]) == ("(c: u64) -> String", "(c: u64, cur: &str) -> String")
+
+
+def test_contract_patterns_understand_rust_paths() -> None:
+    from repoviz.contracts import matches, unit_of
+
+    assert matches("shop::orders::store", None, "shop::orders") and not matches("shop::orders_x", None, "shop::orders")
+    assert unit_of("shop::orders::store::disk", None, "shop::orders::*") == "shop::orders::store"
+    assert matches("app.routes.v1", None, "app.routes")  # dotted names as before

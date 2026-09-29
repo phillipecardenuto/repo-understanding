@@ -57,7 +57,7 @@ def matches(q: str, path: str | None, pattern: str) -> bool:
         return bool(path) and globs.match(path, pattern if pattern.startswith("/") else "/" + pattern)
     if _is_glob(pattern):
         return fnmatch.fnmatchcase(q, pattern)
-    return q == pattern or q.startswith(pattern + ".") or q.startswith(pattern + "/")
+    return q == pattern or q.startswith((pattern + ".", pattern + "/", pattern + "::"))  # :: for Rust
 
 
 def unit_of(q: str, path: str | None, pattern: str) -> str | None:
@@ -65,17 +65,21 @@ def unit_of(q: str, path: str | None, pattern: str) -> str | None:
     if not matches(q, path, pattern):
         return None
     p = pattern.strip()
-    if p.endswith(".*") and "/" not in p and not _is_glob(p[:-2]):
+    if p.endswith("::*") and not _is_glob(p[:-3]):  # Rust: crate::module::*
+        prefix, key, sep = p[:-3], q, "::"
+    elif p.endswith(".*") and "/" not in p and not _is_glob(p[:-2]):
         prefix, key, sep = p[:-2], q, "."
     elif p.endswith(("/*", "/**")) and not _is_glob(p.rstrip("*").rstrip("/")):
         prefix, key, sep = p.rstrip("*").rstrip("/").lstrip("/"), path or "", "/"
     else:
         return p
-    rest = key[len(prefix) + 1:] if key.startswith(prefix + sep) else ""
+    rest = key[len(prefix) + len(sep):] if key.startswith(prefix + sep) else ""
     return prefix + sep + rest.split(sep)[0] if rest else None
 
 
 def _join(container: str, layer: str) -> str:
+    if "::" in container:
+        return f"{container}::{layer}"
     return f"{container.rstrip('/')}/{layer}" if "/" in container else f"{container}.{layer}"
 
 
@@ -525,11 +529,11 @@ def suggest_layers(snapshot: RepositorySnapshot) -> str:
     names = {nid: g.name(nid) for nid in g.modules()}
 
     def parts(q: str) -> list[str]:
-        return q.split("/") if "/" in q else q.split(".")
+        return q.split("/") if "/" in q else (q.split("::") if "::" in q else q.split("."))
 
     groups: dict[str, str] = {}
     for depth in (1, 2, 3, 4):
-        groups = {nid: ("/" if "/" in q else ".").join(parts(q)[:depth]) for nid, q in names.items()
+        groups = {nid: ("/" if "/" in q else "::" if "::" in q else ".").join(parts(q)[:depth]) for nid, q in names.items()
                   if len(parts(q)) > depth}
         if len(set(groups.values())) >= 3:
             break

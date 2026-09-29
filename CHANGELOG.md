@@ -29,6 +29,16 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   with signatures; `static Main` and top-level statements are entry points.
   Namespace folders are named by their namespace. eShopOnWeb (254 files) takes
   0.3 s, Newtonsoft.Json (950 files) 1.6 s.
+- **Rust dependencies** (part of [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26)).
+  A `rust` analyzer rebuilds each crate's module tree from `mod` declarations
+  (`#[path]`, inline modules, modules declared inside `cfg_*!` macros, crate
+  roots from `Cargo.toml` targets) and resolves `use` trees and paths in code
+  down it (`crate`, `self`, `super`, workspace crates, renamed path
+  dependencies). External crates map to `Cargo.toml` dependencies. Functions,
+  types, traits and `impl` methods are symbols with signatures; `fn main` of a
+  binary is an entry point; `mod x;` without a file is a broken import.
+  Architecture contracts accept Rust paths (`shop_core::orders`,
+  `crate::module::*`). ripgrep (110 files) takes 0.5 s, tokio (807 files) 1.2 s.
 - **Standing guidance that persists across waves** ([#20](https://github.com/phillipecardenuto/repo-understanding/issues/20)).
   - `repoviz guidance add SELECTOR TEXT [--kind rule|context|frozen]` records
     advice on a component (`component:storage`), a path glob

@@ -600,6 +600,142 @@ def test_csharp_symbols_and_signatures(make_repo) -> None:
     assert "Shop.Core.Orders.OrderService.State" in syms
 
 
+# --------------------------------------------------------------------------- Rust
+
+RUST_APP = {
+    "Cargo.toml": '[workspace]\nmembers = ["shop", "util"]\n',
+    "shop/Cargo.toml": """[package]
+name = "shop-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shop-util = { path = "../util", package = "util" }
+
+[[bin]]
+name = "shopd"
+path = "daemon/main.rs"
+""",
+    "util/Cargo.toml": '[package]\nname = "util"\nversion = "0.1.0"\n',
+    "util/src/lib.rs": "pub fn slug(s: &str) -> String { s.to_lowercase() }\n",
+    "shop/src/lib.rs": """//! Shop. `use crate::fake::Thing;` in a doc comment
+pub mod orders;
+mod db;
+#[path = "config_impl.rs"]
+pub mod config;
+pub(crate) mod money {
+    pub fn cents(x: u64) -> u64 { x * 100 }
+    pub mod fmt;
+}
+cfg_feature! {
+    pub mod extra;
+}
+#[cfg(windows)]
+mod windows_only;
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub use orders::Order;
+
+#[derive(Serialize, Deserialize)]
+pub struct Shop { pub orders: HashMap<u64, Order> }
+
+impl Shop {
+    pub fn new() -> Self { Shop { orders: HashMap::new() } }
+    fn secret(&self) -> &'static str { "use crate::db::Ghost;" }
+    pub fn total(&self) -> u64 { money::cents(self.orders.len() as u64) }
+}
+
+impl std::fmt::Display for Shop {
+    fn fmt<'a>(&'a self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", 'x') }
+}
+""",
+    "shop/src/orders/mod.rs": """mod store;
+use super::db;
+use crate::config::Settings;
+pub use self::store::Store;
+
+#[derive(Debug, Clone)]
+pub struct Order { pub id: u64, pub buf: [u8; 4] }
+
+pub trait Priced {
+    fn price(&self) -> u64;
+    fn label(&self) -> String { String::from("x") }
+}
+
+pub fn load(id: u64) -> Option<Order> { db::get(id).map(|b| Order { id, buf: b }) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn loads() { assert!(load(1).is_none()); }
+}
+""",
+    "shop/src/orders/store.rs": """use crate::{db, money::fmt::render};
+pub struct Store;
+impl Store { pub fn save(&self) -> String { let _ = db::get(1); render(1) } }
+""",
+    "shop/src/db.rs": "pub(crate) fn get(_id: u64) -> Option<[u8; 4]> { None }\n",
+    "shop/src/config_impl.rs":
+        "pub struct Settings { pub name: String }\npub fn dump(s: &Settings) -> String { serde_json::to_string(&s.name).unwrap() }\n",
+    "shop/src/money/fmt.rs": "pub fn render(c: u64) -> String { shop_util::slug(&c.to_string()) }\n",
+    "shop/src/extra.rs": "pub fn more() -> u8 { 1 }\n",
+    "shop/daemon/main.rs": "use shop_core::orders::load;\nfn main() { let _ = load(1); let _ = shop_core::Shop::new(); }\n",
+    "shop/tests/it.rs": "use shop_core::Shop;\n#[test]\nfn works() { assert_eq!(Shop::new().total(), 0); }\n",
+}
+
+
+def test_rust_module_tree_and_paths(make_repo) -> None:
+    repo = make_repo(RUST_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    mods = {n.path: n.qualified_name for n in snap.modules if n.language == "rust"}
+    # the module tree: mod x; files, #[path], inline modules, a module declared inside a macro, a [[bin]] path
+    assert mods["shop/src/orders/store.rs"] == "shop_core::orders::store"
+    assert mods["shop/src/config_impl.rs"] == "shop_core::config"
+    assert mods["shop/src/money/fmt.rs"] == "shop_core::money::fmt"
+    assert mods["shop/src/extra.rs"] == "shop_core::extra"
+    assert snap.find(path="shop/daemon/main.rs").metadata["entry_kind"] == "rust binary"
+    # use trees and paths, resolved down the tree: crate::, super::, self::, groups, a renamed workspace crate
+    assert imports[("shop_core::orders", "shop_core::db")].evidence[0].construct == "use"  # use super::db
+    assert ("shop_core::orders", "shop_core::config") in imports  # use crate::config::Settings (#[path])
+    assert ("shop_core::orders", "shop_core::orders::store") in imports  # pub use self::store::Store
+    assert ("shop_core::orders::store", "shop_core::money::fmt") in imports  # use crate::{db, money::fmt::render}
+    assert ("shop_core::orders::store", "shop_core::db") in imports
+    assert imports[("shop_core::money::fmt", "util")].evidence[0].construct == "path"  # shop_util:: → package util
+    assert ("shopd", "shop_core::orders") in imports and ("shopd", "shop_core") in imports  # a binary uses the lib
+    assert ("it", "shop_core") in imports and "test" in snap.find(path="shop/tests/it.rs").tags
+    # externals: declared crates, std; nothing from comments or strings
+    assert ("shop_core", "serde") in imports and "stdlib" in snap.find(qualified_name="std").tags
+    assert ("shop_core::config", "serde_json") in imports  # a path in code, no use
+    assert not any("fake" in t or "Ghost" in t for (_s, t) in imports)
+    # `mod x;` without a file is a broken import, unless a cfg attribute builds it on other platforms only
+    assert not [d for d in snap.diagnostics if d.code == "unresolved-internal-import"]
+    repo.write({"shop/src/lib.rs": RUST_APP["shop/src/lib.rs"].replace("mod db;", "mod db;\nmod ledger;")})
+    broken = [d for d in Repository(repo.path).snapshot("WORKTREE").diagnostics if d.code == "unresolved-internal-import"]
+    assert [(d.path, d.line) for d in broken] == [("shop/src/lib.rs", 4)] and "ledger.rs" in broken[0].message
+
+
+def test_rust_symbols_lifetimes_and_impls(make_repo) -> None:
+    repo = make_repo(RUST_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    syms = {n.qualified_name: n for n in snap.symbols if n.language == "rust"}
+    assert syms["shop_core::Shop::new"].metadata["signature"] == "() -> Self"
+    assert syms["shop_core::Shop::secret"].metadata["public"] is False
+    fmt = syms["shop_core::<Shop as Display>::fmt"]  # lifetimes ('a, '_) and a char literal stay intact
+    assert fmt.metadata["signature"] == "(&'a self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result"
+    assert syms["shop_core::db::get"].metadata["signature"] == "(_id: u64) -> Option<[u8; 4]>"
+    assert syms["shop_core::db::get"].metadata["public"] is False  # pub(crate)
+    assert syms["shop_core::orders::Priced::price"].component_type == "method"
+    assert syms["shop_core::orders::Order"].metadata["kind"] == "struct"
+    assert syms["shop_core::money::cents"].start_line == 7
+    assert "shop_core::orders::tests::loads" in syms
+
+
 # --------------------------------------------------------------------------- pipeline
 
 

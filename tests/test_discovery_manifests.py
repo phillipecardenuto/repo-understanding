@@ -64,7 +64,7 @@ def test_polyglot_discovery(make_repo) -> None:
     prof = Repository(repo.path).discover()
     langs = {l["language"]: l for l in prof.languages}
     assert langs["python"]["supported"] and langs["typescript"]["supported"] and langs["go"]["supported"]
-    assert not langs["haskell"]["supported"] and not langs["rust"]["supported"]
+    assert not langs["haskell"]["supported"] and langs["rust"]["supported"]  # Rust has an analyzer since #26
     codes = {d.code for d in prof.diagnostics}
     assert "unsupported-language" in codes
     projects = {p["path"]: p for p in prof.projects}
