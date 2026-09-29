@@ -1683,9 +1683,10 @@ def _graph_findings(add: Any, diff: RepositoryDiff, base: RepositorySnapshot, ta
             if not _package_dependency_exists(base, src_pkg, dst_pkg):
                 t_index = t_index if t_index is not None else target.node_index()
 
-                def label(folder: str) -> str:  # a Java / Kotlin package by its name, not its long folder path
+                def label(folder: str) -> str:  # a Java package or C# namespace by its name, not its folder path
                     n = t_index.get(make_id("dir", f"path:dir:{folder}"))
-                    return n.metadata["jvm_package"] if n is not None and n.metadata.get("jvm_package") else folder
+                    meta = n.metadata if n is not None else {}
+                    return meta.get("jvm_package") or meta.get("dotnet_namespace") or folder
 
                 add(Finding("new-package-dependency", "architecture", "low", "New dependency between packages",
                             f"{label(src_pkg)} now depends on {label(dst_pkg)} ({dep['source']} → {dep['target']})",

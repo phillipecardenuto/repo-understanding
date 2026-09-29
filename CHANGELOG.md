@@ -19,6 +19,16 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
   package (`com.acme.shop.core`), also in *New dependency between packages*.
   Snapshots: commons-lang (628 files) 1.9 s cold, 1.1 s from the parse cache;
   Guava (3,268 files, 21,000 internal edges) about 10 s.
+- **C# dependencies** (part of [#26](https://github.com/phillipecardenuto/repo-understanding/issues/26)).
+  A `dotnet` analyzer follows C# name lookup: `using` directives link only the
+  types (or extension methods) a file uses, a file sees its own and enclosing
+  namespaces and its project's `global using`s, `using static` and aliases link
+  the type's file, and `[Audited]` is `AuditedAttribute`. External namespaces
+  map to the referenced NuGet packages; framework namespaces are standard.
+  Classes, structs, records, delegates, methods and constructors are symbols
+  with signatures; `static Main` and top-level statements are entry points.
+  Namespace folders are named by their namespace. eShopOnWeb (254 files) takes
+  0.3 s, Newtonsoft.Json (950 files) 1.6 s.
 - **Standing guidance that persists across waves** ([#20](https://github.com/phillipecardenuto/repo-understanding/issues/20)).
   - `repoviz guidance add SELECTOR TEXT [--kind rule|context|frozen]` records
     advice on a component (`component:storage`), a path glob

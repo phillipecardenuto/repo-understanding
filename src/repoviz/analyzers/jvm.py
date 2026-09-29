@@ -31,7 +31,7 @@ from ..ids import stable_hash
 from ..model import CATEGORY_MODULE, CATEGORY_SYMBOL, REL_IMPORTS, ComponentNode
 from .base import (CAP_DEPENDENCIES, CAP_ENTRY_POINTS, CAP_MODULES, CAP_SYMBOLS, AnalysisContext, Analyzer,
                    Detection, SnapshotBuilder, parse_parallel)
-from .textscan import LineIndex, mask_pair, match_open, squash, top_level
+from .textscan import LineIndex, mask_pair, match_open, package_roots as _roots, squash, top_level
 
 LANGS = ("java", "kotlin")
 MAX_SYMBOLS = 2000  # per file
@@ -300,6 +300,8 @@ def _declarations(scan: _Scan) -> None:
 
 def parse_jvm(text: str, lang: str) -> dict[str, Any]:
     """Everything the analyzer needs from one Java or Kotlin file, as plain JSON."""
+    if text.startswith("\ufeff"):  # a byte-order mark: a blank, so the package line still starts its line
+        text = " " + text[1:]
     code, noc = mask_pair(text)
     lines = LineIndex(text)
     pkg = _PACKAGE.search(code)
@@ -418,30 +420,9 @@ def _import_package(name: str, star: bool) -> str:
     return ".".join(parts[:-1]) or name
 
 
-def _roots(packages: Any) -> set[str]:
-    """The repository's own package roots: per first three segments, the longest prefix all its packages share
-    (``org.apache.commons.lang3`` for commons-lang, so ``org.apache.commons.io`` stays external; Guava's
-    ``com.google.common`` and ``com.google.thirdparty…`` leave ``com.google.errorprone`` external)."""
-    groups: dict[str, list[list[str]]] = {}
-    for p in packages:
-        segs = p.split(".")
-        if len(segs) >= 2:
-            groups.setdefault(".".join(segs[:3]), []).append(segs)
-    out = set()
-    for members in groups.values():
-        common = members[0]
-        for segs in members[1:]:
-            n = 0
-            while n < min(len(common), len(segs)) and common[n] == segs[n]:
-                n += 1
-            common = common[:n]
-        out.add(".".join(common))
-    return out
-
-
 class JvmAnalyzer(Analyzer):
     name = "jvm"
-    version = "1"  # bump when the parse result or the graph changes (part of the cache keys)
+    version = "2"  # bump when the parse result or the graph changes (part of the cache keys)
     languages = LANGS
     capabilities = (CAP_MODULES, CAP_SYMBOLS, CAP_DEPENDENCIES, CAP_ENTRY_POINTS)
 

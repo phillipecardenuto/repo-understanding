@@ -454,6 +454,152 @@ def test_jvm_parse_cache_round_trip(make_repo) -> None:
     assert sorted(n.id for n in first.symbols) == sorted(n.id for n in again.symbols)
 
 
+# --------------------------------------------------------------------------- C#
+
+CS_APP = {
+    "src/Shop.Web/Shop.Web.csproj": """<Project Sdk="Microsoft.NET.Sdk.Web"><ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Serilog" Version="3.1.1" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.0" />
+  </ItemGroup><ItemGroup><ProjectReference Include="..\\Shop.Core\\Shop.Core.csproj" /></ItemGroup></Project>
+""",
+    "src/Shop.Core/Shop.Core.csproj": '<Project Sdk="Microsoft.NET.Sdk"></Project>\n',
+    "tests/Shop.Tests/Shop.Tests.csproj":
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="xunit" Version="2.6.0" /></ItemGroup></Project>\n',
+    "src/Shop.Web/GlobalUsings.cs": "global using Shop.Core.Orders;\nglobal using System.Text.Json;\n",
+    "src/Shop.Web/Program.cs": """\ufeffusing Shop.Core.Extensions;
+using Shop.Web.Controllers;
+using Serilog;
+
+var builder = WebApplication.CreateBuilder(args);
+Log.Logger = new LoggerConfiguration().CreateLogger();
+builder.Services.AddShopCore();
+builder.Build().Run();
+""",
+    "src/Shop.Web/Controllers/OrdersController.cs": """using Microsoft.AspNetCore.Mvc;
+using Newtonsoft.Json.Linq;
+using static Shop.Core.Orders.OrderMath;
+using Svc = Shop.Core.Orders.OrderService;
+// using Shop.Core.Unused;
+
+namespace Shop.Web.Controllers;
+
+/// <summary>Orders: Unused. "using Shop.Fake;"</summary>
+[ApiController]
+[Route("api/[controller]")]
+public class OrdersController : ControllerBase
+{
+    private readonly Svc _service = new Svc();
+    private const string Note = @"C:\\path\\ with ""quotes"" and Unused";
+
+    public OrdersController() : base() { }
+
+    [HttpGet("{id}")]
+    [Audited]
+    public ActionResult<Order> Get(int id) => _service.Find(id);
+
+    [HttpGet]
+    public async Task<IEnumerable<Order>> List(int page, string? filter = null)
+    {
+        await Task.Yield();
+        return new List<Order> { new Order(Total(1, 2), "x") };
+    }
+
+    public (int Count, string Name) Stats() { return (1, "a"); }
+
+    public IEnumerable<Order> List(int page) { return List(page, null).Result; }
+
+    private static T Max<T>(T a, T b) where T : IComparable<T> => a.CompareTo(b) > 0 ? a : b;
+}
+""",
+    "src/Shop.Web/Controllers/AuditedAttribute.cs":
+        "namespace Shop.Web.Controllers\n{\n    public sealed class AuditedAttribute : System.Attribute { }\n}\n",
+    "src/Shop.Core/Orders/Order.cs":
+        "namespace Shop.Core.Orders;\n\npublic record Order(int Total, string Id);\n\npublic delegate void OrderPlaced(Order order);\n",
+    "src/Shop.Core/Orders/OrderService.cs": """namespace Shop.Core.Orders
+{
+    using Shop.Core.Generated;
+
+    public partial class OrderService
+    {
+        public Order Find(int id) => new Order(id, "a");
+        public int Count { get; set; }
+        public string Name { get; set; }
+        internal interface IListener { void OnOrder(Order o); }
+        public enum State { New, Paid }
+    }
+}
+""",
+    "src/Shop.Core/Orders/OrderMath.cs":
+        "namespace Shop.Core.Orders;\npublic static class OrderMath { public static int Total(int a, int b) => a + b; }\n",
+    "src/Shop.Core/Name.cs": "namespace Shop.Core;\npublic class Name { }\n",
+    "src/Shop.Core/Extensions/ServiceCollectionExtensions.cs": """using Microsoft.Extensions.DependencyInjection;
+namespace Shop.Core.Extensions;
+
+public static class ServiceCollectionExtensions
+{
+    public static IServiceCollection AddShopCore(this IServiceCollection services) => services;
+}
+""",
+    "src/Shop.Core/Unused.cs": "namespace Shop.Core;\ninternal class Unused { }\n",
+    "tests/Shop.Tests/OrderServiceTests.cs": """using Xunit;
+using Shop.Core.Orders;
+namespace Shop.Tests;
+public class OrderServiceTests { [Fact] public void Finds() { Assert.NotNull(new OrderService().Find(1)); } }
+""",
+}
+
+
+def test_csharp_usings_resolve_like_the_compiler(make_repo) -> None:
+    repo = make_repo(CS_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    imports = edges_by_name(snap)
+    ctl = "Shop.Web.Controllers.OrdersController"
+    got = {t: e for (s, t), e in imports.items() if s == ctl}
+    assert got["Shop.Core.Orders.OrderMath"].evidence[0].construct == "using-static"
+    assert got["Shop.Core.Orders.OrderService"].evidence[0].construct == "using-alias"
+    # a global using of the project, with the evidence in the file that declares it
+    order = got["Shop.Core.Orders.Order"]
+    assert order.evidence[0].construct == "global-using" and order.evidence[0].path.endswith("GlobalUsings.cs")
+    assert got["Shop.Web.Controllers.AuditedAttribute"].metadata["same_package"]  # [Audited]
+    assert "Shop.Core.Unused" not in got  # only in comments and strings
+    # externals: the NuGet package whose id is the namespace's prefix; framework namespaces are standard
+    assert "Newtonsoft.Json" in got and "stdlib" in snap.find(qualified_name="Microsoft.AspNetCore").tags
+    program = {t: e for (s, t), e in imports.items() if s == "Program"}
+    assert "Serilog" in program and "Serilog.Sinks.Console" not in program  # a BOM before the first using
+    ext = program["Shop.Core.Extensions.ServiceCollectionExtensions"]  # an extension method it calls
+    assert ext.evidence[0].construct == "extension-method"
+    assert "Shop.Web.Controllers.OrdersController" not in program  # a using whose types it does not use
+    assert ("Shop.Tests.OrderServiceTests", "xunit") in imports
+    assert ("GlobalUsings", "System.Text.Json") in imports  # the declared package, not the framework's System.Text
+    # a property called like a type is not a use of it; the generated-looking namespace is not an error
+    assert ("Shop.Core.Orders.OrderService", "Shop.Core.Name") not in imports
+    assert ("Shop.Core.Orders.OrderService", "Shop.Core.Orders.Order") in imports  # same namespace
+    assert not [d for d in snap.diagnostics if d.code == "unresolved-internal-import"]
+    assert snap.find(path="src/Shop.Core/Orders").qualified_name == "Shop.Core.Orders"
+    assert snap.find(path="src/Shop.Web/Program.cs").metadata["entry_kind"] == "top-level statements"
+
+
+def test_csharp_symbols_and_signatures(make_repo) -> None:
+    repo = make_repo(CS_APP)
+    snap = Repository(repo.path).snapshot("HEAD")
+    syms = {n.qualified_name: n for n in snap.symbols if n.language == "csharp"}
+    ctl = "Shop.Web.Controllers.OrdersController"
+    assert syms[f"{ctl}.Get"].metadata["signature"] == "(int id) -> ActionResult<Order>"
+    assert (syms[f"{ctl}.Get"].start_line, syms[f"{ctl}.Get"].end_line) == (19, 21)  # attributes included
+    assert syms[f"{ctl}.List(int, string?)"].end_line == 28 and f"{ctl}.List(int)" in syms  # overloads
+    assert syms[f"{ctl}.Stats"].metadata["signature"] == "() -> (int Count, string Name)"
+    assert syms[f"{ctl}.OrdersController"].metadata["kind"] == "constructor"
+    assert syms[f"{ctl}.Max"].metadata["public"] is False
+    assert syms["Shop.Core.Orders.Order"].metadata["kind"] == "record"
+    assert syms["Shop.Core.Orders.OrderPlaced"].metadata["kind"] == "delegate"
+    assert syms["Shop.Core.Orders.OrderService.IListener"].metadata["public"] is False  # internal
+    assert syms["Shop.Core.Extensions.ServiceCollectionExtensions.AddShopCore"].metadata["extension_method"]
+    assert not {"Shop.Core.Orders.OrderService.Count", "Shop.Core.Orders.OrderService.Name"} & syms.keys()  # properties
+    assert "Shop.Core.Orders.OrderService.State" in syms
+
+
 # --------------------------------------------------------------------------- pipeline
 
 

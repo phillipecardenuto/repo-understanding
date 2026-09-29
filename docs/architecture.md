@@ -96,6 +96,7 @@ and the manifest analyzer's entry points are linked to Python callables.
 | `javascript` | – | modules, symbols + call index, dependencies |
 | `go` | – | modules, symbols, dependencies |
 | `jvm` | – | modules (Java and Kotlin; package folders), symbols, entry points, dependencies (imports, same-package uses, fully qualified names; externals mapped to Maven/Gradle artifacts). See [below](#java-and-kotlin) |
+| `dotnet` | – | modules (C#; namespace folders), symbols, entry points, dependencies (usings resolved to the types used, enclosing namespaces, global usings, extension methods; externals mapped to NuGet packages). See [below](#c) |
 | `runtime` | – | calls: containers the code starts and services it calls (`invokes-container`, `talks-to`); finalize: their service-to-service copies |
 | `interfaces` | – | calls: HTTP routes, background tasks and environment variables, and the code that calls, enqueues or reads them |
 | `callflow` | – | calls: resolves raw call sites and entry-point targets |
@@ -146,6 +147,51 @@ nesting), so it never needs a JDK or a build.
   `unwired-module` check (frameworks load Java classes by annotation), and Kotlin
   type aliases are not resolved. Build scripts (`build.gradle.kts`) are
   configuration, not modules.
+
+### C#
+
+The `dotnet` analyzer works like the `jvm` one (text only, comments and string
+contents blanked, including verbatim `@"…"` and raw `"""…"""` strings), with the
+rules of C# name lookup:
+
+- **Modules.** One per `.cs` file: namespace + file name
+  (`Shop.Web.Controllers.OrdersController`). File-scoped (`namespace X;`) and
+  block namespaces, nested ones included. A folder whose files declare one
+  namespace becomes a `package` node with that name.
+- **What a file sees.** Its own namespaces and every enclosing one
+  (`Shop.Web.Controllers` sees `Shop.Web` and `Shop`), its `using` directives,
+  and the `global using` directives of its project (the nearest `.csproj`).
+  `using A.B;` names a namespace, so an edge goes to the files of the types of
+  `A.B` the file uses (construct `using`, evidence on the using line;
+  `global-using` with the evidence in the file declaring it), or, when a
+  static class of `A.B` declares extension methods the file calls
+  (`services.AddShopCore()`), to that file (`extension-method`). Types of the
+  own and enclosing namespaces are `same-namespace` (`same_package: true`).
+  `using static A.B.C;` and `using X = A.B.C;` link the file of `C`. An
+  attribute `[Audited]` is the type `AuditedAttribute`.
+- **PascalCase members.** A property or method named like a type (`public
+  string Name { get; set; }`) is not a use of the type `Name`, unless the name
+  also stands where only a type can (`new Name(…)`, `Name x`, `Name?`,
+  `<Name>`, `typeof(Name)`, `is` / `as`, a base list, a cast, an attribute).
+- **External namespaces.** The NuGet package whose id is the namespace or its
+  longest prefix (`Newtonsoft.Json` for `Newtonsoft.Json.Linq`, `xunit` for
+  `Xunit`); else framework namespaces (`System`, `Microsoft.Extensions`,
+  `Microsoft.AspNetCore`, `Microsoft.CSharp`, `Microsoft.Win32`…) are standard,
+  named by their first two segments; else a package whose id starts with the
+  namespace (`Microsoft.EntityFrameworkCore` from
+  `Microsoft.EntityFrameworkCore.SqlServer`); else the first two segments.
+  A `using` of a namespace under the repository's own root that nothing
+  declares (generated gRPC or resource code) is counted, not reported: C#
+  has no broken-import diagnostic here.
+- **Symbols.** Classes, structs, interfaces, enums, records and delegates
+  (nested too), methods and constructors, expression-bodied ones included,
+  with a signature (`(int id) -> ActionResult<Order>`) and `public` (`public`
+  or `protected`; members of interfaces). Overloads carry their parameter
+  types. Properties, fields, events, operators and local functions are not
+  symbols. Entry points: `static Main` and top-level statements.
+
+A byte-order mark at the start of a file (common in Visual Studio projects)
+counts as a blank, for C#, Java and Kotlin alike.
 
 ### Python imports through `sys.path` edits
 

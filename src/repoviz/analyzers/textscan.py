@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import bisect
 import re
-from typing import Pattern
+from typing import Iterable, Pattern
 
 #: Java and Kotlin: line and block comments, text blocks / raw strings, strings and characters.
 JVM_TOKENS = re.compile(r'//[^\n]*|/\*.*?(?:\*/|\Z)|""".*?(?:"""|\Z)|"(?:\\.|[^"\\\n])*"?|\'(?:\\.|[^\'\\\n])*\'?',
@@ -104,3 +104,24 @@ def top_level(text: str, chars: str = ",=") -> bool:
 def squash(text: str) -> str:
     """Whitespace runs as one space (for signatures and semantic fingerprints)."""
     return " ".join(text.split())
+
+
+def package_roots(packages: Iterable[str]) -> set[str]:
+    """The repository's own package roots: per first three segments, the longest prefix all its packages share
+    (``org.apache.commons.lang3`` for commons-lang, so ``org.apache.commons.io`` stays external; Guava's
+    ``com.google.common`` and ``com.google.thirdparty…`` leave ``com.google.errorprone`` external)."""
+    groups: dict[str, list[list[str]]] = {}
+    for p in packages:
+        segs = p.split(".")
+        if len(segs) >= 2:
+            groups.setdefault(".".join(segs[:3]), []).append(segs)
+    out = set()
+    for members in groups.values():
+        common = members[0]
+        for segs in members[1:]:
+            n = 0
+            while n < min(len(common), len(segs)) and common[n] == segs[n]:
+                n += 1
+            common = common[:n]
+        out.add(".".join(common))
+    return out

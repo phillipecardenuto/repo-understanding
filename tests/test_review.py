@@ -2257,3 +2257,28 @@ def test_java_changes_get_the_same_review_signals(make_repo) -> None:
     money = next(f for f in report["files"] if f["path"].endswith("Money.java"))
     fmt = next(k for k in money["symbols"] if k["name"] == "format")
     assert (fmt["signature_before"], fmt["signature"]) == ("(long c) -> String", "(long c, String cur) -> String")
+
+
+def test_csharp_changes_get_the_same_review_signals(make_repo) -> None:
+    from test_analyzers import CS_APP
+
+    repo = make_repo({**CS_APP, ".repoviz.toml": '[[contracts]]\nname = "Core below Web"\ntype = "layers"\n'
+                      'layers = ["Shop.Web", "Shop.Core"]\n'})
+    repo.write({
+        # Core reaches up into Web (a layer violation), and Web already uses Core: a new cycle
+        "src/Shop.Core/Orders/OrderMath.cs": "using Shop.Web.Controllers;\nnamespace Shop.Core.Orders;\n"
+                                             "public static class OrderMath {\n    public static int Total(int a, int b, "
+                                             "int c) => a + b + c;\n    static AuditedAttribute? Tag() => null;\n}\n",
+    })
+    repo.delete("src/Shop.Core/Orders/Order.cs")
+    r = Repository(repo.path)
+    report = build_review(r, resolve_target(r, "all"))
+    kinds = {(f["kind"], f["path"].rsplit("/", 1)[-1]) for f in report["findings"] if f.get("path")}
+    assert ("contract-broken", "OrderMath.cs") in kinds
+    assert ("public-api-removed", "Order.cs") in kinds
+    assert any(f["kind"] == "new-cycle" for f in report["findings"])
+    pkg = sorted(f["detail"].split(" (")[0] for f in report["findings"] if f["kind"] == "new-package-dependency")
+    assert "Shop.Core.Orders now depends on Shop.Web.Controllers" in pkg  # namespaces, not folder paths
+    math = next(f for f in report["files"] if f["path"].endswith("OrderMath.cs"))
+    total = next(k for k in math["symbols"] if k["name"] == "Total")
+    assert (total["signature_before"], total["signature"]) == ("(int a, int b) -> int", "(int a, int b, int c) -> int")
