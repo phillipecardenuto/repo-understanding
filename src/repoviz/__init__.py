@@ -13,7 +13,7 @@ The package is organised in layers:
   small local API for the live web application.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 #: Version of the JSON data model emitted by snapshots, diffs and reports.
 SCHEMA_VERSION = 1

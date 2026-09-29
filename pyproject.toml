@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repoviz"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only repository architecture, change, and activity visualizer built on Mermaid diagrams"
 readme = "README.md"
 requires-python = ">=3.10"

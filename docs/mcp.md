@@ -110,7 +110,7 @@ contract (`app.routes` → `app.services` → `app.models`) and a protected
 
 ```text
 → {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude-code","version":"2"}}}
-← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"repoviz","version":"0.1.0"},"instructions":"repoviz knows this repository's architecture…"}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"repoviz","version":"0.2.0"},"instructions":"repoviz knows this repository's architecture…"}}
 → {"jsonrpc":"2.0","method":"notifications/initialized"}
 → {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"where_does_this_go","arguments":{"target":"app/services/refunds.py"}}}
 ```

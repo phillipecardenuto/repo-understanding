@@ -4,6 +4,30 @@ All notable changes to repoviz. Versions follow [semantic versioning](https://se
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
+The whole feature wishlist (35 items) is in. Highlights:
+
+- **Supervise agents more closely**: review a wave commit by commit, a
+  checkpoint timeline inside a wave, plan vs actual, a verdict that
+  `repoviz review --wait` and `repoviz gate` hand back to the agent, parallel
+  agents in Git worktrees and their overlaps, standing guidance that carries
+  over to later waves, and a read-only MCP server for coding agents.
+- **Richer review signals**: renames and moves, moved code and changed words
+  in the diffs, new code that is not wired in, files that usually change
+  together, an explainable risk score, constants and settings before → after,
+  third-party dependency changes with supply-chain signals, coverage of the
+  changed lines, and cross-service contracts (routes, tasks, environment
+  variables).
+- **More languages**: Java, Kotlin, C#, Rust, PHP, Ruby, C and C++, next to
+  Python, JavaScript / TypeScript and Go.
+- **Architecture over time and at scale**: architecture contracts with a
+  baseline, CI outputs (SARIF, annotations, a pull-request comment), drift
+  over tags, dates or waves, health metrics and hotspots, a system view from
+  docker-compose, submodules as sub-projects, "why does A depend on B?" and
+  blast radius, and diagrams and lists that stay readable on large
+  repositories, with a persistent parse cache.
+
 ### Added
 
 - **Moved code and changed words in the diffs** ([#33](https://github.com/phillipecardenuto/repo-understanding/issues/33)).
@@ -870,5 +894,6 @@ and to supervise AI coding agents feature by feature.
 - **Speed.** Caches are single-flight, activity polls get ETag/304 answers and
   API payloads are compact. On Django, a cached page load takes about 0.5 s.
 
-[Unreleased]: https://github.com/phillipecardenuto/repo-understanding/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/phillipecardenuto/repo-understanding/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/phillipecardenuto/repo-understanding/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/phillipecardenuto/repo-understanding/releases/tag/v0.1.0

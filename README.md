@@ -54,7 +54,7 @@ links to its section.
 
 Released versions are listed in [CHANGELOG.md](CHANGELOG.md). Each release attaches
 a wheel you can install directly, for example
-`pipx install https://github.com/phillipecardenuto/repo-understanding/releases/download/v0.1.0/repoviz-0.1.0-py3-none-any.whl`.
+`pipx install https://github.com/phillipecardenuto/repo-understanding/releases/download/v0.2.0/repoviz-0.2.0-py3-none-any.whl`.
 
 To run without installing, use `PYTHONPATH=src python -m repoviz …` from a checkout.
 On a machine without network access, use `pip install --no-build-isolation .`
